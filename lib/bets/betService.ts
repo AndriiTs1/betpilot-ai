@@ -3,15 +3,25 @@ import { handleIncomingBet } from "@/lib/whatsapp/betHandler";
 import { checkBalance } from "@/lib/wallet/balance";
 import { createTransaction } from "@/lib/wallet/transaction";
 
-export function processBet(message: Message) {
+export async function processBet(message: Message) {
   // 1. Получаем и анализируем ставку
-  const result = handleIncomingBet(message);
+  const result = await handleIncomingBet(message);
 
   const { bet, oddsCheck } = result;
 
-  // 2. Проверяем коэффициент
+  // 1a. AI не смогла распознать ставку в сообщении
 
-  if (!oddsCheck.isValid) {
+  if (!bet.valid) {
+    return {
+      status: "PARSE_FAILED",
+
+      error: bet.error,
+    };
+  }
+
+  // 2. Проверяем коэффициент (если игрок его указал)
+
+  if (oddsCheck && !oddsCheck.isValid) {
     return {
       status: "ODDS_CHANGED",
 
@@ -51,6 +61,8 @@ export function processBet(message: Message) {
     status: "WAITING_CONFIRMATION",
 
     bet,
+
+    oddsCheck,
 
     transaction,
   };
