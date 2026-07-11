@@ -18,7 +18,15 @@ export async function handleIncomingBet(message: Message) {
 
   // Player didn't mention odds — nothing to compare yet, verification
   // happens once odds are confirmed elsewhere.
-  const oddsCheck = bet.odds !== null ? verifyOdds(bet.odds) : null;
+  const oddsCheck =
+    bet.odds !== null
+      ? await verifyOdds({
+          sport: bet.sport,
+          event: bet.event,
+          selection: bet.selection,
+          odds: bet.odds,
+        })
+      : null;
 
   return {
     received,

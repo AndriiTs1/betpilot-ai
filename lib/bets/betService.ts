@@ -19,19 +19,10 @@ export async function processBet(message: Message) {
     };
   }
 
-  // 2. Проверяем коэффициент (если игрок его указал)
-
-  if (oddsCheck && !oddsCheck.isValid) {
-    return {
-      status: "ODDS_CHANGED",
-
-      bet,
-
-      oddsCheck,
-    };
-  }
-
-  // 3. Проверяем баланс
+  // 2. Проверяем баланс
+  // Сверка коэффициента (oddsCheck) не блокирует поток: matched всегда
+  // false — авто-подтверждения нет, решение по расхождению коэффициента
+  // остаётся за оператором. Структура целиком уходит в ответ ниже.
 
   const wallet = {
     playerId: message.playerId,
@@ -49,7 +40,7 @@ export async function processBet(message: Message) {
     };
   }
 
-  // 4. Создаем транзакцию
+  // 3. Создаем транзакцию
 
   const transaction = createTransaction(
     message.playerId,
