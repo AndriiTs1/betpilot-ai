@@ -1,0 +1,53 @@
+import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "@/lib/db/client";
+import { Prisma } from "@/lib/generated/prisma/client";
+import { isOperatorAuthorized } from "@/lib/auth/operatorAuth";
+import { serializeBet } from "@/lib/bets/serialize";
+
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  if (!isOperatorAuthorized(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { id } = await params;
+
+  try {
+    const existing = await prisma.bet.findUnique({ where: { id } });
+
+    if (!existing) {
+      return NextResponse.json({ error: "Bet not found" }, { status: 404 });
+    }
+
+    if (existing.status !== "PENDING") {
+      return NextResponse.json(
+        { error: `Bet is not pending (current status: ${existing.status})` },
+        { status: 409 },
+      );
+    }
+
+    let updatedBet;
+
+    try {
+      updatedBet = await prisma.bet.update({
+        where: { id, status: "PENDING" },
+        data: { status: "REJECTED" },
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+        return NextResponse.json(
+          { error: "Bet status changed concurrently and is no longer pending" },
+          { status: 409 },
+        );
+      }
+      throw err;
+    }
+
+    return NextResponse.json({ bet: serializeBet(updatedBet) });
+  } catch (err) {
+    console.error(`POST /api/bets/${id}/reject failed:`, err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
+}
