@@ -1,36 +1,45 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# BetPilot AI
+
+AI-powered WhatsApp betting assistant platform.
+
+The system receives betting requests from players via WhatsApp, uses AI to extract bet details (sport, event, selection, odds, stake), asks the operator to confirm or reject, stores the bet, and manages player USDC balances.
+
+See [`docs/MVP.md`](docs/MVP.md) for scope, [`docs/architecture/PROJECT_ARCHITECTURE.md`](docs/architecture/PROJECT_ARCHITECTURE.md) for architecture, and [`docs/domain/DOMAIN_MODEL.md`](docs/domain/DOMAIN_MODEL.md) for the domain model.
+
+## Status
+
+Phase 1 — Foundation. Dashboard UI and domain types are scaffolded; AI parsing, odds verification, and wallet logic are currently stubbed pending real database and AI integration.
+
+## Tech Stack
+
+- Next.js (App Router), TypeScript, Tailwind CSS
+- React 19
 
 ## Getting Started
 
-First, run the development server:
+Run the development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) to see the dashboard.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Project Structure
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```
+app/                     App Router pages and API routes
+  api/webhooks/whatsapp/  WhatsApp webhook endpoint
+components/
+  dashboard/             Overview stats
+  bets/                  Bet queue and confirmation UI
+  players/               Player list and profiles
+lib/
+  ai/                    Bet message parsing (stub)
+  bets/                  Bet processing orchestration
+  odds/                  Odds verification (stub)
+  wallet/                Balance and transaction logic
+  whatsapp/              Incoming message handling
+types/                   Shared domain types
+docs/                    Product, architecture, and domain docs
+```
