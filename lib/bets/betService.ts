@@ -1,7 +1,7 @@
 import { Message } from "@/types/message";
 import { handleIncomingBet } from "@/lib/whatsapp/betHandler";
-import { checkBalance } from "@/lib/wallet/balance";
-import { createTransaction } from "@/lib/wallet/transaction";
+import { prisma } from "@/lib/db/client";
+import { Prisma } from "@/lib/generated/prisma/client";
 
 export async function processBet(message: Message) {
   // 1. Получаем и анализируем ставку
@@ -19,42 +19,96 @@ export async function processBet(message: Message) {
     };
   }
 
-  // 2. Проверяем баланс
-  // Сверка коэффициента (oddsCheck) не блокирует поток: matched всегда
-  // false — авто-подтверждения нет, решение по расхождению коэффициента
-  // остаётся за оператором. Структура целиком уходит в ответ ниже.
+  // 2. Находим игрока и его кошелёк
 
-  const wallet = {
-    playerId: message.playerId,
+  let player;
 
-    balance: 1000,
-
-    currency: "USDC" as const,
-  };
-
-  const hasBalance = checkBalance(wallet, bet.stake);
-
-  if (!hasBalance) {
+  try {
+    player = await prisma.player.findUnique({
+      where: { id: message.playerId },
+      include: { wallet: true },
+    });
+  } catch (err) {
     return {
-      status: "INSUFFICIENT_BALANCE",
+      status: "DB_ERROR",
+
+      error: err instanceof Error ? err.message : "Unknown database error",
     };
   }
 
-  // 3. Создаем транзакцию
+  if (!player) {
+    return { status: "PLAYER_NOT_FOUND" };
+  }
 
-  const transaction = createTransaction(
-    message.playerId,
-    "BET_PLACED",
-    -bet.stake,
-  );
+  if (!player.wallet) {
+    return {
+      status: "DB_ERROR",
 
-  return {
-    status: "WAITING_CONFIRMATION",
+      error: `Player ${player.id} has no wallet`,
+    };
+  }
 
-    bet,
+  // 3. Проверяем баланс — сравнение через Prisma Decimal (decimal.js),
+  // без приведения к number, чтобы не терять точность.
 
-    oddsCheck,
+  const stake = new Prisma.Decimal(bet.stake);
+  const hasBalance = player.wallet.balance.gte(stake);
 
-    transaction,
-  };
+  if (!hasBalance) {
+    return { status: "INSUFFICIENT_BALANCE" };
+  }
+
+  // 4. Создаём Bet + OddsSnapshot атомарно.
+  //
+  // Баланс не списываем и Transaction (BET_STAKE) не создаём здесь: по
+  // MVP.md баланс обновляется после подтверждения оператором
+  // ("Admin Confirmation -> Bet Saved -> Balance Updated"), а не на приёме
+  // заявки — эта функция только сохраняет заявку в статусе PENDING.
+
+  try {
+    const { createdBet, createdSnapshot } = await prisma.$transaction(async (tx) => {
+      const createdBet = await tx.bet.create({
+        data: {
+          playerId: player.id,
+          sport: bet.sport,
+          event: bet.event,
+          outcome: bet.selection,
+          odds: bet.odds !== null ? new Prisma.Decimal(bet.odds) : null,
+          stake,
+          status: "PENDING",
+          rawMessage: message.text,
+        },
+      });
+
+      const createdSnapshot = oddsCheck
+        ? await tx.oddsSnapshot.create({
+            data: {
+              betId: createdBet.id,
+              sourceOdds:
+                oddsCheck.sourceOdds !== null ? new Prisma.Decimal(oddsCheck.sourceOdds) : null,
+              submittedOdds: new Prisma.Decimal(oddsCheck.submittedOdds),
+              matched: oddsCheck.matched,
+            },
+          })
+        : null;
+
+      return { createdBet, createdSnapshot };
+    });
+
+    return {
+      status: "WAITING_CONFIRMATION",
+
+      bet: createdBet,
+
+      oddsSnapshot: createdSnapshot,
+
+      oddsCheck,
+    };
+  } catch (err) {
+    return {
+      status: "DB_ERROR",
+
+      error: err instanceof Error ? err.message : "Unknown database error",
+    };
+  }
 }

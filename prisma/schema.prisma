@@ -72,7 +72,7 @@ model Bet {
   sport      String
   event      String
   outcome    String
-  odds       Decimal   @db.Decimal(6, 2)
+  odds       Decimal?  @db.Decimal(6, 2)
   stake      Decimal   @db.Decimal(18, 6) // USDC
 
   status     BetStatus @default(PENDING)
@@ -93,7 +93,7 @@ model OddsSnapshot {
   betId        String   @unique
   bet          Bet      @relation(fields: [betId], references: [id])
 
-  sourceOdds   Decimal  @db.Decimal(6, 2)
+  sourceOdds   Decimal? @db.Decimal(6, 2)
   submittedOdds Decimal @db.Decimal(6, 2)
   matched      Boolean
   checkedAt    DateTime @default(now())
