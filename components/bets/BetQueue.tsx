@@ -1,63 +1,69 @@
-const bets = [
-  {
-    id: "1",
-    player: "Ivan",
-    event: "Real Madrid vs Barcelona",
-    selection: "Real Madrid Win",
-    stake: 100,
-    odds: 2.1,
-    status: "WAITING_CONFIRMATION",
-  },
-  {
-    id: "2",
-    player: "Alex",
-    event: "PSG vs Marseille",
-    selection: "PSG Win",
-    stake: 50,
-    odds: 1.85,
-    status: "WAITING_CONFIRMATION",
-  },
-];
+"use client";
+
+import { useEffect, useState } from "react";
+import BetQueueItem, { type PendingBet } from "./BetQueueItem";
 
 export default function BetQueue() {
+  const [bets, setBets] = useState<PendingBet[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadPendingBets() {
+      setError(null);
+
+      try {
+        const response = await fetch("/api/dashboard/bets/pending");
+
+        if (!response.ok) {
+          throw new Error(`Request failed with status ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (!cancelled) {
+          setBets(data.bets ?? []);
+        }
+      } catch {
+        if (!cancelled) {
+          setError("Не удалось загрузить заявки. Попробуйте обновить страницу.");
+        }
+      }
+    }
+
+    loadPendingBets();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function handleResolved(betId: string) {
+    setBets((current) => (current ? current.filter((bet) => bet.id !== betId) : current));
+  }
+
   return (
     <section className="mt-10">
       <h2 className="mb-6 text-2xl font-semibold">Pending Bets</h2>
 
-      <div className="space-y-4">
-        {bets.map((bet) => (
-          <div
-            key={bet.id}
-            className="rounded-2xl border border-slate-800 bg-slate-900 p-6"
-          >
-            <div className="flex justify-between">
-              <div>
-                <h3 className="text-xl font-semibold">{bet.player}</h3>
+      {bets === null && !error && <p className="text-slate-400">Loading...</p>}
 
-                <p className="mt-2 text-slate-400">{bet.event}</p>
+      {error && (
+        <p className="rounded-lg bg-red-950 px-4 py-3 text-sm text-red-400">{error}</p>
+      )}
 
-                <p className="mt-1 text-slate-400">{bet.selection}</p>
-              </div>
+      {bets !== null && bets.length === 0 && !error && (
+        <p className="text-slate-400">No pending bets.</p>
+      )}
 
-              <div className="text-right">
-                <p className="text-2xl font-bold">{bet.stake} USDC</p>
-
-                <p className="text-slate-400">Odds {bet.odds}</p>
-              </div>
-            </div>
-
-            <div className="mt-5 flex gap-3">
-              <button className="rounded-xl bg-green-500 px-5 py-2 font-semibold text-black">
-                Confirm
-              </button>
-
-              <button className="rounded-xl bg-red-500 px-5 py-2 font-semibold text-white">
-                Reject
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
+      {bets !== null && bets.length > 0 && (
+        <div className="space-y-4">
+          {bets.map((bet) => (
+            <BetQueueItem key={bet.id} bet={bet} onResolved={handleResolved} />
+          ))}
+        </div>
+      )}
     </section>
   );
 }
