@@ -47,6 +47,9 @@ model Player {
   whatsappId  String   @unique
   createdAt   DateTime @default(now())
 
+  creditLimit   Decimal @default(10000) @db.Decimal(18, 6)
+  currentCredit Decimal @default(0) @db.Decimal(18, 6) // + player is up, - player owes
+
   wallet       Wallet?
   bets         Bet[]
   messages     Message[]

@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Player" ADD COLUMN     "creditLimit" DECIMAL(18,6) NOT NULL DEFAULT 10000,
+ADD COLUMN     "currentCredit" DECIMAL(18,6) NOT NULL DEFAULT 0;
