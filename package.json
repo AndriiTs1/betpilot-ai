@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "db:seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.70.0",
@@ -19,6 +20,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@tabler/icons-webfont": "^3.44.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
@@ -27,6 +29,7 @@
     "eslint-config-next": "16.2.10",
     "prisma": "^7.8.0",
     "tailwindcss": "^4",
+    "tsx": "^4.19.2",
     "typescript": "^5"
   }
 }
