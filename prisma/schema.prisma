@@ -44,7 +44,8 @@ model Player {
   operator   Operator @relation(fields: [operatorId], references: [id])
 
   name        String
-  whatsappId  String   @unique
+  telegramId  String?  @unique
+  phoneNumber String?
   createdAt   DateTime @default(now())
 
   creditLimit   Decimal @default(10000) @db.Decimal(18, 6)

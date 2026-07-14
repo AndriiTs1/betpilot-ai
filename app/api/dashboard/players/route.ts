@@ -58,7 +58,8 @@ export async function GET() {
       select: {
         id: true,
         name: true,
-        whatsappId: true,
+        telegramId: true,
+        phoneNumber: true,
         creditLimit: true,
         currentCredit: true,
         _count: { select: { bets: true } },
@@ -97,7 +98,8 @@ export async function GET() {
     const serialized = players.map((player) => ({
       id: player.id,
       name: player.name,
-      whatsappId: player.whatsappId,
+      telegramId: player.telegramId,
+      phoneNumber: player.phoneNumber,
       creditLimit: player.creditLimit.toString(),
       currentCredit: player.currentCredit.toString(),
       totalBets: player._count.bets,

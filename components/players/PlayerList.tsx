@@ -17,7 +17,8 @@ interface RecentBet {
 interface Player {
   id: string;
   name: string;
-  whatsappId: string;
+  telegramId: string | null;
+  phoneNumber: string | null;
   creditLimit: string;
   currentCredit: string;
   exposure: string;
@@ -82,7 +83,8 @@ export default function PlayerList() {
             <PlayerCard
               key={player.id}
               name={player.name}
-              whatsappId={player.whatsappId}
+              telegramId={player.telegramId}
+              phoneNumber={player.phoneNumber}
               creditLimit={player.creditLimit}
               currentCredit={player.currentCredit}
               exposure={player.exposure}
