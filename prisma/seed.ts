@@ -6,8 +6,12 @@ const adapter = new PrismaNeon({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
 
 const TEST_OPERATOR_PHONE = "+10000000000";
-const TEST_PLAYER_1_WHATSAPP_ID = "test-player-1";
-const TEST_PLAYER_2_WHATSAPP_ID = "test-player-2";
+// Kept stable across the "Vadim" rename: this is just the upsert key for
+// this fixture, not something shown in the UI. Changing it would make the
+// upsert miss the existing row (matched by the old value) and create a
+// second Player instead of renaming in place.
+const VADIM_WHATSAPP_ID = "test-player-1";
+const LEGACY_PLAYER_2_WHATSAPP_ID = "test-player-2";
 const TEST_BET_RAW_MESSAGE = "Реал Мадрид победа 2.1 ставлю 50";
 
 async function main() {
@@ -22,43 +26,62 @@ async function main() {
 
   console.log(`Operator ready: ${operator.id}`);
 
-  const player1 = await prisma.player.upsert({
-    where: { whatsappId: TEST_PLAYER_1_WHATSAPP_ID },
-    update: {},
+  const vadim = await prisma.player.upsert({
+    where: { whatsappId: VADIM_WHATSAPP_ID },
+    update: {
+      name: "Vadim",
+      creditLimit: new Prisma.Decimal("10000"),
+      currentCredit: new Prisma.Decimal("0"),
+    },
     create: {
-      name: "Test Player 1",
-      whatsappId: TEST_PLAYER_1_WHATSAPP_ID,
+      name: "Vadim",
+      whatsappId: VADIM_WHATSAPP_ID,
       operatorId: operator.id,
+      creditLimit: new Prisma.Decimal("10000"),
+      currentCredit: new Prisma.Decimal("0"),
     },
   });
 
-  const player2 = await prisma.player.upsert({
-    where: { whatsappId: TEST_PLAYER_2_WHATSAPP_ID },
-    update: {},
-    create: {
-      name: "Test Player 2",
-      whatsappId: TEST_PLAYER_2_WHATSAPP_ID,
-      operatorId: operator.id,
-    },
+  console.log(`Player ready: ${vadim.id} (${vadim.name})`);
+
+  // Clean up a legacy "Test Player 2" from earlier seed runs, if present, so
+  // the fixture is a single-player state. Deletes in FK-safe order — bets
+  // may have an odds snapshot and this player may have transactions/messages
+  // from earlier manual dashboard testing.
+  const legacyPlayer2 = await prisma.player.findUnique({
+    where: { whatsappId: LEGACY_PLAYER_2_WHATSAPP_ID },
   });
 
-  console.log(`Players ready: ${player1.id}, ${player2.id}`);
-
-  // Reset both wallets to 500 USDC on every run, so the fixture below is
-  // always testable from a known balance regardless of prior manual
-  // Confirm/Reject runs against it.
-  for (const player of [player1, player2]) {
-    await prisma.wallet.upsert({
-      where: { playerId: player.id },
-      update: { balance: new Prisma.Decimal("500") },
-      create: {
-        playerId: player.id,
-        balance: new Prisma.Decimal("500"),
-      },
+  if (legacyPlayer2) {
+    const legacyBets = await prisma.bet.findMany({
+      where: { playerId: legacyPlayer2.id },
+      select: { id: true },
     });
+    const legacyBetIds = legacyBets.map((bet) => bet.id);
+
+    await prisma.oddsSnapshot.deleteMany({ where: { betId: { in: legacyBetIds } } });
+    await prisma.transaction.deleteMany({ where: { playerId: legacyPlayer2.id } });
+    await prisma.message.deleteMany({ where: { playerId: legacyPlayer2.id } });
+    await prisma.bet.deleteMany({ where: { playerId: legacyPlayer2.id } });
+    await prisma.wallet.deleteMany({ where: { playerId: legacyPlayer2.id } });
+    await prisma.player.delete({ where: { id: legacyPlayer2.id } });
+
+    console.log(`Removed legacy Test Player 2 (${legacyPlayer2.id}) and related records`);
   }
 
-  console.log("Wallets ready: 500 USDC each");
+  // Reset the wallet to 500 USDC on every run, so the fixture is always
+  // testable from a known balance regardless of prior manual
+  // Confirm/Reject runs against it.
+  await prisma.wallet.upsert({
+    where: { playerId: vadim.id },
+    update: { balance: new Prisma.Decimal("500") },
+    create: {
+      playerId: vadim.id,
+      balance: new Prisma.Decimal("500"),
+    },
+  });
+
+  console.log("Wallet ready: 500 USDC");
 
   // Bet has no natural unique key to upsert on, so identify the seeded test
   // bet by (playerId, rawMessage) and reset it back to PENDING on every run.
@@ -66,7 +89,7 @@ async function main() {
   // Confirm/Reject testing: run it again after confirming/rejecting via the
   // dashboard to get the same bet back in a fresh PENDING state.
   const existingBet = await prisma.bet.findFirst({
-    where: { playerId: player1.id, rawMessage: TEST_BET_RAW_MESSAGE },
+    where: { playerId: vadim.id, rawMessage: TEST_BET_RAW_MESSAGE },
   });
 
   const betData = {
@@ -81,7 +104,7 @@ async function main() {
 
   const bet = existingBet
     ? await prisma.bet.update({ where: { id: existingBet.id }, data: betData })
-    : await prisma.bet.create({ data: { ...betData, playerId: player1.id } });
+    : await prisma.bet.create({ data: { ...betData, playerId: vadim.id } });
 
   await prisma.oddsSnapshot.upsert({
     where: { betId: bet.id },

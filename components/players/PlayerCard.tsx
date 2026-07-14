@@ -16,7 +16,7 @@ export default function PlayerCard({
       <div className="mt-4 space-y-2 text-slate-400">
         <p>
           Balance:
-          <span className="ml-2 text-white font-semibold">{balance} USDC</span>
+          <span className="ml-2 text-white font-semibold">{balance}</span>
         </p>
 
         <p>

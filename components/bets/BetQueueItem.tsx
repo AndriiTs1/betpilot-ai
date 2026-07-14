@@ -80,7 +80,7 @@ export default function BetQueueItem({ bet, onResolved }: BetQueueItemProps) {
         </div>
 
         <div className="text-right">
-          <p className="text-2xl font-bold">{bet.stake} USDC</p>
+          <p className="text-2xl font-bold">{bet.stake}</p>
 
           <p className="text-slate-400">Odds {bet.odds ?? "—"}</p>
         </div>
