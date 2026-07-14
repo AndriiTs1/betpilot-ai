@@ -1,10 +1,10 @@
 import { Message } from "@/types/message";
-import { processWhatsAppMessage } from "./messageProcessor";
+import { processTelegramMessage } from "./messageProcessor";
 import { parseBetMessage } from "@/lib/ai/betParser";
 import { verifyOdds } from "@/lib/odds/oddsVerifier";
 
 export async function handleIncomingBet(message: Message) {
-  const received = processWhatsAppMessage(message);
+  const received = processTelegramMessage(message);
 
   const bet = await parseBetMessage(message.text, message.playerId);
 

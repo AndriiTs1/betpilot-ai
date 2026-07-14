@@ -1,5 +1,5 @@
 import { Message } from "@/types/message";
-import { handleIncomingBet } from "@/lib/whatsapp/betHandler";
+import { handleIncomingBet } from "@/lib/telegram/betHandler";
 import { prisma } from "@/lib/db/client";
 import { Prisma } from "@/lib/generated/prisma/client";
 

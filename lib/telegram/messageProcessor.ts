@@ -1,7 +1,7 @@
 import { Message } from "@/types/message";
 
-export function processWhatsAppMessage(message: Message) {
-  console.log("Incoming WhatsApp message");
+export function processTelegramMessage(message: Message) {
+  console.log("Incoming Telegram message");
 
   console.log({
     playerId: message.playerId,
