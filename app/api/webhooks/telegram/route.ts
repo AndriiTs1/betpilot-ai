@@ -34,6 +34,8 @@ export async function POST(request: NextRequest) {
     const chatId = String(tgMessage.chat.id);
     const fromId = String(tgMessage.from.id);
 
+    console.log("Incoming Telegram message from:", fromId);
+
     const player = await prisma.player.findUnique({ where: { telegramId: fromId } });
 
     if (!player) {
