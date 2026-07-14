@@ -127,7 +127,7 @@ export default function PlayerCard({
             <div className="hidden overflow-x-auto lg:block">
               <table className="w-full text-left text-sm">
                 <thead>
-                  <tr className="text-slate-500">
+                  <tr className="text-center text-slate-500">
                     <th className="pb-2 pr-4 font-normal">Event</th>
                     <th className="pb-2 pr-4 font-normal">Selection</th>
                     <th className="pb-2 pr-4 font-normal">Stake</th>
@@ -138,7 +138,7 @@ export default function PlayerCard({
                 </thead>
                 <tbody>
                   {recentBets.map((bet) => (
-                    <tr key={bet.id} className="border-t border-slate-800">
+                    <tr key={bet.id} className="border-t border-slate-800 text-center">
                       <td className="py-2 pr-4 text-white">{bet.event}</td>
                       <td className="py-2 pr-4 text-slate-200">{bet.outcome}</td>
                       <td className="py-2 pr-4 text-white">{bet.stake}</td>
