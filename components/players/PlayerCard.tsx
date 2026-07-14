@@ -91,12 +91,29 @@ export default function PlayerCard({
       <h3 className="text-xl font-semibold">{name}</h3>
       <p className="mt-1 text-sm text-slate-400">{whatsappId}</p>
 
-      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+      {/* Desktop: 5 mini-stats in a row (unchanged) */}
+      <div className="mt-4 hidden gap-3 sm:grid sm:grid-cols-3 lg:grid-cols-5">
         <MiniStat label="Limit" value={creditLimit} />
         <MiniStat label="Balance" value={currentCreditDisplay} valueClassName={currentCreditColor} />
         <MiniStat label="Exposure" value={exposure} />
         <MiniStat label="Bets" value={String(totalBets)} />
         <MiniStat label="Settlement" value={formatDate(nextSettlementDate)} />
+      </div>
+
+      {/* Mobile: 2x2 grid + Settlement as a separate banner below */}
+      <div className="mt-4 grid grid-cols-2 gap-3 sm:hidden">
+        <MiniStat label="Limit" value={creditLimit} />
+        <MiniStat label="Balance" value={currentCreditDisplay} valueClassName={currentCreditColor} />
+        <MiniStat label="Exposure" value={exposure} />
+        <MiniStat label="Bets" value={String(totalBets)} />
+      </div>
+
+      <div className="mt-3 flex items-center justify-between rounded-xl bg-blue-950/30 px-4 py-3 sm:hidden">
+        <div className="flex items-center gap-2 text-blue-300">
+          <i className="ti ti-calendar" aria-hidden="true" />
+          <span className="text-sm">Settlement</span>
+        </div>
+        <span className="font-semibold text-blue-300">{formatDate(nextSettlementDate)}</span>
       </div>
 
       <div className="mt-6">
@@ -105,34 +122,54 @@ export default function PlayerCard({
         {recentBets.length === 0 ? (
           <p className="text-sm text-slate-500">No bets in the current period.</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead>
-                <tr className="text-slate-500">
-                  <th className="pb-2 pr-4 font-normal">Event</th>
-                  <th className="pb-2 pr-4 font-normal">Selection</th>
-                  <th className="pb-2 pr-4 font-normal">Stake</th>
-                  <th className="pb-2 pr-4 font-normal">Odds</th>
-                  <th className="pb-2 pr-4 font-normal">Status</th>
-                  <th className="pb-2 font-normal">Date</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentBets.map((bet) => (
-                  <tr key={bet.id} className="border-t border-slate-800">
-                    <td className="py-2 pr-4 text-white">{bet.event}</td>
-                    <td className="py-2 pr-4 text-slate-200">{bet.outcome}</td>
-                    <td className="py-2 pr-4 text-white">{bet.stake}</td>
-                    <td className="py-2 pr-4 text-slate-200">{bet.odds ?? "—"}</td>
-                    <td className="py-2 pr-4">
-                      <StatusBadge status={bet.status} />
-                    </td>
-                    <td className="py-2 text-slate-200">{formatDate(bet.createdAt)}</td>
+          <>
+            {/* Desktop: table (unchanged) */}
+            <div className="hidden overflow-x-auto sm:block">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="text-slate-500">
+                    <th className="pb-2 pr-4 font-normal">Event</th>
+                    <th className="pb-2 pr-4 font-normal">Selection</th>
+                    <th className="pb-2 pr-4 font-normal">Stake</th>
+                    <th className="pb-2 pr-4 font-normal">Odds</th>
+                    <th className="pb-2 pr-4 font-normal">Status</th>
+                    <th className="pb-2 font-normal">Date</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {recentBets.map((bet) => (
+                    <tr key={bet.id} className="border-t border-slate-800">
+                      <td className="py-2 pr-4 text-white">{bet.event}</td>
+                      <td className="py-2 pr-4 text-slate-200">{bet.outcome}</td>
+                      <td className="py-2 pr-4 text-white">{bet.stake}</td>
+                      <td className="py-2 pr-4 text-slate-200">{bet.odds ?? "—"}</td>
+                      <td className="py-2 pr-4">
+                        <StatusBadge status={bet.status} />
+                      </td>
+                      <td className="py-2 text-slate-200">{formatDate(bet.createdAt)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Mobile: compact card list */}
+            <div className="sm:hidden">
+              {recentBets.map((bet) => (
+                <div key={bet.id} className="border-t border-slate-800 py-3 first:border-t-0 first:pt-0">
+                  <p className="font-bold text-white">{bet.event}</p>
+                  <p className="text-sm text-slate-400">{bet.outcome}</p>
+                  <div className="mt-2 flex items-center justify-between text-sm">
+                    <span className="text-slate-200">
+                      {bet.stake} @ {bet.odds ?? "—"}
+                    </span>
+                    <StatusBadge status={bet.status} />
+                    <span className="text-slate-400">{formatDate(bet.createdAt)}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
         )}
       </div>
     </div>
