@@ -91,8 +91,8 @@ export default function PlayerCard({
       <h3 className="text-xl font-semibold">{name}</h3>
       <p className="mt-1 text-sm text-slate-400">{whatsappId}</p>
 
-      {/* Desktop: 5 mini-stats in a row (unchanged) */}
-      <div className="mt-4 hidden gap-3 sm:grid sm:grid-cols-3 lg:grid-cols-5">
+      {/* Desktop (lg+): 5 mini-stats in a row (unchanged) */}
+      <div className="mt-4 hidden gap-3 lg:grid lg:grid-cols-5">
         <MiniStat label="Limit" value={creditLimit} />
         <MiniStat label="Balance" value={currentCreditDisplay} valueClassName={currentCreditColor} />
         <MiniStat label="Exposure" value={exposure} />
@@ -100,15 +100,15 @@ export default function PlayerCard({
         <MiniStat label="Settlement" value={formatDate(nextSettlementDate)} />
       </div>
 
-      {/* Mobile: 2x2 grid + Settlement as a separate banner below */}
-      <div className="mt-4 grid grid-cols-2 gap-3 sm:hidden">
+      {/* Mobile + tablet (below lg): 2x2 grid + Settlement as a separate banner below */}
+      <div className="mt-4 grid grid-cols-2 gap-3 lg:hidden">
         <MiniStat label="Limit" value={creditLimit} />
         <MiniStat label="Balance" value={currentCreditDisplay} valueClassName={currentCreditColor} />
         <MiniStat label="Exposure" value={exposure} />
         <MiniStat label="Bets" value={String(totalBets)} />
       </div>
 
-      <div className="mt-3 flex items-center justify-between rounded-xl bg-blue-950/30 px-4 py-3 sm:hidden">
+      <div className="mt-3 flex items-center justify-between rounded-xl bg-blue-950/30 px-4 py-3 lg:hidden">
         <div className="flex items-center gap-2 text-blue-300">
           <i className="ti ti-calendar" aria-hidden="true" />
           <span className="text-sm">Settlement</span>
@@ -123,8 +123,8 @@ export default function PlayerCard({
           <p className="text-sm text-slate-500">No bets in the current period.</p>
         ) : (
           <>
-            {/* Desktop: table (unchanged) */}
-            <div className="hidden overflow-x-auto sm:block">
+            {/* Desktop (lg+): table (unchanged) */}
+            <div className="hidden overflow-x-auto lg:block">
               <table className="w-full text-left text-sm">
                 <thead>
                   <tr className="text-slate-500">
@@ -153,8 +153,8 @@ export default function PlayerCard({
               </table>
             </div>
 
-            {/* Mobile: compact card list */}
-            <div className="sm:hidden">
+            {/* Mobile + tablet (below lg): compact card list */}
+            <div className="lg:hidden">
               {recentBets.map((bet) => (
                 <div key={bet.id} className="border-t border-slate-800 py-3 first:border-t-0 first:pt-0">
                   <p className="font-bold text-white">{bet.event}</p>
