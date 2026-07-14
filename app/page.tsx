@@ -5,11 +5,11 @@ import PlayerList from "@/components/players/PlayerList";
 export default function Home() {
   return (
     <main className="min-h-screen bg-slate-950 text-white">
-      <div className="mx-auto max-w-7xl px-6 py-10">
-        <header className="mb-10">
-          <h1 className="text-4xl font-bold">BetPilot AI</h1>
+      <div className="mx-auto max-w-7xl px-6 pt-4 pb-10 sm:pt-6">
+        <header className="mb-10 text-center sm:text-left">
+          <h1 className="text-3xl font-extrabold tracking-tight text-white">BetPilot AI</h1>
 
-          <p className="mt-2 text-slate-400">
+          <p className="mt-2 text-sm text-slate-300">
             AI Sports Betting Management Platform
           </p>
         </header>

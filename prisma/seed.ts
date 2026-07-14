@@ -6,11 +6,10 @@ const adapter = new PrismaNeon({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
 
 const TEST_OPERATOR_PHONE = "+10000000000";
-// Kept stable across the "Vadim" rename: this is just the upsert key for
-// this fixture, not something shown in the UI. Changing it would make the
-// upsert miss the existing row (matched by the old value) and create a
-// second Player instead of renaming in place.
-const VADIM_WHATSAPP_ID = "test-player-1";
+// whatsappId is now shown in the UI ("WhatsApp-контакт"), so it needs to be
+// a real-looking number rather than the old placeholder key.
+const OLD_VADIM_WHATSAPP_ID = "test-player-1";
+const VADIM_WHATSAPP_ID = "+393892037766";
 const LEGACY_PLAYER_2_WHATSAPP_ID = "test-player-2";
 const TEST_BET_RAW_MESSAGE = "Реал Мадрид победа 2.1 ставлю 50";
 
@@ -25,6 +24,26 @@ async function main() {
   });
 
   console.log(`Operator ready: ${operator.id}`);
+
+  // One-time migration: if a player still has the old placeholder
+  // whatsappId, rename it in place. The upsert below only matches on the
+  // *new* id, so without this step, re-running the seed after changing
+  // VADIM_WHATSAPP_ID would create a second player instead of updating the
+  // existing one.
+  const legacyVadim = await prisma.player.findUnique({
+    where: { whatsappId: OLD_VADIM_WHATSAPP_ID },
+  });
+
+  if (legacyVadim) {
+    await prisma.player.update({
+      where: { id: legacyVadim.id },
+      data: { whatsappId: VADIM_WHATSAPP_ID },
+    });
+
+    console.log(
+      `Migrated Vadim's whatsappId from "${OLD_VADIM_WHATSAPP_ID}" to "${VADIM_WHATSAPP_ID}"`,
+    );
+  }
 
   const vadim = await prisma.player.upsert({
     where: { whatsappId: VADIM_WHATSAPP_ID },
