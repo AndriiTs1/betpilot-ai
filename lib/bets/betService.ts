@@ -19,14 +19,13 @@ export async function processBet(message: Message) {
     };
   }
 
-  // 2. Находим игрока и его кошелёк
+  // 2. Находим игрока
 
   let player;
 
   try {
     player = await prisma.player.findUnique({
       where: { id: message.playerId },
-      include: { wallet: true },
     });
   } catch (err) {
     return {
@@ -40,30 +39,13 @@ export async function processBet(message: Message) {
     return { status: "PLAYER_NOT_FOUND" };
   }
 
-  if (!player.wallet) {
-    return {
-      status: "DB_ERROR",
-
-      error: `Player ${player.id} has no wallet`,
-    };
-  }
-
-  // 3. Проверяем баланс — сравнение через Prisma Decimal (decimal.js),
-  // без приведения к number, чтобы не терять точность.
-
   const stake = new Prisma.Decimal(bet.stake);
-  const hasBalance = player.wallet.balance.gte(stake);
 
-  if (!hasBalance) {
-    return { status: "INSUFFICIENT_BALANCE" };
-  }
-
-  // 4. Создаём Bet + OddsSnapshot атомарно.
+  // 3. Создаём Bet + OddsSnapshot атомарно.
   //
-  // Баланс не списываем и Transaction (BET_STAKE) не создаём здесь: по
-  // MVP.md баланс обновляется после подтверждения оператором
-  // ("Admin Confirmation -> Bet Saved -> Balance Updated"), а не на приёме
-  // заявки — эта функция только сохраняет заявку в статусе PENDING.
+  // Проверка кредитного лимита сюда не входит: оператор должен видеть даже
+  // рискованные заявки в очереди. Лимит проверяется при подтверждении
+  // (см. app/api/bets/[id]/confirm/route.ts).
 
   try {
     const { createdBet, createdSnapshot } = await prisma.$transaction(async (tx) => {

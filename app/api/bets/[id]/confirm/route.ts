@@ -4,7 +4,7 @@ import { Prisma } from "@/lib/generated/prisma/client";
 import { isOperatorAuthorized } from "@/lib/auth/operatorAuth";
 import { serializeBet } from "@/lib/bets/serialize";
 
-class InsufficientBalanceError extends Error {}
+class InsufficientCreditError extends Error {}
 class BetNoLongerPendingError extends Error {}
 
 function isRecordNotFoundError(err: unknown): boolean {
@@ -24,7 +24,7 @@ export async function POST(
   try {
     const existing = await prisma.bet.findUnique({
       where: { id },
-      include: { player: { include: { wallet: true } } },
+      include: { player: true },
     });
 
     if (!existing) {
@@ -38,37 +38,27 @@ export async function POST(
       );
     }
 
-    if (!existing.player.wallet) {
-      console.error(`POST /api/bets/${id}/confirm: player ${existing.playerId} has no wallet`);
-      return NextResponse.json({ error: "Internal server error" }, { status: 500 });
-    }
-
     const stake = existing.stake;
 
     const result = await prisma.$transaction(async (tx) => {
-      // Atomic conditional decrement: only succeeds if the balance is still
-      // sufficient at this exact moment, closing the race window between the
-      // pending/balance check above and this write.
-      let wallet;
-      try {
-        wallet = await tx.wallet.update({
-          where: { playerId: existing.playerId, balance: { gte: stake } },
-          data: { balance: { decrement: stake } },
-        });
-      } catch (err) {
-        if (isRecordNotFoundError(err)) throw new InsufficientBalanceError();
-        throw err;
-      }
-
-      const transaction = await tx.transaction.create({
-        data: {
-          playerId: existing.playerId,
-          betId: existing.id,
-          type: "BET_STAKE",
-          amount: stake.negated(),
-          balanceAfter: wallet.balance,
-        },
+      // Exposure = sum of stake across this player's other CONFIRMED bets.
+      // The bet being confirmed here is still PENDING at this point, so it's
+      // naturally excluded without an explicit id filter.
+      const exposureAgg = await tx.bet.aggregate({
+        where: { playerId: existing.playerId, status: "CONFIRMED" },
+        _sum: { stake: true },
       });
+      const exposure = exposureAgg._sum.stake ?? new Prisma.Decimal(0);
+
+      const remainingCredit = existing.player.currentCredit.lt(0)
+        ? existing.player.creditLimit.plus(existing.player.currentCredit)
+        : existing.player.creditLimit;
+
+      const available = remainingCredit.minus(exposure);
+
+      if (available.lt(stake)) {
+        throw new InsufficientCreditError();
+      }
 
       // Atomic conditional status flip: guards against a concurrent
       // confirm/reject request that already moved this bet off PENDING.
@@ -83,17 +73,20 @@ export async function POST(
         throw err;
       }
 
-      return { bet: updatedBet, wallet, transaction };
+      // Available credit after this bet joins CONFIRMED exposure.
+      const remainingCreditAfter = available.minus(stake);
+
+      return { bet: updatedBet, remainingCreditAfter };
     });
 
     return NextResponse.json({
       bet: serializeBet(result.bet),
-      balance: result.wallet.balance.toString(),
+      remainingCredit: result.remainingCreditAfter.toString(),
     });
   } catch (err) {
-    if (err instanceof InsufficientBalanceError) {
+    if (err instanceof InsufficientCreditError) {
       return NextResponse.json(
-        { error: "Insufficient balance to confirm this bet" },
+        { error: "Недостаточно доступного кредита" },
         { status: 409 },
       );
     }
