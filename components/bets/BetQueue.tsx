@@ -6,13 +6,12 @@ import BetQueueItem, { type PendingBet } from "./BetQueueItem";
 export default function BetQueue() {
   const [bets, setBets] = useState<PendingBet[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
 
-    async function loadPendingBets() {
-      setError(null);
-
+    async function loadPendingBets(isInitial: boolean) {
       try {
         const response = await fetch("/api/dashboard/bets/pending");
 
@@ -24,18 +23,29 @@ export default function BetQueue() {
 
         if (!cancelled) {
           setBets(data.bets ?? []);
+          if (isInitial) setError(null);
         }
-      } catch {
-        if (!cancelled) {
+      } catch (err) {
+        if (cancelled) return;
+
+        if (isInitial) {
           setError("Не удалось загрузить заявки. Попробуйте обновить страницу.");
+        } else {
+          console.error("BetQueue: background refresh failed", err);
+        }
+      } finally {
+        if (!cancelled && isInitial) {
+          setIsInitialLoad(false);
         }
       }
     }
 
-    loadPendingBets();
+    loadPendingBets(true);
+    const intervalId = setInterval(() => loadPendingBets(false), 10000);
 
     return () => {
       cancelled = true;
+      clearInterval(intervalId);
     };
   }, []);
 
@@ -47,7 +57,7 @@ export default function BetQueue() {
     <section className="mt-10">
       <h2 className="mb-6 text-2xl font-semibold">Pending Bets</h2>
 
-      {bets === null && !error && <p className="text-slate-400">Loading...</p>}
+      {isInitialLoad && !error && <p className="text-slate-400">Loading...</p>}
 
       {error && (
         <p className="rounded-lg bg-red-950 px-4 py-3 text-sm text-red-400">{error}</p>
