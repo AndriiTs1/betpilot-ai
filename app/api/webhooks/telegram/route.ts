@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { processBet } from "@/lib/bets/betService";
 import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
+import { escapeHtml } from "@/lib/telegram/escapeHtml";
 import { prisma } from "@/lib/db/client";
 import { Message } from "@/types/message";
 
@@ -37,7 +38,7 @@ export async function POST(request: NextRequest) {
     const player = await prisma.player.findUnique({ where: { telegramId: fromId } });
 
     if (!player) {
-      await sendTelegramMessage(chatId, "Вы ещё не зарегистрированы. Обратитесь к оператору.");
+      await sendTelegramMessage(chatId, "🚫 Вы ещё не зарегистрированы.\nОбратитесь к оператору.");
       return NextResponse.json({ ok: true });
     }
 
@@ -51,23 +52,34 @@ export async function POST(request: NextRequest) {
     const result = await processBet(message);
 
     switch (result.status) {
-      case "WAITING_CONFIRMATION":
-        await sendTelegramMessage(chatId, "Заявка получена, ожидает подтверждения оператора");
+      case "WAITING_CONFIRMATION": {
+        const oddsLine = result.bet.odds !== null ? `, коэф. ${result.bet.odds.toString()}` : "";
+        const text =
+          `✅ <b>Заявка принята</b>\n` +
+          `⚽ ${escapeHtml(result.bet.event)}\n` +
+          `🎯 ${escapeHtml(result.bet.outcome)}\n` +
+          `💰 Ставка: ${result.bet.stake.toString()}${oddsLine}\n\n` +
+          `Ожидайте подтверждения оператора.`;
+        await sendTelegramMessage(chatId, text);
         break;
+      }
 
       case "PARSE_FAILED":
-        await sendTelegramMessage(chatId, "Не удалось распознать заявку, попробуйте переформулировать");
+        await sendTelegramMessage(
+          chatId,
+          "⚠️ Не удалось распознать заявку.\n\nПопробуйте переформулировать, например:\n<i>Реал Мадрид победа коэф 2.1 ставлю 50</i>",
+        );
         break;
 
       case "PLAYER_NOT_FOUND":
       case "DB_ERROR":
         console.error(`POST /api/webhooks/telegram: processBet returned ${result.status}`, result);
-        await sendTelegramMessage(chatId, "Произошла ошибка, попробуйте позже");
+        await sendTelegramMessage(chatId, "⚠️ Произошла ошибка, попробуйте позже.");
         break;
 
       default:
         console.error(`POST /api/webhooks/telegram: unexpected processBet status`, result);
-        await sendTelegramMessage(chatId, "Произошла ошибка, попробуйте позже");
+        await sendTelegramMessage(chatId, "⚠️ Произошла ошибка, попробуйте позже.");
     }
 
     return NextResponse.json({ ok: true });

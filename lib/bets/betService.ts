@@ -13,7 +13,7 @@ export async function processBet(message: Message) {
 
   if (!bet.valid) {
     return {
-      status: "PARSE_FAILED",
+      status: "PARSE_FAILED" as const,
 
       error: bet.error,
     };
@@ -29,14 +29,14 @@ export async function processBet(message: Message) {
     });
   } catch (err) {
     return {
-      status: "DB_ERROR",
+      status: "DB_ERROR" as const,
 
       error: err instanceof Error ? err.message : "Unknown database error",
     };
   }
 
   if (!player) {
-    return { status: "PLAYER_NOT_FOUND" };
+    return { status: "PLAYER_NOT_FOUND" as const };
   }
 
   const stake = new Prisma.Decimal(bet.stake);
@@ -78,7 +78,7 @@ export async function processBet(message: Message) {
     });
 
     return {
-      status: "WAITING_CONFIRMATION",
+      status: "WAITING_CONFIRMATION" as const,
 
       bet: createdBet,
 
@@ -88,7 +88,7 @@ export async function processBet(message: Message) {
     };
   } catch (err) {
     return {
-      status: "DB_ERROR",
+      status: "DB_ERROR" as const,
 
       error: err instanceof Error ? err.message : "Unknown database error",
     };

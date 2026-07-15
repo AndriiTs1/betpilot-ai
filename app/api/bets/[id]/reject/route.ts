@@ -4,6 +4,7 @@ import { Prisma } from "@/lib/generated/prisma/client";
 import { isOperatorAuthorized } from "@/lib/auth/operatorAuth";
 import { serializeBet } from "@/lib/bets/serialize";
 import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
+import { escapeHtml } from "@/lib/telegram/escapeHtml";
 
 export async function POST(
   request: NextRequest,
@@ -53,7 +54,7 @@ export async function POST(
       try {
         await sendTelegramMessage(
           existing.player.telegramId,
-          `Ваша ставка отклонена: ${existing.event} — ${existing.outcome}`,
+          `🔴 <b>Ставка отклонена</b>\n⚽ ${escapeHtml(existing.event)}\n🎯 ${escapeHtml(existing.outcome)}`,
         );
       } catch (err) {
         console.error(`POST /api/bets/${id}/reject: failed to notify player via Telegram`, err);

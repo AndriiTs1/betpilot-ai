@@ -4,6 +4,7 @@ import { Prisma } from "@/lib/generated/prisma/client";
 import { isOperatorAuthorized } from "@/lib/auth/operatorAuth";
 import { serializeBet } from "@/lib/bets/serialize";
 import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
+import { escapeHtml } from "@/lib/telegram/escapeHtml";
 
 class InsufficientCreditError extends Error {}
 class BetNoLongerPendingError extends Error {}
@@ -84,7 +85,7 @@ export async function POST(
       try {
         await sendTelegramMessage(
           existing.player.telegramId,
-          `Ваша ставка подтверждена! ${existing.event} — ${existing.outcome}, ставка ${existing.stake.toString()}`,
+          `🟢 <b>Ставка подтверждена!</b>\n⚽ ${escapeHtml(existing.event)}\n🎯 ${escapeHtml(existing.outcome)}\n💰 Ставка: ${existing.stake.toString()}`,
         );
       } catch (err) {
         console.error(`POST /api/bets/${id}/confirm: failed to notify player via Telegram`, err);
