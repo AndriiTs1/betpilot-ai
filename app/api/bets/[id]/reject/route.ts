@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db/client";
 import { Prisma } from "@/lib/generated/prisma/client";
 import { isOperatorAuthorized } from "@/lib/auth/operatorAuth";
 import { serializeBet } from "@/lib/bets/serialize";
+import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
 
 export async function POST(
   request: NextRequest,
@@ -15,7 +16,10 @@ export async function POST(
   const { id } = await params;
 
   try {
-    const existing = await prisma.bet.findUnique({ where: { id } });
+    const existing = await prisma.bet.findUnique({
+      where: { id },
+      include: { player: true },
+    });
 
     if (!existing) {
       return NextResponse.json({ error: "Bet not found" }, { status: 404 });
@@ -43,6 +47,17 @@ export async function POST(
         );
       }
       throw err;
+    }
+
+    if (existing.player.telegramId) {
+      try {
+        await sendTelegramMessage(
+          existing.player.telegramId,
+          `Ваша ставка отклонена: ${existing.event} — ${existing.outcome}`,
+        );
+      } catch (err) {
+        console.error(`POST /api/bets/${id}/reject: failed to notify player via Telegram`, err);
+      }
     }
 
     return NextResponse.json({ bet: serializeBet(updatedBet) });

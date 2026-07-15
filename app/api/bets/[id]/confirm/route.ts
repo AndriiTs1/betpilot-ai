@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db/client";
 import { Prisma } from "@/lib/generated/prisma/client";
 import { isOperatorAuthorized } from "@/lib/auth/operatorAuth";
 import { serializeBet } from "@/lib/bets/serialize";
+import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
 
 class InsufficientCreditError extends Error {}
 class BetNoLongerPendingError extends Error {}
@@ -78,6 +79,17 @@ export async function POST(
 
       return { bet: updatedBet, remainingCreditAfter };
     });
+
+    if (existing.player.telegramId) {
+      try {
+        await sendTelegramMessage(
+          existing.player.telegramId,
+          `Ваша ставка подтверждена! ${existing.event} — ${existing.outcome}, ставка ${existing.stake.toString()}`,
+        );
+      } catch (err) {
+        console.error(`POST /api/bets/${id}/confirm: failed to notify player via Telegram`, err);
+      }
+    }
 
     return NextResponse.json({
       bet: serializeBet(result.bet),
