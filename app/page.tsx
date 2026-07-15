@@ -1,5 +1,6 @@
 import DashboardOverview from "@/components/dashboard/DashboardOverview";
 import BetQueue from "@/components/bets/BetQueue";
+import BetHistory from "@/components/bets/BetHistory";
 import PlayerList from "@/components/players/PlayerList";
 
 export default function Home() {
@@ -17,6 +18,8 @@ export default function Home() {
         <DashboardOverview />
 
         <BetQueue />
+
+        <BetHistory />
 
         <PlayerList />
 
