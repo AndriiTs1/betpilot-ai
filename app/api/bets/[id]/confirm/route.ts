@@ -5,6 +5,7 @@ import { isOperatorAuthorized } from "@/lib/auth/operatorAuth";
 import { serializeBet } from "@/lib/bets/serialize";
 import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
 import { escapeHtml } from "@/lib/telegram/escapeHtml";
+import { computeRemainingCredit } from "@/lib/players/credit";
 
 class InsufficientCreditError extends Error {}
 class BetNoLongerPendingError extends Error {}
@@ -52,9 +53,7 @@ export async function POST(
       });
       const exposure = exposureAgg._sum.stake ?? new Prisma.Decimal(0);
 
-      const remainingCredit = existing.player.currentCredit.lt(0)
-        ? existing.player.creditLimit.plus(existing.player.currentCredit)
-        : existing.player.creditLimit;
+      const remainingCredit = computeRemainingCredit(existing.player);
 
       const available = remainingCredit.minus(exposure);
 

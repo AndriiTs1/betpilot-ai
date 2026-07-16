@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { Prisma } from "@/lib/generated/prisma/client";
+import { computeRemainingCredit } from "@/lib/players/credit";
 
 export async function GET() {
   try {
@@ -28,13 +29,10 @@ export async function GET() {
       select: { creditLimit: true, currentCredit: true },
     });
 
-    const totalRemainingCredit = players.reduce((total, player) => {
-      const remaining = player.currentCredit.lt(0)
-        ? player.creditLimit.plus(player.currentCredit) // owes: limit shrinks by the debt
-        : player.creditLimit; // not in debt: full limit still available
-
-      return total.plus(remaining);
-    }, new Prisma.Decimal(0));
+    const totalRemainingCredit = players.reduce(
+      (total, player) => total.plus(computeRemainingCredit(player)),
+      new Prisma.Decimal(0),
+    );
 
     const pendingBetsCount = await prisma.bet.count({ where: { status: "PENDING" } });
 
