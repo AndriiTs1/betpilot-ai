@@ -10,6 +10,8 @@ interface TelegramWebApp {
   ready: () => void;
   expand: () => void;
   MainButton: {
+    color: string;
+    textColor: string;
     setText: (text: string) => void;
     show: () => void;
     hide: () => void;
@@ -103,6 +105,8 @@ export default function MiniAppPage() {
     tg.expand();
 
     tg.MainButton.setText("Мои данные");
+    tg.MainButton.color = "#78C85A";
+    tg.MainButton.textColor = "#000000";
     tg.MainButton.show();
 
     const handler = () => setScreen("data");
