@@ -13,30 +13,36 @@ Core operator workflow is built and running in production: Telegram intake → A
 ## What's been built
 
 **Data layer**
+
 - Prisma 7 schema on Neon Postgres (`prisma/schema.prisma`), 4 migrations applied: `Operator`, `Player`, `Bet`, `OddsSnapshot`, `Transaction`, `Message`, `Wallet`.
 - Prisma 7's new `"prisma-client"` generator (full TS source, output to `lib/generated/prisma`, gitignored, regenerated via `postinstall`) with the `@prisma/adapter-neon` driver adapter for serverless.
 - `prisma/seed.ts` — test fixtures (one operator, two players: `Andrii`, `Zegna`).
 
 **AI bet parsing** (`lib/ai/betParser.ts`)
+
 - Extracts `{ sport, event, selection, stake, odds }` from a free-text message.
 - Dual provider, switchable via `AI_PROVIDER` env var: local **Ollama** (default, no API key) or **Claude** (`@anthropic-ai/sdk`, strict tool-use schema). Production runs on Claude.
 
 **Odds verification** (`lib/odds/oddsVerifier.ts`)
+
 - Looks up the event on **The Odds API** and compares the player-submitted odds against the live market, with sport-key mapping and fuzzy RU/EN team-name matching.
 
 **Telegram integration** (`lib/telegram/`, `app/api/webhooks/telegram/`)
+
 - `POST /api/webhooks/telegram` — the bot webhook. Parses the Telegram update, looks up the player by `telegramId`, runs it through the AI parser + odds check + credit-aware bet creation, replies with an HTML-formatted status message (bet accepted / parse failed / not registered / error).
 - `lib/telegram/sendMessage.ts` — outbound messages via the Bot API (`parse_mode: "HTML"`).
 - `lib/telegram/escapeHtml.ts` — escapes `&`/`<`/`>` in player-controlled text (event/outcome) before interpolating into HTML messages.
 - Player confirm/reject notifications are sent from the bet-action routes (see below), not the webhook.
 
 **Credit-limit risk model** (replaced an earlier `Wallet.balance` design)
+
 - `Player.creditLimit` / `Player.currentCredit` (`currentCredit` negative = player owes; positive = player is up).
 - A bet is accepted into the queue with **no** credit check (operator should see risky requests too).
 - On **confirm**, `POST /api/bets/[id]/confirm` computes `remaining credit = currentCredit < 0 ? creditLimit + currentCredit : creditLimit`, subtracts the player's other `CONFIRMED` exposure (`bet.aggregate` sum), and rejects with `409` if the new bet's stake exceeds what's left. The status flip to `CONFIRMED` is an atomic conditional update (`where: { status: "PENDING" }`) to guard against concurrent confirm/reject races.
 - No money actually moves yet — that's deferred to settlement (not built).
 
 **Operator dashboard** (`app/page.tsx` + `components/`)
+
 - `DashboardOverview` — Active Players, Available Credit, Pending Bets, Played/Not-Played stat cards, backed by `GET /api/dashboard/overview`.
 - `BetQueue` — pending bets with Confirm/Reject actions, **auto-refreshes every 10s** (`setInterval`, cleaned up on unmount) without flashing "Loading..." or clobbering the visible list on a transient background fetch error (only the very first load can set the error state).
 - `BetHistory` — last 50 resolved (non-`PENDING`) bets, read-only, shared `StatusBadge` component (also used in `PlayerCard`).
@@ -51,6 +57,7 @@ Core operator workflow is built and running in production: Telegram intake → A
 | `POST /api/webhooks/telegram` | Telegram-side (no verification on our end yet) | Bot webhook |
 
 **Infra / ops**
+
 - Deployed on Vercel, GitHub auto-deploy on push to `main` (has occasionally not fired — see below), Neon Postgres.
 - `lib/auth/operatorAuth.ts` — constant-time (`timingSafeEqual`) Bearer-token check for the internal API.
 - Diagnosed and fixed a 3-part production incident: missing `OPERATOR_SECRET`, internal fetches hitting Vercel's SSO-gated raw deployment URL instead of the stable production alias, and a corrupted (triple-pasted) secret value.
