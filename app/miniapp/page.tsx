@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Image from "next/image";
 import Script from "next/script";
 import StatusBadge from "@/components/bets/StatusBadge";
 
@@ -142,10 +143,17 @@ export default function MiniAppPage() {
 
 function BannerScreen({ ready }: { ready: boolean }) {
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center px-6 text-center">
-      <h1 className="text-3xl font-extrabold tracking-tight">BetPilot AI</h1>
-      <p className="mt-3 text-sm text-slate-400">Ваш AI-ассистент для ставок</p>
-      {!ready && <p className="mt-8 text-sm text-slate-500">Загрузка...</p>}
+    <div className="flex min-h-screen flex-col items-center justify-center">
+      {/* Banner art already contains the logo and tagline — no redundant text on top. */}
+      <Image
+        src="/miniapp/banner.jpg"
+        alt="BetPilot AI — AI Betting Assistant"
+        width={1212}
+        height={820}
+        priority
+        className="w-full h-auto"
+      />
+      {!ready && <p className="mt-6 text-sm text-slate-500">Загрузка...</p>}
     </div>
   );
 }
