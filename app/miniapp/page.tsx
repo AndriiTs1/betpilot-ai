@@ -13,6 +13,7 @@ interface TelegramWebApp {
     color: string;
     textColor: string;
     setText: (text: string) => void;
+    setParams: (params: { text?: string; color?: string; text_color?: string }) => void;
     show: () => void;
     hide: () => void;
     onClick: (cb: () => void) => void;
@@ -104,9 +105,14 @@ export default function MiniAppPage() {
     tg.ready();
     tg.expand();
 
-    tg.MainButton.setText("Мои данные");
-    tg.MainButton.color = "#78C85A";
-    tg.MainButton.textColor = "#000000";
+    // setParams sets text+colors in one atomic native call — more reliable
+    // across Telegram client versions than assigning .color/.textColor
+    // directly (which didn't visibly take effect on a real device).
+    tg.MainButton.setParams({
+      text: "Мои данные",
+      color: "#78C85A",
+      text_color: "#000000",
+    });
     tg.MainButton.show();
 
     const handler = () => setScreen("data");
