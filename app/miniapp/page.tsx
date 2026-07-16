@@ -109,7 +109,7 @@ export default function MiniAppPage() {
     // across Telegram client versions than assigning .color/.textColor
     // directly (which didn't visibly take effect on a real device).
     tg.MainButton.setParams({
-      text: "Мои данные",
+      text: "Start",
       color: "#78C85A",
       text_color: "#000000",
     });
