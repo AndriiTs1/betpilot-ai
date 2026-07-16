@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { processBet } from "@/lib/bets/betService";
-import { sendTelegramMessage, sendTelegramPhoto } from "@/lib/telegram/sendMessage";
+import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
 import { escapeHtml } from "@/lib/telegram/escapeHtml";
 import { prisma } from "@/lib/db/client";
 import { Message } from "@/types/message";
@@ -13,23 +13,6 @@ interface TelegramUpdate {
     chat: { id: number };
     from: { id: number };
   };
-}
-
-const WELCOME_CAPTION =
-  `🤖 <b>BetPilot AI</b> — ваш AI-помощник для ставок\n\n` +
-  `Что я умею:\n` +
-  `✅ Распознаю ставки из текста и скриншотов\n` +
-  `✅ Проверяю актуальные коэффициенты\n` +
-  `✅ Готовлю заявку для подтверждения оператором\n\n` +
-  `📸 Просто отправьте текст ставки или скриншот купона`;
-
-// Same "stable production origin" reasoning as lib/dashboard/operatorApiProxy.ts:
-// request.url can resolve to a raw per-deployment URL, and Telegram's own
-// servers (fetching the photo, opening the web_app link) need a real public
-// HTTPS URL, not that.
-function resolveOrigin(request: NextRequest): string {
-  const productionUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL;
-  return productionUrl ? `https://${productionUrl}` : new URL(request.url).origin;
 }
 
 // Commands always start with "/", optionally "@BotUsername"-suffixed and/or
@@ -71,18 +54,7 @@ export async function POST(request: NextRequest) {
 
     if (command !== null) {
       if (command === "start") {
-        const origin = resolveOrigin(request);
-
-        await sendTelegramPhoto(
-          chatId,
-          `${origin}/miniapp/welcome-640x360.jpg`,
-          WELCOME_CAPTION,
-          {
-            inline_keyboard: [
-              [{ text: "📊 Открыть панель", web_app: { url: `${origin}/miniapp` } }],
-            ],
-          },
-        );
+        await sendTelegramMessage(chatId, "Привет! Я BetPilot AI");
       }
 
       // Any other command (e.g. a future /help) is intentionally ignored
