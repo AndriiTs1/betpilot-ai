@@ -1,4 +1,17 @@
-export async function sendTelegramMessage(chatId: string, text: string): Promise<boolean> {
+interface TelegramInlineKeyboardButton {
+  text: string;
+  web_app?: { url: string };
+}
+
+interface TelegramInlineKeyboardMarkup {
+  inline_keyboard: TelegramInlineKeyboardButton[][];
+}
+
+export async function sendTelegramMessage(
+  chatId: string,
+  text: string,
+  replyMarkup?: TelegramInlineKeyboardMarkup,
+): Promise<boolean> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
 
   if (!token) {
@@ -10,7 +23,7 @@ export async function sendTelegramMessage(chatId: string, text: string): Promise
     const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" }),
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", reply_markup: replyMarkup }),
     });
 
     if (!response.ok) {
@@ -23,15 +36,6 @@ export async function sendTelegramMessage(chatId: string, text: string): Promise
     console.error("sendTelegramMessage: request failed", err);
     return false;
   }
-}
-
-interface TelegramInlineKeyboardButton {
-  text: string;
-  web_app?: { url: string };
-}
-
-interface TelegramInlineKeyboardMarkup {
-  inline_keyboard: TelegramInlineKeyboardButton[][];
 }
 
 export async function sendTelegramPhoto(
