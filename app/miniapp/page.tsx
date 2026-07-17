@@ -206,6 +206,21 @@ function BannerScreen({
         priority
         className="w-full h-auto"
       />
+
+      <div className="mt-8 flex flex-col items-center px-6 text-center">
+        <h2 className="text-2xl font-bold text-white">
+          Ваш AI-ассистент
+          <br />
+          для ставок на спорт
+        </h2>
+
+        <ul className="mt-6 flex flex-col items-center gap-3 text-sm text-slate-300">
+          <li>📷 Отправьте купон или текст</li>
+          <li>🔍 Проверка коэффициентов</li>
+          <li>✅ Быстрое подтверждение</li>
+        </ul>
+      </div>
+
       {!ready && <p className="mt-6 text-sm text-slate-500">Загрузка...</p>}
     </div>
   );
