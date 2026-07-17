@@ -5,6 +5,7 @@ import { sendTelegramMessage, sendTelegramPhoto } from "@/lib/telegram/sendMessa
 import { escapeHtml } from "@/lib/telegram/escapeHtml";
 import { prisma } from "@/lib/db/client";
 import { Message } from "@/types/message";
+import { isTelegramWebhookAuthorized } from "@/lib/auth/telegramWebhookAuth";
 
 interface TelegramUpdate {
   message?: {
@@ -46,6 +47,10 @@ function extractCommand(text: string): string | null {
 }
 
 export async function POST(request: NextRequest) {
+  if (!isTelegramWebhookAuthorized(request)) {
+    return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
     const body = (await request.json()) as TelegramUpdate;
 
