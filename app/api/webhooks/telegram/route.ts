@@ -13,9 +13,10 @@ interface TelegramUpdate {
 }
 
 const WELCOME_TEXT =
-  `🤖 Добро пожаловать в BetPilot AI.\n\n` +
-  `Вся работа со ставками выполняется в Mini App.\n\n` +
-  `Нажмите кнопку «Открыть BetPilot AI» ниже или кнопку «ОТКРЫТЬ» в верхней части Telegram.`;
+  `👋 Добро пожаловать в BetPilot AI.\n\n` +
+  `Ваш AI-ассистент для спортивных ставок.\n\n` +
+  `Чтобы начать, откройте Mini App\n` +
+  `кнопкой 🚀 ниже.`;
 
 // The bot is Mini-App-only: any chat input other than /start (plain text or
 // another command) gets this same short nudge — the webhook never analyzes
@@ -33,7 +34,7 @@ function resolveOrigin(request: NextRequest): string {
 function openAppKeyboard(origin: string) {
   return {
     inline_keyboard: [
-      [{ text: "🚀 Открыть BetPilot AI", web_app: { url: `${origin}/miniapp` } }],
+      [{ text: "🚀 Открыть приложение", web_app: { url: `${origin}/miniapp` } }],
     ],
   };
 }
