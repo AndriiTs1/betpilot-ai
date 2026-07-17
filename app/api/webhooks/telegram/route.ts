@@ -17,12 +17,17 @@ interface TelegramUpdate {
 }
 
 const WELCOME_CAPTION =
-  `🤖 <b>BetPilot AI</b> — ваш AI-помощник для ставок\n\n` +
-  `Что я умею:\n` +
-  `✅ Распознаю ставки из текста и скриншотов\n` +
-  `✅ Проверяю актуальные коэффициенты\n` +
-  `✅ Готовлю заявку для подтверждения оператором\n\n` +
-  `📸 Просто отправьте текст ставки или скриншот купона`;
+  `🧪 <b>BetPilot AI — Demo Version</b>\n\n` +
+  `Демонстрационная версия AI-ассистента\n` +
+  `для ставок на спорт.\n\n` +
+  `Сейчас доступны:\n` +
+  `✅ тестирование интерфейса\n` +
+  `✅ распознавание текста и скриншотов\n` +
+  `✅ проверка пользовательского сценария\n\n` +
+  `⚠️ Реальные ставки и финансовые операции\n` +
+  `в этой версии недоступны.\n\n` +
+  `Проект проходит тестирование и подготовку\n` +
+  `к официальному запуску.`;
 
 // Same "stable production origin" reasoning as lib/dashboard/operatorApiProxy.ts:
 // request.url can resolve to a raw per-deployment URL, and Telegram's own
@@ -84,7 +89,7 @@ export async function POST(request: NextRequest) {
           WELCOME_CAPTION,
           {
             inline_keyboard: [
-              [{ text: "My Account", web_app: { url: `${origin}/miniapp` } }],
+              [{ text: "Открыть демо", web_app: { url: `${origin}/miniapp` } }],
             ],
           },
         );
