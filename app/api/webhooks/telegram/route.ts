@@ -15,8 +15,8 @@ interface TelegramUpdate {
 const WELCOME_TEXT =
   `👋 Добро пожаловать в BetPilot AI.\n\n` +
   `Ваш AI-ассистент для спортивных ставок.\n\n` +
-  `Чтобы начать, откройте Mini App\n` +
-  `кнопкой 🚀 ниже.`;
+  `Чтобы начать, нажмите кнопку ниже\n` +
+  `и откройте Mini App.`;
 
 // The bot is Mini-App-only: any chat input other than /start (plain text or
 // another command) gets this same short nudge — the webhook never analyzes
