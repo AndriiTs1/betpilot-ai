@@ -122,7 +122,13 @@ export default function MiniAppPage() {
     });
     tg.MainButton.show();
 
-    const handler = () => setScreen("data");
+    // MainButton ("Start") is only relevant on the banner — DataScreen has
+    // its own in-page "Отправить купон" action, so hide the native button
+    // once the player has moved past the welcome screen.
+    const handler = () => {
+      tg.MainButton.hide();
+      setScreen("data");
+    };
     mainButtonHandlerRef.current = handler;
     tg.MainButton.onClick(handler);
 
@@ -266,6 +272,14 @@ function DataScreen({ state, onRetry }: { state: FetchState; onRetry: () => void
         <MiniStat label="В игре" value={data.exposure} />
         <MiniStat label="В ожидании" value={data.pendingExposure} />
       </div>
+
+      <button
+        type="button"
+        onClick={() => console.log("Отправить купон tapped — no business logic yet")}
+        className="mt-6 w-full rounded-xl bg-[#78C85A] py-4 text-base font-semibold text-black"
+      >
+        📷 Отправить купон
+      </button>
 
       <div className="mt-6">
         <p className="mb-3 text-sm text-slate-400">Последние ставки</p>
