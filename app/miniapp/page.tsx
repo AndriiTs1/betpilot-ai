@@ -7,8 +7,11 @@ import StatusBadge from "@/components/bets/StatusBadge";
 
 interface TelegramWebApp {
   initData: string;
+  viewportStableHeight: number;
   ready: () => void;
   expand: () => void;
+  onEvent: (eventType: "viewportChanged", callback: (event: { isStateStable: boolean }) => void) => void;
+  offEvent: (eventType: "viewportChanged", callback: (event: { isStateStable: boolean }) => void) => void;
   MainButton: {
     color: string;
     textColor: string;
@@ -66,7 +69,11 @@ export default function MiniAppPage() {
   const [scriptReady, setScriptReady] = useState(false);
   const [screen, setScreen] = useState<"banner" | "data">("banner");
   const [fetchState, setFetchState] = useState<FetchState>({ status: "loading" });
+  const [viewportStableHeight, setViewportStableHeight] = useState<number | null>(null);
   const mainButtonHandlerRef = useRef<(() => void) | null>(null);
+  const viewportChangedHandlerRef = useRef<((event: { isStateStable: boolean }) => void) | null>(
+    null,
+  );
 
   const loadData = useCallback(async () => {
     const tg = window.Telegram?.WebApp;
@@ -119,17 +126,39 @@ export default function MiniAppPage() {
     mainButtonHandlerRef.current = handler;
     tg.MainButton.onClick(handler);
 
+    // Initial reading — viewportStableHeight is already settled by the time
+    // the script's onReady fires. viewportChanged (below) keeps it in sync
+    // afterwards (e.g. Telegram Desktop window resize).
+    setViewportStableHeight(tg.viewportStableHeight);
+
+    const viewportChangedHandler = (event: { isStateStable: boolean }) => {
+      // Only commit height while Telegram reports a stable state — ignore
+      // in-between frames of an ongoing resize/expand animation.
+      if (event.isStateStable) {
+        setViewportStableHeight(tg.viewportStableHeight);
+      }
+    };
+    viewportChangedHandlerRef.current = viewportChangedHandler;
+    tg.onEvent("viewportChanged", viewportChangedHandler);
+
     setScriptReady(true);
     loadData();
   }, [loadData]);
 
-  // Detach the MainButton handler on unmount — mirrors the interval/fetch
-  // cleanup pattern used elsewhere in this app (e.g. BetQueue's setInterval).
+  // Detach the MainButton and viewportChanged handlers on unmount — mirrors
+  // the interval/fetch cleanup pattern used elsewhere in this app (e.g.
+  // BetQueue's setInterval).
   useEffect(() => {
     return () => {
       const tg = window.Telegram?.WebApp;
-      if (tg && mainButtonHandlerRef.current) {
+      if (!tg) return;
+
+      if (mainButtonHandlerRef.current) {
         tg.MainButton.offClick(mainButtonHandlerRef.current);
+      }
+
+      if (viewportChangedHandlerRef.current) {
+        tg.offEvent("viewportChanged", viewportChangedHandlerRef.current);
       }
     };
   }, []);
@@ -143,7 +172,7 @@ export default function MiniAppPage() {
       />
 
       {screen === "banner" ? (
-        <BannerScreen ready={scriptReady} />
+        <BannerScreen ready={scriptReady} viewportHeight={viewportStableHeight} />
       ) : (
         <DataScreen state={fetchState} onRetry={loadData} />
       )}
@@ -151,9 +180,23 @@ export default function MiniAppPage() {
   );
 }
 
-function BannerScreen({ ready }: { ready: boolean }) {
+function BannerScreen({
+  ready,
+  viewportHeight,
+}: {
+  ready: boolean;
+  viewportHeight: number | null;
+}) {
+  // Fallback to 100dvh when the Telegram SDK hasn't reported a height yet
+  // (or reports 0) — e.g. opened outside Telegram, or before onReady fires.
+  const containerHeight =
+    viewportHeight && viewportHeight > 0 ? `${viewportHeight}px` : "100dvh";
+
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center">
+    <div
+      className="flex flex-col items-center justify-center"
+      style={{ minHeight: containerHeight }}
+    >
       {/* Banner art already contains the logo and tagline — no redundant text on top. */}
       <Image
         src="/miniapp/banner.jpg"
