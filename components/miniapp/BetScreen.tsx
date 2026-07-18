@@ -40,7 +40,7 @@ export default function BetScreen() {
   return (
     <div>
       <div className="text-center">
-        <h2 className="text-xl font-semibold">Новая ставка</h2>
+        <h2 className="text-xl font-semibold">Делайте ставки на спорт</h2>
         <p className="mt-2 text-sm text-slate-400">Выберите удобный способ отправки</p>
       </div>
 
