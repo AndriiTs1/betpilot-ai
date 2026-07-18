@@ -18,9 +18,19 @@ function ActionCard({ icon: Icon, title, description }: ActionCardProps) {
   return (
     <button
       type="button"
-      className="flex w-full items-center gap-4 rounded-2xl border border-slate-800 bg-slate-900 p-4 text-left transition-colors hover:border-slate-700"
+      className="flex w-full items-center gap-4 rounded-2xl p-4 text-left"
+      style={{
+        background: "linear-gradient(145deg, rgba(17,29,51,0.88), rgba(9,17,33,0.78))",
+        backdropFilter: "blur(14px) saturate(115%)",
+        WebkitBackdropFilter: "blur(14px) saturate(115%)",
+        border: "1px solid rgba(145,190,220,0.13)",
+        boxShadow: "0 14px 40px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.035)",
+      }}
     >
-      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#78C85A]/15">
+      <div
+        className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#78C85A]/15"
+        style={{ boxShadow: "0 0 18px 2px rgba(120,200,90,0.22)" }}
+      >
         <Icon size={24} strokeWidth={2} color="#78C85A" />
       </div>
 
@@ -58,7 +68,15 @@ export default function BetScreen() {
         />
       </div>
 
-      <div className="mt-6 flex items-start gap-3 rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+      <div
+        className="mt-6 flex items-start gap-3 rounded-xl p-4"
+        style={{
+          background: "rgba(4,9,20,0.40)",
+          border: "1px solid rgba(128,165,195,0.12)",
+          backdropFilter: "blur(8px)",
+          WebkitBackdropFilter: "blur(8px)",
+        }}
+      >
         <ShieldCheck size={20} strokeWidth={2} className="mt-0.5 shrink-0 text-slate-400" />
         <p className="text-sm text-slate-400">
           Перед подтверждением вы увидите распознанные данные и актуальный коэффициент

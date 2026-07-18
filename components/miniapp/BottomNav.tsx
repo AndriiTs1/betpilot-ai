@@ -32,8 +32,15 @@ interface BottomNavProps {
 export default function BottomNav({ activeTab, onTabChange }: BottomNavProps) {
   return (
     <nav
-      className="fixed inset-x-0 bottom-0 z-10 flex border-t border-slate-800 bg-slate-950"
-      style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}
+      className="fixed inset-x-0 bottom-0 z-10 flex"
+      style={{
+        paddingBottom: "env(safe-area-inset-bottom, 0px)",
+        background: "rgba(2,5,13,0.88)",
+        backdropFilter: "blur(18px) saturate(125%)",
+        WebkitBackdropFilter: "blur(18px) saturate(125%)",
+        borderTop: "1px solid rgba(135,175,205,0.12)",
+        boxShadow: "0 -1px 0 rgba(255,255,255,0.025), 0 -18px 45px rgba(0,0,0,0.25)",
+      }}
     >
       {TABS.map((tab) => {
         const isActive = tab.key === activeTab;
