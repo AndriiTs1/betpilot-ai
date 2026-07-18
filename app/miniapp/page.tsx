@@ -3,7 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import Script from "next/script";
-import StatusBadge from "@/components/bets/StatusBadge";
+import BottomNav from "@/components/miniapp/BottomNav";
+import BetScreen from "@/components/miniapp/BetScreen";
+import ActiveBetsScreen from "@/components/miniapp/ActiveBetsScreen";
+import HistoryScreen from "@/components/miniapp/HistoryScreen";
+import BalanceScreen from "@/components/miniapp/BalanceScreen";
+import type { MiniAppTab, MeResponse } from "@/components/miniapp/types";
 
 interface TelegramWebApp {
   initData: string;
@@ -30,40 +35,10 @@ declare global {
   }
 }
 
-interface RecentBet {
-  id: string;
-  sport: string;
-  event: string;
-  outcome: string;
-  stake: string;
-  odds: string | null;
-  status: string;
-  createdAt: string;
-}
-
-interface MeResponse {
-  player: { id: string; name: string };
-  creditLimit: string;
-  currentCredit: string;
-  remainingCredit: string;
-  exposure: string;
-  pendingExposure: string;
-  availableCredit: string;
-  recentBets: RecentBet[];
-}
-
 type FetchState =
   | { status: "loading" }
   | { status: "error"; reason: "not_registered" | "expired" | "invalid" | "network" }
   | { status: "ready"; data: MeResponse };
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("ru-RU", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
-}
 
 export default function MiniAppPage() {
   const [scriptReady, setScriptReady] = useState(false);
@@ -233,6 +208,8 @@ function BannerScreen({
 }
 
 function DataScreen({ state, onRetry }: { state: FetchState; onRetry: () => void }) {
+  const [activeTab, setActiveTab] = useState<MiniAppTab>("bet");
+
   if (state.status === "loading") {
     return <CenteredMessage text="Загрузка..." />;
   }
@@ -263,56 +240,24 @@ function DataScreen({ state, onRetry }: { state: FetchState; onRetry: () => void
   const { data } = state;
 
   return (
-    <div className="min-h-screen px-4 py-6">
+    <div className="min-h-screen px-4 py-6 pb-24">
       <h2 className="text-xl font-semibold">{data.player.name}</h2>
 
-      <div className="mt-4 grid grid-cols-2 gap-3">
-        <MiniStat label="Доступно" value={data.availableCredit} />
-        <MiniStat label="Лимит" value={data.creditLimit} />
-        <MiniStat label="В игре" value={data.exposure} />
-        <MiniStat label="В ожидании" value={data.pendingExposure} />
-      </div>
-
-      <button
-        type="button"
-        onClick={() => console.log("Отправить купон tapped — no business logic yet")}
-        className="mt-6 w-full rounded-xl bg-[#78C85A] py-4 text-base font-semibold text-black"
-      >
-        📷 Отправить купон
-      </button>
-
-      <div className="mt-6">
-        <p className="mb-3 text-sm text-slate-400">Последние ставки</p>
-
-        {data.recentBets.length === 0 ? (
-          <p className="text-sm text-slate-500">Ставок пока нет.</p>
-        ) : (
-          <div className="space-y-3">
-            {data.recentBets.map((bet) => (
-              <div key={bet.id} className="rounded-xl border border-slate-800 p-3">
-                <p className="font-semibold">{bet.event}</p>
-                <p className="text-sm text-slate-400">{bet.outcome}</p>
-                <div className="mt-2 flex items-center justify-between text-sm">
-                  <span>
-                    {bet.stake} @ {bet.odds ?? "—"}
-                  </span>
-                  <StatusBadge status={bet.status} />
-                  <span className="text-slate-400">{formatDate(bet.createdAt)}</span>
-                </div>
-              </div>
-            ))}
-          </div>
+      <div className="mt-4">
+        {activeTab === "bet" && <BetScreen />}
+        {activeTab === "active" && <ActiveBetsScreen recentBets={data.recentBets} />}
+        {activeTab === "history" && <HistoryScreen recentBets={data.recentBets} />}
+        {activeTab === "balance" && (
+          <BalanceScreen
+            creditLimit={data.creditLimit}
+            availableCredit={data.availableCredit}
+            exposure={data.exposure}
+            pendingExposure={data.pendingExposure}
+          />
         )}
       </div>
-    </div>
-  );
-}
 
-function MiniStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4 text-center">
-      <p className="text-xs text-slate-400">{label}</p>
-      <p className="mt-2 text-xl font-bold">{value}</p>
+      <BottomNav activeTab={activeTab} onTabChange={setActiveTab} />
     </div>
   );
 }
