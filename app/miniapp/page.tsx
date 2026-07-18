@@ -245,7 +245,14 @@ function DataScreen({ state, onRetry }: { state: FetchState; onRetry: () => void
       <WelcomeBanner playerName={data.player.name} />
 
       <div className="mt-4">
-        {activeTab === "bet" && <BetScreen />}
+        {activeTab === "bet" && (
+          <BetScreen
+            availableCredit={data.availableCredit}
+            exposure={data.exposure}
+            pendingExposure={data.pendingExposure}
+            recentBets={data.recentBets}
+          />
+        )}
         {activeTab === "active" && <ActiveBetsScreen recentBets={data.recentBets} />}
         {activeTab === "history" && <HistoryScreen recentBets={data.recentBets} />}
         {activeTab === "balance" && (

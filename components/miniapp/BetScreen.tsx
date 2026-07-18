@@ -1,87 +1,137 @@
-import {
-  ScanLine,
-  MessageSquareText,
-  ChevronRight,
-  ShieldCheck,
-  type LucideIcon,
-} from "lucide-react";
+"use client";
 
-interface ActionCardProps {
-  icon: LucideIcon;
-  title: string;
-  description: string;
+import { useState } from "react";
+import { ScanLine, Zap } from "lucide-react";
+import StatusBadge from "@/components/bets/StatusBadge";
+import BetActionSheet from "./BetActionSheet";
+import type { RecentBet } from "./types";
+
+interface BetScreenProps {
+  availableCredit: string;
+  exposure: string;
+  pendingExposure: string;
+  recentBets: RecentBet[];
 }
 
-// Visually clickable (native <button>, hover/focus states), but intentionally
-// has no onClick — this task is UI-only, no upload/OCR/AI/API wiring yet.
-function ActionCard({ icon: Icon, title, description }: ActionCardProps) {
+const RECENT_ACTIVITY_LIMIT = 2;
+
+// "AI Assistant First" composition: one large action zone opens a bottom
+// sheet with the two submission methods, instead of two competing cards.
+// Neither method has a real handler yet — see BetActionSheet's callbacks
+// below, which only close the sheet. That mirrors exactly what the previous
+// two ActionCard buttons did (visually clickable, intentionally no-op); no
+// upload/OCR/AI/API wiring exists anywhere in the app yet, so there is
+// nothing to preserve or reuse beyond that placeholder behavior.
+export default function BetScreen({
+  availableCredit,
+  exposure,
+  pendingExposure,
+  recentBets,
+}: BetScreenProps) {
+  const [isSheetOpen, setSheetOpen] = useState(false);
+  const recentActivity = recentBets.slice(0, RECENT_ACTIVITY_LIMIT);
+
+  const closeSheet = () => setSheetOpen(false);
+
   return (
-    <button
-      type="button"
-      className="flex w-full items-center gap-4 rounded-2xl p-4 text-left"
-      style={{
-        background: "linear-gradient(145deg, rgba(17,29,51,0.88), rgba(9,17,33,0.78))",
-        backdropFilter: "blur(14px) saturate(115%)",
-        WebkitBackdropFilter: "blur(14px) saturate(115%)",
-        border: "1px solid rgba(145,190,220,0.13)",
-        boxShadow: "0 14px 40px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.035)",
-      }}
-    >
-      <div
-        className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#78C85A]/15"
-        style={{ boxShadow: "0 0 18px 2px rgba(120,200,90,0.22)" }}
+    <div>
+      {/* Compact top status */}
+      <div className="flex items-center justify-between">
+        <span className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-white">
+          <Zap size={14} strokeWidth={2} style={{ color: "#60E84A" }} />
+          BetPilot AI
+        </span>
+        <span
+          className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide"
+          style={{ color: "#60E84A" }}
+        >
+          <span className="h-1.5 w-1.5 rounded-full" style={{ background: "#60E84A" }} />
+          AI Online
+        </span>
+      </div>
+      <p className="mt-1 text-sm text-slate-400">Готов проверить вашу ставку</p>
+
+      {/* Main action zone — the single primary CTA on this screen */}
+      <button
+        type="button"
+        onClick={() => setSheetOpen(true)}
+        aria-haspopup="dialog"
+        aria-label="Отправить ставку — скриншот или текст"
+        className="mt-5 flex w-full flex-col items-center rounded-3xl px-6 py-7 text-center"
+        style={{
+          background: "linear-gradient(160deg, rgba(96,232,74,0.10), rgba(20,30,48,0.6))",
+          border: "1px solid rgba(96,232,74,0.20)",
+          boxShadow: "0 20px 50px rgba(0,0,0,0.35)",
+        }}
       >
-        <Icon size={24} strokeWidth={2} color="#78C85A" />
+        <div
+          className="flex h-14 w-14 items-center justify-center rounded-full"
+          style={{ background: "rgba(96,232,74,0.14)", boxShadow: "0 0 24px 4px rgba(96,232,74,0.20)" }}
+        >
+          <ScanLine size={28} strokeWidth={2} color="#60E84A" />
+        </div>
+
+        <p className="mt-3 text-xl font-bold text-white">Отправить ставку</p>
+        <p className="mt-1 text-sm text-slate-300">Скриншот или текст</p>
+        <p className="mt-2 text-xs text-slate-500">AI проверит события, коэффициенты и сумму</p>
+      </button>
+
+      {/* Compact summary — one bar, not three separate cards */}
+      <div
+        className="mt-5 flex items-stretch justify-between rounded-2xl px-2 py-3"
+        style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
+      >
+        <SummaryItem label="Доступно" value={availableCredit} />
+        <div className="w-px self-stretch" style={{ background: "rgba(255,255,255,0.08)" }} />
+        <SummaryItem label="В игре" value={exposure} />
+        <div className="w-px self-stretch" style={{ background: "rgba(255,255,255,0.08)" }} />
+        <SummaryItem label="Ожидает" value={pendingExposure} />
       </div>
 
-      <div className="min-w-0 flex-1">
-        <p className="text-base font-semibold text-white">{title}</p>
-        <p className="mt-1 text-sm text-slate-400">{description}</p>
+      {/* Last activity — at most two rows, full history lives in its own tab */}
+      <div className="mt-5">
+        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+          Последняя активность
+        </p>
+
+        {recentActivity.length === 0 ? (
+          <p className="mt-2 text-sm text-slate-500">Здесь появятся ваши последние ставки</p>
+        ) : (
+          <div className="mt-2 space-y-2">
+            {recentActivity.map((bet) => (
+              <div
+                key={bet.id}
+                className="flex items-center justify-between gap-3 rounded-xl px-3 py-2.5"
+                style={{ background: "rgba(255,255,255,0.03)" }}
+              >
+                <p className="min-w-0 flex-1 truncate text-sm font-medium text-white">{bet.event}</p>
+                <span className="shrink-0 text-xs text-slate-400">{bet.odds ?? "—"}</span>
+                <StatusBadge status={bet.status} />
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
-      <ChevronRight size={20} strokeWidth={2} className="shrink-0 text-slate-500" />
-    </button>
+      <p className="mt-5 text-center text-xs text-slate-500">
+        AI проверяет коэффициенты перед подтверждением
+      </p>
+
+      <BetActionSheet
+        open={isSheetOpen}
+        onClose={closeSheet}
+        onSelectScreenshot={closeSheet}
+        onSelectText={closeSheet}
+      />
+    </div>
   );
 }
 
-// Placeholder only — no upload form, no OCR/AI logic, no API calls wired up
-// yet. Real submission flow will be designed in a separate task.
-export default function BetScreen() {
+function SummaryItem({ label, value }: { label: string; value: string }) {
   return (
-    <div>
-      <div className="text-center">
-        <h2 className="text-xl font-semibold">Делайте ставки на спорт</h2>
-        <p className="mt-2 text-sm text-slate-400">Выберите удобный способ отправки</p>
-      </div>
-
-      <div className="mt-6 space-y-3">
-        <ActionCard
-          icon={ScanLine}
-          title="Скриншот купона"
-          description="Загрузите изображение, и BetPilot распознает событие, исход, коэффициент и сумму"
-        />
-
-        <ActionCard
-          icon={MessageSquareText}
-          title="Написать ставку"
-          description="Опишите ставку обычным сообщением"
-        />
-      </div>
-
-      <div
-        className="mt-6 flex items-start gap-3 rounded-xl p-4"
-        style={{
-          background: "rgba(4,9,20,0.40)",
-          border: "1px solid rgba(128,165,195,0.12)",
-          backdropFilter: "blur(8px)",
-          WebkitBackdropFilter: "blur(8px)",
-        }}
-      >
-        <ShieldCheck size={20} strokeWidth={2} className="mt-0.5 shrink-0 text-slate-400" />
-        <p className="text-sm text-slate-400">
-          Перед подтверждением вы увидите распознанные данные и актуальный коэффициент
-        </p>
-      </div>
+    <div className="flex flex-1 flex-col items-center px-1">
+      <p className="text-[11px] text-slate-400">{label}</p>
+      <p className="mt-0.5 text-sm font-semibold text-white">{value}</p>
     </div>
   );
 }
