@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Sparkles } from "lucide-react";
+import { Zap } from "lucide-react";
 
 interface WelcomeBannerProps {
   playerName: string;
@@ -52,21 +52,42 @@ export default function WelcomeBanner({ playerName }: WelcomeBannerProps) {
       style={{
         transitionDuration: `${EXIT_ANIMATION_MS}ms`,
         opacity: isExiting ? 0 : 1,
-        transform: isExiting ? "translateY(-8px)" : "translateY(0)",
-        maxHeight: isExiting ? 0 : 96,
+        transform: isExiting ? "translateY(-4px)" : "translateY(0)",
+        maxHeight: isExiting ? 0 : 64,
         marginBottom: isExiting ? 0 : 16,
       }}
     >
-      <div className="flex items-center gap-3 rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3 shadow-[0_0_24px_-10px_rgba(120,200,90,0.4)]">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#78C85A]/15">
-          <Sparkles size={18} strokeWidth={2} color="#78C85A" />
+      <div className="flex gap-3">
+        {/* Accent bar with a soft radial glow bleeding from behind it — the
+            only "premium" flourish, no card chrome around the whole strip. */}
+        <div className="relative w-[3px] shrink-0 rounded-full" style={{ backgroundColor: "#60E84A" }}>
+          <div
+            className="absolute left-1/2 top-1/2 h-9 w-9 -translate-x-1/2 -translate-y-1/2 rounded-full blur-md"
+            style={{ backgroundColor: "rgba(96,232,74,0.08)" }}
+          />
         </div>
 
-        <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-white">
+        <div className="min-w-0 flex-1 py-1.5">
+          <div className="flex items-center gap-1.5">
+            <Zap size={14} strokeWidth={2} style={{ color: "rgba(96,232,74,0.65)" }} />
+            <span
+              className="text-[10px] font-semibold uppercase tracking-wide"
+              style={{ color: "rgba(96,232,74,0.65)" }}
+            >
+              BetPilot AI
+            </span>
+            <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: "#60E84A" }} />
+            <span
+              className="text-[10px] font-semibold uppercase tracking-wide"
+              style={{ color: "rgba(96,232,74,0.65)" }}
+            >
+              Online
+            </span>
+          </div>
+
+          <p className="mt-0.5 truncate text-[15px] font-semibold" style={{ color: "#F7F9FC" }}>
             Добро пожаловать, {playerName}
           </p>
-          <p className="text-xs text-slate-400">BetPilot готов к работе</p>
         </div>
       </div>
     </div>
