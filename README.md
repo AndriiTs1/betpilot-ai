@@ -14,9 +14,15 @@ Operator workflow (queue, confirm/reject against credit limit, player notificati
 
 **Data layer**
 
-- Prisma 7 schema on Neon Postgres (`prisma/schema.prisma`), 4 migrations applied: `Operator`, `Player`, `Bet`, `OddsSnapshot`, `Transaction`, `Message`, `Wallet`.
+- Prisma 7 schema on Neon Postgres (`prisma/schema.prisma`), 5 migrations applied: `Operator`, `Player`, `Bet`, `BetSelection`, `OddsSnapshot`, `Transaction`, `Message`, `Wallet`.
 - Prisma 7's new `"prisma-client"` generator (full TS source, output to `lib/generated/prisma`, gitignored, regenerated via `postinstall`) with the `@prisma/adapter-neon` driver adapter for serverless.
 - `prisma/seed.ts` — test fixtures (one operator, two players: `Andrii`, `Zegna`).
+- **In-progress `Bet` → `Bet` + `BetSelection` migration** (parlay/express support), done in small additive stages, each shipped and verified in production before the next:
+  - `Bet` gained `type: BetType` (`SINGLE | PARLAY`, defaults `SINGLE`), `totalOdds: Decimal?`, and a `selections: BetSelection[]` relation. The old `sport`/`event`/`outcome`/`odds` scalar fields on `Bet` are **kept, unchanged** — nothing reads `selections` as the source of truth yet.
+  - New `BetSelection` model (`sport`/`event`/`outcome`/`odds`, FK to `Bet` with `onDelete: Cascade`) — one row per leg of a bet. No `BetSelectionStatus` yet; results are still tracked only on `Bet.status`.
+  - `scripts/backfill-bet-selections.ts` — idempotent, transactional backfill utility (selects `type: SINGLE` bets with zero selections, creates one matching `BetSelection` + sets `totalOdds = odds`; re-running is a safe no-op). Already run once in production — all existing bets now have exactly one `BetSelection` each.
+  - `GET /api/bets/pending`, `/api/bets/history`, `/api/miniapp/me`, `GET /api/dashboard/players` now all fetch and return `selections`/`totalOdds` alongside the old flat fields (`lib/bets/serialize.ts`'s `serializeBet`/`serializeBetSelection` make the Decimal→string conversion explicit rather than relying on `Prisma.Decimal.toJSON()`'s implicit behavior). `components/miniapp/types.ts`'s `RecentBet` type now matches this contract (`totalOdds`, `selections: MiniAppBetSelection[]`, both required).
+  - **Not done yet**: no UI anywhere renders `selections`/`totalOdds` (dashboard and Mini App still display only the flat fields), nothing creates a `BetSelection` for a _new_ bet (moot today since bet creation is dead code — see below), and `OddsSnapshot` is still tied to `Bet`, not per-selection. See [What's not done](#whats-not-done-yet).
 
 **AI bet parsing — implemented but currently orphaned** (`lib/ai/betParser.ts`, `lib/telegram/betHandler.ts`, `lib/bets/betService.ts`)
 
@@ -77,7 +83,7 @@ Operator workflow (queue, confirm/reject against credit limit, player notificati
 ## What's not done yet
 
 - **Bet submission from the Mini App is UI-only.** `BetActionSheet.tsx`'s two options ("Отправить скриншот" / "Написать ставку") only close the sheet — no API call, no handler. There is currently **no way for a player to create a bet at all** (the old webhook text-parsing path is also dead — see above), only to view existing ones. A researched-but-not-yet-approved plan exists for a minimal text + screenshot submission flow (new `POST /api/miniapp/bets/text` and `/screenshot` routes, reusing `betParser.ts`/`oddsVerifier.ts`, Claude multimodal instead of a separate OCR lib, `@vercel/blob` for image storage).
-- **Express/parlay (multi-leg) bets are not supported by the schema.** `Bet` has scalar `sport`/`event`/`outcome`/`odds` fields — exactly one event per row, no child table. Confirmed (researched, not yet implemented) that a `BetSelection` child model + `Bet.type: SINGLE | PARLAY` + `Bet.totalOdds` + a separate `BetSelectionStatus` enum would be needed to represent a multi-leg slip, price it, partially void a leg, or display it correctly. Single bets work today without any schema change.
+- **Express/parlay (multi-leg) bets — schema and API contract are in place, UI and creation are not.** `BetSelection`/`Bet.type`/`Bet.totalOdds` exist, are migrated to production, and every existing bet has been backfilled with exactly one selection (see "Data layer" above). But: no dashboard or Mini App screen renders `selections`/`totalOdds` yet (both still show only the old flat `sport`/`event`/`outcome`/`odds`), nothing creates a `BetSelection` for a new bet, there's still no `BetSelectionStatus` (so a single leg of a parlay can't be voided/settled independently), and `OddsSnapshot` is still tied to `Bet` rather than per-selection — moving it needs its own migration-ordering analysis before it happens. Single bets work today unaffected by any of this.
 - **`types/bet.ts`'s `BetStatus` is out of sync with Prisma's.** Prisma: `PENDING/CONFIRMED/REJECTED/SETTLED_WIN/SETTLED_LOSS/VOID`. `types/bet.ts`: a completely different 7-value union (`RECEIVED/AI_ANALYZED/WAITING_CONFIRMATION/CONFIRMED/SETTLED/PAID/REJECTED`) that shares only 2 of 7 values. Confirmed dead — nothing imports it as a status type (only `oddsVerifier.ts` reads its `Bet` interface shape, which itself has a naming bug: `selection` vs. Prisma's `outcome`). `components/bets/StatusBadge.tsx` is the one place that's correctly in sync with Prisma. Should be deleted/rewritten as part of whichever task next touches `oddsVerifier.ts`.
 - **AI parsing (`lib/ai/betParser.ts`) and odds verification (`lib/odds/oddsVerifier.ts`) are implemented but orphaned** — no live caller since the webhook pivoted to Mini-App-only (see above). Fully reusable for the submission-flow plan above, but not reachable by any user action today. `oddsVerifier.ts` also has a pre-existing bug: `matched` is hardcoded `false` even on a successful match.
 - **Settlement.** Nothing determines match results or moves `currentCredit`/creates payout records after a bet is graded. `Bet.status` has `SETTLED_WIN`/`SETTLED_LOSS`/`VOID` in the enum but nothing ever sets them.
@@ -152,5 +158,6 @@ lib/
   wallet/                        legacy, unused (see "What's not done yet")
 types/                           Shared domain types — types/bet.ts is stale/out of sync with Prisma, see above
 prisma/                          schema, migrations, seed
+scripts/                         backfill-bet-selections.ts — idempotent Bet -> BetSelection backfill utility
 docs/                            Pre-implementation planning docs (outdated, see note above)
 ```
