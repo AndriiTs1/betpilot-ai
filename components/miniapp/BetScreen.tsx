@@ -104,8 +104,14 @@ export default function BetScreen({
                 className="flex items-center justify-between gap-3 rounded-xl px-3 py-2.5"
                 style={{ background: "rgba(255,255,255,0.03)" }}
               >
-                <p className="min-w-0 flex-1 truncate text-sm font-medium text-white">{bet.event}</p>
-                <span className="shrink-0 text-xs text-slate-400">{bet.odds ?? "—"}</span>
+                <p className="min-w-0 flex-1 truncate text-sm font-medium text-white">
+                  {bet.selections && bet.selections.length > 1
+                    ? `Экспресс ×${bet.selections.length} · ${bet.event}`
+                    : bet.event}
+                </p>
+                <span className="shrink-0 text-xs text-slate-400">
+                  {(bet.selections && bet.selections.length > 1 ? bet.totalOdds : bet.odds) ?? "—"}
+                </span>
                 <StatusBadge status={bet.status} />
               </div>
             ))}
