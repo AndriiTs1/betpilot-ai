@@ -32,12 +32,6 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <link
-        rel="stylesheet"
-        href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.44.0/dist/tabler-icons.min.css"
-        precedence="default"
-      />
-
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );
