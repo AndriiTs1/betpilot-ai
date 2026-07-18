@@ -75,6 +75,7 @@ export async function GET() {
             odds: true,
             status: true,
             createdAt: true,
+            selections: true,
           },
         },
       },
@@ -114,6 +115,7 @@ export async function GET() {
         odds: bet.odds ? bet.odds.toString() : null,
         status: bet.status,
         createdAt: bet.createdAt.toISOString(),
+        selections: bet.selections,
       })),
     }));
 

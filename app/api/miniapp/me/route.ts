@@ -57,6 +57,7 @@ export async function GET(request: NextRequest) {
         where: { playerId: player.id },
         orderBy: { createdAt: "desc" },
         take: RECENT_BETS_LIMIT,
+        include: { selections: true },
       }),
     ]);
 
