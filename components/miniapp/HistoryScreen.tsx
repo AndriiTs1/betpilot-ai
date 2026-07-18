@@ -1,4 +1,5 @@
 import StatusBadge from "@/components/bets/StatusBadge";
+import BetSelectionsList from "./BetSelectionsList";
 import type { RecentBet } from "./types";
 
 interface HistoryScreenProps {
@@ -35,9 +36,13 @@ export default function HistoryScreen({ recentBets }: HistoryScreenProps) {
             <div key={bet.id} className="rounded-xl border border-slate-800 p-3">
               <p className="font-semibold">{bet.event}</p>
               <p className="text-sm text-slate-400">{bet.outcome}</p>
+
+              <BetSelectionsList selections={bet.selections} />
+
               <div className="mt-2 flex items-center justify-between text-sm">
                 <span>
-                  {bet.stake} @ {bet.odds ?? "—"}
+                  {bet.stake} @{" "}
+                  {(bet.selections && bet.selections.length > 1 ? bet.totalOdds : bet.odds) ?? "—"}
                 </span>
                 <StatusBadge status={bet.status} />
                 <span className="text-slate-400">{formatDate(bet.createdAt)}</span>
