@@ -8,6 +8,7 @@ import BetScreen from "@/components/miniapp/BetScreen";
 import ActiveBetsScreen from "@/components/miniapp/ActiveBetsScreen";
 import HistoryScreen from "@/components/miniapp/HistoryScreen";
 import BalanceScreen from "@/components/miniapp/BalanceScreen";
+import WelcomeBanner from "@/components/miniapp/WelcomeBanner";
 import type { MiniAppTab, MeResponse } from "@/components/miniapp/types";
 
 interface TelegramWebApp {
@@ -241,7 +242,7 @@ function DataScreen({ state, onRetry }: { state: FetchState; onRetry: () => void
 
   return (
     <div className="min-h-screen px-4 py-6 pb-24">
-      <h2 className="text-xl font-semibold">{data.player.name}</h2>
+      <WelcomeBanner playerName={data.player.name} />
 
       <div className="mt-4">
         {activeTab === "bet" && <BetScreen />}
