@@ -14,6 +14,7 @@ export async function GET(request: NextRequest) {
       include: {
         player: { select: { id: true, name: true } },
         oddsSnapshot: true,
+        selections: true,
       },
       orderBy: { updatedAt: "desc" },
       take: 50,
