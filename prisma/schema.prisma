@@ -98,6 +98,15 @@ model Bet {
   totalOdds  Decimal?       @db.Decimal(10, 2)
   selections BetSelection[]
 
+  // Stage 4.4A idempotency key for Mini App text-bet confirm: the previewId
+  // from a verified, short-lived signed preview token (see
+  // lib/betPreview/previewToken.ts). Nullable — only confirm-created bets
+  // set it; every other creation path (operator dashboard, WhatsApp-era
+  // betService.ts) leaves it null. The unique constraint is what actually
+  // prevents a double-submit/race from creating two Bets, not the
+  // pre-insert lookup in the confirm route.
+  previewId String? @unique
+
   status     BetStatus @default(PENDING)
   rawMessage String? // исходный текст от игрока
 
