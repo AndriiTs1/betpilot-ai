@@ -179,17 +179,37 @@ function BannerScreen({
       className="flex flex-col items-center justify-center"
       style={{ minHeight: containerHeight }}
     >
-      {/* Banner art already contains the logo and tagline — no redundant text on top. */}
-      <Image
-        src="/miniapp/banner.jpg"
-        alt="BetPilot AI — AI Betting Assistant"
-        width={1212}
-        height={820}
-        priority
-        className="w-full h-auto"
-      />
+      {/* Banner art already contains the logo and tagline — no redundant text on top.
+          Fixed height (natural width-scaled height at a 390px baseline + ~24px) with
+          object-cover keeps the image from stretching — it crops a little off the
+          left/right edges instead of deforming, while the logo/robot (centered in the
+          source art) and the bottom fade into the dark background stay fully intact. */}
+      <div className="relative w-full overflow-hidden" style={{ height: 288 }}>
+        <Image
+          src="/miniapp/banner.jpg"
+          alt="BetPilot AI — AI Betting Assistant"
+          fill
+          priority
+          className="object-cover object-center"
+        />
 
-      <div className="mt-8 flex flex-col items-center px-6 text-center">
+        {/* Soft fade over the banner's own bottom margin only (well below
+            the robot/tagline in the source art) — blends the hard bottom
+            edge into the app's dark background instead of a visible seam.
+            #07111F matches MiniAppBackground's own top color stop, since
+            that's the ambient tone directly around the banner near the top
+            of the page. */}
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-x-0 bottom-0"
+          style={{
+            height: 48,
+            background: "linear-gradient(180deg, rgba(7,17,31,0) 0%, #07111F 100%)",
+          }}
+        />
+      </div>
+
+      <div className="mt-4 flex flex-col items-center px-6 text-center">
         <h2 className="text-2xl font-bold text-white">
           Ваш AI-ассистент
           <br />
