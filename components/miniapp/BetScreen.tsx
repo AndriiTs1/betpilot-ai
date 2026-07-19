@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ScanLine, Zap } from "lucide-react";
 import StatusBadge from "@/components/bets/StatusBadge";
 import BetActionSheet from "./BetActionSheet";
+import BetTextForm from "./BetTextForm";
 import type { RecentBet } from "./types";
 
 interface BetScreenProps {
@@ -17,11 +18,9 @@ const RECENT_ACTIVITY_LIMIT = 2;
 
 // "AI Assistant First" composition: one large action zone opens a bottom
 // sheet with the two submission methods, instead of two competing cards.
-// Neither method has a real handler yet — see BetActionSheet's callbacks
-// below, which only close the sheet. That mirrors exactly what the previous
-// two ActionCard buttons did (visually clickable, intentionally no-op); no
-// upload/OCR/AI/API wiring exists anywhere in the app yet, so there is
-// nothing to preserve or reuse beyond that placeholder behavior.
+// "Написать ставку" now opens BetTextForm (preview-only — no Bet is created
+// yet, see Stage 4 plan). "Отправить скриншот" is still a no-op; screenshot
+// submission is a separate, not-yet-built flow.
 export default function BetScreen({
   availableCredit,
   exposure,
@@ -29,9 +28,19 @@ export default function BetScreen({
   recentBets,
 }: BetScreenProps) {
   const [isSheetOpen, setSheetOpen] = useState(false);
+  const [isTextFormOpen, setTextFormOpen] = useState(false);
   const recentActivity = recentBets.slice(0, RECENT_ACTIVITY_LIMIT);
 
   const closeSheet = () => setSheetOpen(false);
+
+  const openTextForm = () => {
+    closeSheet();
+    setTextFormOpen(true);
+  };
+
+  if (isTextFormOpen) {
+    return <BetTextForm onBack={() => setTextFormOpen(false)} />;
+  }
 
   return (
     <div>
@@ -127,7 +136,7 @@ export default function BetScreen({
         open={isSheetOpen}
         onClose={closeSheet}
         onSelectScreenshot={closeSheet}
-        onSelectText={closeSheet}
+        onSelectText={openTextForm}
       />
     </div>
   );
