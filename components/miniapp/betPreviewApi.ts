@@ -24,6 +24,9 @@ export interface BetOddsCheck {
 export interface BetPreviewSuccess {
   preview: BetPreview;
   oddsCheck: BetOddsCheck | null;
+  // Signed, short-lived token — the only trusted source for a future confirm
+  // step. Treat as opaque: never decode, log, or persist it client-side.
+  previewToken: string;
 }
 
 export type BetPreviewErrorCode =
@@ -48,9 +51,17 @@ export type BetPreviewResult = { ok: true; data: BetPreviewSuccess } | { ok: fal
 // `as BetPreviewSuccess` cast. Doesn't validate every nested field
 // exhaustively, just enough to catch a genuinely malformed/unexpected body.
 function isBetPreviewSuccess(value: unknown): value is BetPreviewSuccess {
-  if (typeof value !== "object" || value === null || !("preview" in value) || !("oddsCheck" in value)) {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("preview" in value) ||
+    !("oddsCheck" in value) ||
+    !("previewToken" in value)
+  ) {
     return false;
   }
+
+  if (typeof (value as { previewToken: unknown }).previewToken !== "string") return false;
 
   const preview = (value as { preview: unknown }).preview;
   if (typeof preview !== "object" || preview === null) return false;

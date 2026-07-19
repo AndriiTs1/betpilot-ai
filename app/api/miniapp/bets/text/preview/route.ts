@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db/client";
 import { verifyInitData } from "@/lib/telegram/verifyInitData";
 import { parseBetMessage } from "@/lib/ai/betParser";
 import { verifyOdds } from "@/lib/odds/oddsVerifier";
+import { signPreviewToken } from "@/lib/betPreview/previewToken";
 
 // Preview-only: parses a free-text bet and (optionally) checks its odds
 // against the live market, but never touches Bet/BetSelection/OddsSnapshot.
@@ -40,6 +41,12 @@ export async function POST(request: NextRequest) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) {
     console.error("POST /api/miniapp/bets/text/preview: TELEGRAM_BOT_TOKEN is not set");
+    return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
+  }
+
+  const previewTokenSecret = process.env.BET_PREVIEW_TOKEN_SECRET;
+  if (!previewTokenSecret) {
+    console.error("POST /api/miniapp/bets/text/preview: BET_PREVIEW_TOKEN_SECRET is not set");
     return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
   }
 
@@ -105,6 +112,27 @@ export async function POST(request: NextRequest) {
           })
         : null;
 
+    const previewToken = signPreviewToken(
+      {
+        playerId: player.id,
+        sport: parsed.sport,
+        event: parsed.event,
+        outcome: parsed.selection,
+        stake: parsed.stake,
+        odds: parsed.odds,
+        totalOdds: parsed.odds,
+        oddsCheck: oddsCheck
+          ? {
+              matched: oddsCheck.matched,
+              withinTolerance: oddsCheck.withinTolerance,
+              sourceOdds: oddsCheck.sourceOdds,
+              bookmaker: oddsCheck.bookmaker,
+            }
+          : null,
+      },
+      previewTokenSecret,
+    );
+
     return NextResponse.json({
       preview: {
         type: "SINGLE" as const,
@@ -117,6 +145,7 @@ export async function POST(request: NextRequest) {
         potentialWin: parsed.odds !== null ? roundTo2(parsed.stake * parsed.odds) : null,
       },
       oddsCheck,
+      previewToken,
     });
   } catch (err) {
     console.error("POST /api/miniapp/bets/text/preview failed:", err);

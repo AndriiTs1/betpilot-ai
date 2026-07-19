@@ -51,6 +51,8 @@ function formatAmount(value: number): string {
 // see BetActionSheet's "Написать ставку" for how this is reached.
 export default function BetTextForm({ onBack }: BetTextFormProps) {
   const [message, setMessage] = useState("");
+  // previewResponse.previewToken (Stage 4.3) lives here in memory only —
+  // never rendered, decoded, logged, or persisted to storage.
   const [previewResponse, setPreviewResponse] = useState<BetPreviewSuccess | null>(null);
   const [isSubmitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
