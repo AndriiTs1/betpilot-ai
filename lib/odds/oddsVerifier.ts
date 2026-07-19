@@ -1,9 +1,25 @@
-import type { Bet } from "@/types/bet";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 
 const ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4";
 const ODDS_API_TIMEOUT_MS = 8000;
 const ODDS_CACHE_TTL_MS = 45_000;
+
+// matched=true once event+market+selection are actually found in the
+// bookmaker's data; withinTolerance is then a separate verdict on whether
+// the player's submitted odds are close enough to that source price — the
+// two used to be conflated into a single (and permanently-false) `matched`.
+const ODDS_TOLERANCE_PERCENT = 3;
+
+// Local, minimal input shape — no longer borrowed from the stale
+// types/bet.ts (which has its own out-of-sync BetStatus and a
+// selection/outcome naming mismatch against the real Prisma Bet model).
+// Field names here intentionally match what betHandler.ts already builds.
+export interface OddsVerificationInput {
+  sport: string;
+  event: string;
+  selection: string;
+  odds: number;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Sport → sport_key mapping                                                  */
@@ -253,11 +269,10 @@ async function fetchOddsForSport(sportKey: string): Promise<OddsApiEvent[]> {
 /* Public entry point                                                          */
 /* -------------------------------------------------------------------------- */
 
-export async function verifyOdds(
-  bet: Pick<Bet, "sport" | "event" | "selection" | "odds">,
-): Promise<OddsCheckResult> {
+export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckResult> {
   const baseResult: OddsCheckResult = {
     matched: false,
+    withinTolerance: null,
     sourceOdds: null,
     submittedOdds: bet.odds,
     discrepancyPercent: null,
@@ -311,7 +326,8 @@ export async function verifyOdds(
   const discrepancyPercent = Number((((bet.odds - price) / price) * 100).toFixed(2));
 
   return {
-    matched: false,
+    matched: true,
+    withinTolerance: Math.abs(discrepancyPercent) <= ODDS_TOLERANCE_PERCENT,
     sourceOdds: price,
     submittedOdds: bet.odds,
     discrepancyPercent,
