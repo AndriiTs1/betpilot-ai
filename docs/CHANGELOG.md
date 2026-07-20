@@ -78,3 +78,14 @@ Production review of the screenshot recognition pipeline: architecture summary, 
 - Built data-driven (`BetTicketData`/`BetTicketStatus`) rather than tied to the single-bet `ConfirmedBet` shape, so PARLAY legs, settled outcomes, and a later PDF/PNG export or QR verification can reuse the same component without a redesign — none of those are implemented yet, only the layout is shaped for them.
 - Ticket status badge reads "Submitted," not "Confirmed": the player-side confirm step only creates a `PENDING` bet, and "Confirmed" is already a distinct, later operator-dashboard state — the copy was chosen to avoid overstating what just happened.
 - UI/UX only — no database, Prisma, API, preview/confirm, previewToken, AI parsing, dashboard, settlement, PARLAY, or Telegram auth changes.
+
+## Stage 5.0B — Operator Authentication Foundation
+
+- Backend foundation only, per `OPERATOR_AUTH_AUDIT.md`'s approved architecture — no login page, no route protection, no Dashboard changes yet.
+- Added `Operator.passwordHash` (nullable) and a new `OperatorSession` table (migration `add_operator_auth_sessions`) — purely additive, no existing data affected.
+- `lib/auth/password.ts` — `scrypt`-based password hashing (Node's built-in `node:crypto`, no new dependency), versioned stored format (`scrypt$v1$N$r$p$salt$hash`), timing-safe comparison.
+- `lib/auth/operatorSession.ts` — database-backed sessions: a random 256-bit token exists only in the cookie; the database stores only its SHA-256 hash. Supports create/validate/revoke/revoke-all/cleanup, all injectable against a lightweight in-memory fake for tests (no real DB touched by the test suite).
+- `lib/auth/operatorSessionCookie.ts` — single authoritative cookie policy (`HttpOnly`, `Secure` in production, `SameSite=Lax`) so every future route sets/clears the cookie identically.
+- `scripts/create-operator.ts` (`npm run operator:create`) — manual, one-off provisioning script; uses `Operator.phone` (already unique) as the login identifier rather than adding a new email field.
+- Strictly separate from Telegram player authentication — different cookie, different table, no shared code path with `lib/telegram/verifyInitData.ts`.
+- 21 unit tests (`node --test`, no new test framework dependency) covering password hashing, session lifecycle, and cookie policy.

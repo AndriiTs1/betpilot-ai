@@ -39,12 +39,37 @@ enum MessageDirection {
 }
 
 model Operator {
-  id        String   @id @default(cuid())
-  name      String
-  phone     String   @unique
-  createdAt DateTime @default(now())
+  id           String   @id @default(cuid())
+  name         String
+  phone        String   @unique
+  // Stage 5.0B — nullable so existing rows (e.g. seed.ts's TEST_OPERATOR_PHONE)
+  // migrate cleanly with no password set yet; scripts/create-operator.ts is
+  // the only intended way to set/update this.
+  passwordHash String?
+  createdAt    DateTime @default(now())
 
-  players Player[]
+  players  Player[]
+  sessions OperatorSession[]
+}
+
+// Stage 5.0B — database-backed operator login sessions. The DB stores only
+// tokenHash (SHA-256 of the raw session token); the raw token itself exists
+// only in the operator's browser cookie and is never persisted anywhere. See
+// docs/OPERATOR_AUTH_IMPLEMENTATION.md for the full session lifecycle.
+model OperatorSession {
+  id         String   @id @default(cuid())
+  operatorId String
+  operator   Operator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+
+  tokenHash String @unique
+
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  lastUsedAt DateTime?
+
+  @@index([operatorId])
+  @@index([expiresAt])
 }
 
 model Player {
