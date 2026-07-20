@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Camera, Images, ScanLine } from "lucide-react";
 import {
   fetchBetScreenshotPreview,
   getBetScreenshotErrorMessage,
@@ -248,7 +249,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
   const showPreviewBlock = phase === "ready" || phase === "confirming";
 
   return (
-    <div>
+    <div className="mx-auto w-full max-w-[420px]">
       <button
         type="button"
         onClick={onBack}
@@ -258,8 +259,21 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
         ‹ Back
       </button>
 
-      <p className="mt-3 text-xl font-bold text-white">Send a screenshot</p>
-      <p className="mt-1 text-sm text-slate-400">Upload a photo of your bet slip</p>
+      {/* Centered hero: same ScanLine icon as the action sheet entry
+          (BetActionSheet.tsx) and BetScreen's own main CTA, so the visual
+          thread carries through from "tap Send screenshot" to landing here.
+          mt-8 (vs. the previous mt-3) is the "slightly lower" breathing
+          room requested in the UX review. */}
+      <div className="mt-8 flex flex-col items-center text-center">
+        <div
+          className="flex h-14 w-14 items-center justify-center rounded-full"
+          style={{ background: "rgba(96,232,74,0.14)", boxShadow: "0 0 24px 4px rgba(96,232,74,0.20)" }}
+        >
+          <ScanLine size={26} strokeWidth={2} color="#60E84A" aria-hidden="true" />
+        </div>
+        <p className="mt-3 text-xl font-bold text-white">Upload your bet slip</p>
+        <p className="mt-1 text-sm text-slate-400">Choose a photo from your gallery or take a new one.</p>
+      </div>
 
       {/* Both inputs stay mounted (hidden) regardless of phase, so the
           trigger buttons below can always ref.click() them reliably. */}
@@ -282,30 +296,32 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
       />
 
       {showSelectionBlock && (
-        <div className="mt-4">
+        <div className="mt-6">
           {!file && (
             <div className="flex flex-col gap-2">
               <button
                 type="button"
                 onClick={() => galleryInputRef.current?.click()}
                 aria-label="Choose image from gallery"
-                className="min-h-11 w-full rounded-2xl text-[15px] font-semibold"
+                className="flex min-h-11 w-full items-center justify-center gap-2 rounded-2xl text-[15px] font-semibold"
                 style={{
                   background: "#60E84A",
                   color: "#04170C",
                 }}
               >
-                📷 Choose from gallery
+                <Images size={18} strokeWidth={2} aria-hidden="true" />
+                Choose from gallery
               </button>
 
               <button
                 type="button"
                 onClick={() => cameraInputRef.current?.click()}
                 aria-label="Take a photo"
-                className="min-h-11 w-full rounded-2xl text-[15px] font-medium text-slate-400"
+                className="flex min-h-11 w-full items-center justify-center gap-2 rounded-2xl text-[15px] font-medium text-slate-400"
                 style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
               >
-                📸 Take photo
+                <Camera size={18} strokeWidth={2} aria-hidden="true" />
+                Take photo
               </button>
             </div>
           )}
