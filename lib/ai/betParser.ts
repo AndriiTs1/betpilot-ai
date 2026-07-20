@@ -236,3 +236,214 @@ export async function parseBetMessage(
 
   return parseWithOllama(text);
 }
+
+/* -------------------------------------------------------------------------- */
+/* Image (screenshot) parsing — Stage 4.5C                                    */
+/* -------------------------------------------------------------------------- */
+//
+// Always Claude — Ollama's default model (llama3.2) has no vision support,
+// and this project deliberately doesn't branch on AI_PROVIDER for images
+// (see Stage 4.5A decision). Reuses CLAUDE_MODEL, getAnthropicClient(),
+// rejectBetTool, and betFieldsSchema as-is; parseWithClaude()/
+// parseBetMessage() above are untouched.
+
+const CLAUDE_IMAGE_TIMEOUT_MS = 25000;
+
+export interface ParsedImageSelection {
+  sport: string;
+  event: string;
+  selection: string;
+  odds: number | null;
+}
+
+export type ParseImageBetResult =
+  | { valid: true; type: "SINGLE"; bet: ParsedBet }
+  | { valid: true; type: "PARLAY"; stake: number; selections: ParsedImageSelection[] }
+  | {
+      valid: false;
+      // Deterministic, Zod/tool-choice-driven — never derived from
+      // sniffing Claude's own prose, so the caller can map each reason to a
+      // safe public error code without guessing.
+      reason: "not_a_bet" | "no_tool_call" | "incomplete" | "timeout" | "api_error";
+      // Server-side diagnostic only — callers must never put this in a
+      // client response.
+      detail: string;
+    };
+
+// Only the fields extract_single_bet_from_image can submit — deliberately
+// the same shape as betFieldsSchema (reused directly below), not redefined.
+const parlaySelectionFieldsSchema = z.object({
+  sport: z.string().trim().min(1),
+  event: z.string().trim().min(1),
+  selection: z.string().trim().min(1),
+  odds: z.number().positive().finite().nullable(),
+});
+
+const parlayBetFieldsSchema = z.object({
+  stake: z.number().positive().finite(),
+  selections: z.array(parlaySelectionFieldsSchema).min(2),
+});
+
+const CLAUDE_IMAGE_SYSTEM_PROMPT = `You extract structured sports betting data from a screenshot of a bookmaker bet slip.
+
+Only extract data that is actually visible in the image. Never invent or guess a missing sport, league, event, selection, odds, stake, or date — if a value isn't clearly shown, treat the bet as incomplete and call "reject_bet" instead of filling it in with a plausible-looking value.
+
+Do not confuse:
+- an advertised promotion, account balance, or a "potential win"/payout figure with the actual stake the player placed;
+- the combined/total odds of a multi-selection (parlay/accumulator) slip with the odds of any single leg within it.
+
+Call "extract_single_bet_from_image" if the slip shows exactly one selection.
+Call "extract_parlay_bet_from_image" if the slip shows two or more selections (an accumulator/parlay) — list every leg you can actually read, each with its own odds if shown.
+Call "reject_bet" if the image is not a legible bookmaker bet slip, or if you cannot confidently read the fields a bet requires.
+
+Respond only by calling exactly one of these tools — no free text outside the tool call.`;
+
+const extractSingleBetFromImageTool: Anthropic.Beta.BetaTool = {
+  name: "extract_single_bet_from_image",
+  description: "Record a single-selection bet read from a bookmaker slip screenshot.",
+  strict: true,
+  input_schema: {
+    type: "object",
+    properties: {
+      sport: { type: "string", description: "The sport being bet on, e.g. Football, Tennis." },
+      event: { type: "string", description: "The match or event, e.g. Real Madrid vs Barcelona." },
+      selection: { type: "string", description: "The outcome the player is betting on." },
+      stake: { type: "number", description: "The stake amount actually printed on the slip." },
+      odds: {
+        type: ["number", "null"],
+        description: "The odds printed on the slip, or null if not legible.",
+      },
+    },
+    required: ["sport", "event", "selection", "stake", "odds"],
+    additionalProperties: false,
+  },
+};
+
+const extractParlayBetFromImageTool: Anthropic.Beta.BetaTool = {
+  name: "extract_parlay_bet_from_image",
+  description: "Record a multi-selection (accumulator/parlay) bet read from a bookmaker slip screenshot.",
+  strict: true,
+  input_schema: {
+    type: "object",
+    properties: {
+      stake: { type: "number", description: "The total stake amount actually printed on the slip." },
+      selections: {
+        type: "array",
+        description: "Every leg of the parlay, in the order shown on the slip.",
+        items: {
+          type: "object",
+          properties: {
+            sport: { type: "string" },
+            event: { type: "string" },
+            selection: { type: "string" },
+            odds: { type: ["number", "null"] },
+          },
+          required: ["sport", "event", "selection", "odds"],
+          additionalProperties: false,
+        },
+        minItems: 2,
+      },
+    },
+    required: ["stake", "selections"],
+    additionalProperties: false,
+  },
+};
+
+// Claude's tool_use.input is already parsed JSON (never a raw string this
+// function re-parses), so it can't contain a bare NaN/Infinity token — this
+// only guards against whitespace-only strings slipping past betFieldsSchema/
+// parlaySelectionFieldsSchema's `.min(1)` checks, without editing those
+// shared schemas (parseWithClaude's text path must stay byte-for-byte
+// unchanged).
+function trimStringFields(input: Record<string, unknown>): Record<string, unknown> {
+  const trimmed: Record<string, unknown> = { ...input };
+  for (const key of Object.keys(trimmed)) {
+    if (typeof trimmed[key] === "string") trimmed[key] = trimmed[key].trim();
+  }
+  return trimmed;
+}
+
+export async function parseImageWithClaude(input: {
+  imageBase64: string;
+  mediaType: "image/jpeg" | "image/png" | "image/webp";
+}): Promise<ParseImageBetResult> {
+  let response: Anthropic.Beta.BetaMessage;
+
+  try {
+    const client = getAnthropicClient();
+
+    response = await client.beta.messages.create(
+      {
+        model: CLAUDE_MODEL,
+        max_tokens: 1024,
+        system: CLAUDE_IMAGE_SYSTEM_PROMPT,
+        tools: [extractSingleBetFromImageTool, extractParlayBetFromImageTool, rejectBetTool],
+        tool_choice: { type: "any" },
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: { type: "base64", media_type: input.mediaType, data: input.imageBase64 },
+              },
+              { type: "text", text: "Extract the bet details from this bookmaker slip screenshot." },
+            ],
+          },
+        ],
+      },
+      { timeout: CLAUDE_IMAGE_TIMEOUT_MS },
+    );
+  } catch (err) {
+    if (err instanceof Anthropic.APIConnectionTimeoutError) {
+      return { valid: false, reason: "timeout", detail: err.message };
+    }
+
+    const detail =
+      err instanceof Anthropic.APIError
+        ? err.message
+        : err instanceof Error
+          ? err.message
+          : "Unknown error calling Claude for image parsing";
+    return { valid: false, reason: "api_error", detail };
+  }
+
+  const toolUse = response.content.find(
+    (block): block is Anthropic.Beta.BetaToolUseBlock => block.type === "tool_use",
+  );
+
+  if (!toolUse) {
+    return { valid: false, reason: "no_tool_call", detail: "Claude did not return a tool call" };
+  }
+
+  if (toolUse.name === "reject_bet") {
+    return { valid: false, reason: "not_a_bet", detail: "Image does not appear to be a legible bet slip" };
+  }
+
+  if (toolUse.name === "extract_single_bet_from_image") {
+    const result = betFieldsSchema.safeParse(trimStringFields(toolUse.input as Record<string, unknown>));
+    if (!result.success) {
+      return { valid: false, reason: "incomplete", detail: result.error.message };
+    }
+    return { valid: true, type: "SINGLE", bet: { valid: true, ...result.data } };
+  }
+
+  if (toolUse.name === "extract_parlay_bet_from_image") {
+    const raw = toolUse.input as { stake?: unknown; selections?: unknown };
+    const trimmedSelections = Array.isArray(raw.selections)
+      ? raw.selections.map((selection) =>
+          typeof selection === "object" && selection !== null
+            ? trimStringFields(selection as Record<string, unknown>)
+            : selection,
+        )
+      : raw.selections;
+
+    const result = parlayBetFieldsSchema.safeParse({ stake: raw.stake, selections: trimmedSelections });
+    if (!result.success) {
+      return { valid: false, reason: "incomplete", detail: result.error.message };
+    }
+    return { valid: true, type: "PARLAY", stake: result.data.stake, selections: result.data.selections };
+  }
+
+  return { valid: false, reason: "no_tool_call", detail: `Unexpected tool call: ${toolUse.name}` };
+}

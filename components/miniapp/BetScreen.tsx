@@ -5,6 +5,7 @@ import { ScanLine, Zap } from "lucide-react";
 import StatusBadge from "@/components/bets/StatusBadge";
 import BetActionSheet from "./BetActionSheet";
 import BetTextForm from "./BetTextForm";
+import BetScreenshotForm from "./BetScreenshotForm";
 import type { ConfirmedBet } from "./betConfirmApi";
 import type { RecentBet } from "./types";
 
@@ -19,9 +20,9 @@ const RECENT_ACTIVITY_LIMIT = 2;
 
 // "AI Assistant First" composition: one large action zone opens a bottom
 // sheet with the two submission methods, instead of two competing cards.
-// "Написать ставку" opens BetTextForm (preview -> confirm -> real Bet,
-// Stage 4.4B). "Отправить скриншот" is still a no-op; screenshot submission
-// is a separate, not-yet-built flow.
+// "Написать ставку" opens BetTextForm and "Отправить скриншот" opens
+// BetScreenshotForm — both preview -> confirm -> real Bet (Stage 4.4B /
+// 4.5D), sharing the same confirmed-Bet success screen below.
 export default function BetScreen({
   availableCredit,
   exposure,
@@ -30,6 +31,7 @@ export default function BetScreen({
 }: BetScreenProps) {
   const [isSheetOpen, setSheetOpen] = useState(false);
   const [isTextFormOpen, setTextFormOpen] = useState(false);
+  const [isScreenshotFormOpen, setScreenshotFormOpen] = useState(false);
   // Set only after a real POST .../confirm success (Stage 4.4B) — holds the
   // whitelisted server response only, never previewId/playerId/previewToken.
   const [confirmedBet, setConfirmedBet] = useState<ConfirmedBet | null>(null);
@@ -42,9 +44,15 @@ export default function BetScreen({
     setTextFormOpen(true);
   };
 
+  const openScreenshotForm = () => {
+    closeSheet();
+    setScreenshotFormOpen(true);
+  };
+
   const closeToDashboard = () => {
     setConfirmedBet(null);
     setTextFormOpen(false);
+    setScreenshotFormOpen(false);
   };
 
   if (confirmedBet) {
@@ -59,6 +67,12 @@ export default function BetScreen({
 
   if (isTextFormOpen) {
     return <BetTextForm onBack={() => setTextFormOpen(false)} onConfirmed={setConfirmedBet} />;
+  }
+
+  if (isScreenshotFormOpen) {
+    return (
+      <BetScreenshotForm onBack={() => setScreenshotFormOpen(false)} onConfirmed={setConfirmedBet} />
+    );
   }
 
   return (
@@ -154,7 +168,7 @@ export default function BetScreen({
       <BetActionSheet
         open={isSheetOpen}
         onClose={closeSheet}
-        onSelectScreenshot={closeSheet}
+        onSelectScreenshot={openScreenshotForm}
         onSelectText={openTextForm}
       />
     </div>

@@ -50,7 +50,11 @@ export type BetPreviewResult = { ok: true; data: BetPreviewSuccess } | { ok: fal
 // Minimal structural check before trusting the response shape — no blind
 // `as BetPreviewSuccess` cast. Doesn't validate every nested field
 // exhaustively, just enough to catch a genuinely malformed/unexpected body.
-function isBetPreviewSuccess(value: unknown): value is BetPreviewSuccess {
+// Exported so betScreenshotApi.ts can validate its own response against the
+// exact same runtime shape — the screenshot preview endpoint's SINGLE-result
+// success contract is deliberately identical to this one, so this is the
+// only success-shape validator, not a second parallel implementation.
+export function isBetPreviewSuccess(value: unknown): value is BetPreviewSuccess {
   if (
     typeof value !== "object" ||
     value === null ||
