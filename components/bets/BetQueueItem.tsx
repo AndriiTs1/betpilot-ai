@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { dispatchDashboardRefresh } from "@/lib/dashboard/refreshEvent";
 
 export interface PendingBet {
   id: string;
@@ -46,6 +47,10 @@ export default function BetQueueItem({ bet, onResolved }: BetQueueItemProps) {
 
       if (response.ok) {
         onResolved(bet.id);
+        // Confirm/reject also changes Exposure, Available, and the
+        // player's Active Bets/History — let those refresh immediately
+        // rather than only on the next manual reload.
+        dispatchDashboardRefresh();
         return;
       }
 
@@ -69,7 +74,7 @@ export default function BetQueueItem({ bet, onResolved }: BetQueueItemProps) {
   }
 
   return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
+    <div className="rounded-2xl border border-slate-800/70 bg-[#0b1220] p-6 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.04)]">
       <div className="flex justify-between">
         <div>
           <h3 className="text-xl font-semibold">{bet.player.name}</h3>
@@ -95,7 +100,8 @@ export default function BetQueueItem({ bet, onResolved }: BetQueueItemProps) {
           type="button"
           onClick={() => handleAction("confirm")}
           disabled={pendingAction !== null}
-          className="rounded-xl bg-green-500 px-5 py-2 font-semibold text-black disabled:opacity-50"
+          aria-label={`Confirm bet for ${bet.player.name}`}
+          className="min-h-11 rounded-xl bg-green-500 px-5 py-2 font-semibold text-black transition-colors hover:bg-green-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-green-400 disabled:opacity-50 disabled:hover:bg-green-500"
         >
           {pendingAction === "confirm" ? "Confirming..." : "Confirm"}
         </button>
@@ -104,7 +110,8 @@ export default function BetQueueItem({ bet, onResolved }: BetQueueItemProps) {
           type="button"
           onClick={() => handleAction("reject")}
           disabled={pendingAction !== null}
-          className="rounded-xl bg-red-500 px-5 py-2 font-semibold text-white disabled:opacity-50"
+          aria-label={`Reject bet for ${bet.player.name}`}
+          className="min-h-11 rounded-xl bg-red-500 px-5 py-2 font-semibold text-white transition-colors hover:bg-red-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-400 disabled:opacity-50 disabled:hover:bg-red-500"
         >
           {pendingAction === "reject" ? "Rejecting..." : "Reject"}
         </button>

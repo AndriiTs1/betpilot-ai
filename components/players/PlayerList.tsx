@@ -1,18 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import PlayerCard from "./PlayerCard";
-
-interface RecentBet {
-  id: string;
-  sport: string;
-  event: string;
-  outcome: string;
-  stake: string;
-  odds: string | null;
-  status: string;
-  createdAt: string;
-}
+import PlayerCard, { type PlayerBet } from "./PlayerCard";
+import { DASHBOARD_REFRESH_EVENT } from "@/lib/dashboard/refreshEvent";
 
 interface Player {
   id: string;
@@ -21,10 +11,12 @@ interface Player {
   phoneNumber: string | null;
   creditLimit: string;
   currentCredit: string;
+  available: string;
   exposure: string;
-  totalBets: number;
+  activeBetsCount: number;
   nextSettlementDate: string;
-  recentBets: RecentBet[];
+  activeBets: PlayerBet[];
+  history: PlayerBet[];
 }
 
 export default function PlayerList() {
@@ -58,14 +50,20 @@ export default function PlayerList() {
 
     loadPlayers();
 
+    // Stage 6.1: Confirm/Reject on a pending bet moves it into this
+    // player's Active Bets or History and changes their Exposure/Available
+    // — refresh immediately instead of only on next page load.
+    window.addEventListener(DASHBOARD_REFRESH_EVENT, loadPlayers);
+
     return () => {
       cancelled = true;
+      window.removeEventListener(DASHBOARD_REFRESH_EVENT, loadPlayers);
     };
   }, []);
 
   return (
     <section className="mt-10">
-      <h2 className="mb-6 text-2xl font-semibold">Players</h2>
+      <h2 className="mb-6 text-center text-2xl font-semibold sm:text-left">Players</h2>
 
       {players === null && !error && <p className="text-slate-400">Loading...</p>}
 
@@ -78,7 +76,7 @@ export default function PlayerList() {
       )}
 
       {players !== null && players.length > 0 && (
-        <div className="space-y-6">
+        <div className="space-y-4">
           {players.map((player) => (
             <PlayerCard
               key={player.id}
@@ -86,11 +84,13 @@ export default function PlayerList() {
               telegramId={player.telegramId}
               phoneNumber={player.phoneNumber}
               creditLimit={player.creditLimit}
-              currentCredit={player.currentCredit}
+              available={player.available}
               exposure={player.exposure}
-              totalBets={player.totalBets}
+              currentCredit={player.currentCredit}
+              activeBetsCount={player.activeBetsCount}
               nextSettlementDate={player.nextSettlementDate}
-              recentBets={player.recentBets}
+              activeBets={player.activeBets}
+              history={player.history}
             />
           ))}
         </div>

@@ -2,11 +2,11 @@
 
 import { useEffect, useState } from "react";
 import StatCard from "./StatCard";
-import PlayStatusCard from "./PlayStatusCard";
+import { DASHBOARD_REFRESH_EVENT } from "@/lib/dashboard/refreshEvent";
 
 export default function DashboardOverview() {
   const [activePlayers, setActivePlayers] = useState<number | null>(null);
-  const [totalRemainingCredit, setTotalRemainingCredit] = useState<string | null>(null);
+  const [totalAvailable, setTotalAvailable] = useState<string | null>(null);
   const [pendingBetsCount, setPendingBetsCount] = useState<number | null>(null);
   const [pendingBetsSum, setPendingBetsSum] = useState<string | null>(null);
   const [confirmedCount, setConfirmedCount] = useState<number | null>(null);
@@ -30,7 +30,7 @@ export default function DashboardOverview() {
 
         if (!cancelled) {
           setActivePlayers(data.activePlayers);
-          setTotalRemainingCredit(data.totalRemainingCredit);
+          setTotalAvailable(data.totalAvailable);
           setPendingBetsCount(data.pendingBetsCount);
           setPendingBetsSum(data.pendingBetsSum);
           setConfirmedCount(data.confirmedCount);
@@ -45,58 +45,65 @@ export default function DashboardOverview() {
 
     loadOverview();
 
+    // Stage 6.1: Confirm/Reject on a pending bet changes Pending Bets,
+    // Exposure, and Available all at once — BetQueueItem dispatches this
+    // event on a successful action so this KPI row refreshes immediately
+    // instead of only on next page load. See lib/dashboard/refreshEvent.ts.
+    window.addEventListener(DASHBOARD_REFRESH_EVENT, loadOverview);
+
     return () => {
       cancelled = true;
+      window.removeEventListener(DASHBOARD_REFRESH_EVENT, loadOverview);
     };
   }, []);
 
-  const activePlayersValue = error ? "—" : activePlayers === null ? "…" : String(activePlayers);
-  const activePlayersDescription = error ? "Failed to load" : "Placed at least one bet";
+  const playersValue = error ? "—" : activePlayers === null ? "…" : String(activePlayers);
+  const playersDescription = error ? "Failed to load" : "Registered players";
 
-  const creditValue =
-    error ? "—" : totalRemainingCredit === null ? "…" : totalRemainingCredit;
-  const creditDescription = error ? "Failed to load" : "Total remaining";
+  const availableValue = error ? "—" : totalAvailable === null ? "…" : totalAvailable;
+  const availableDescription = error ? "Failed to load" : "Remaining, minus exposure";
 
-  const pendingBetsValue =
-    error ? "—" : pendingBetsCount === null ? "…" : String(pendingBetsCount);
+  const exposureValue = error ? "—" : confirmedSum === null ? "…" : confirmedSum;
+  const exposureDescription = error
+    ? "Failed to load"
+    : confirmedCount === null
+      ? "…"
+      : `${confirmedCount} confirmed bet${confirmedCount === 1 ? "" : "s"}`;
+
+  const pendingBetsValue = error ? "—" : pendingBetsCount === null ? "…" : String(pendingBetsCount);
   const pendingBetsDescription = error
     ? "Failed to load"
     : pendingBetsSum === null
       ? "…"
       : `Totaling ${pendingBetsSum}`;
 
-  const playedCountValue = error ? "—" : confirmedCount === null ? "…" : String(confirmedCount);
-  const playedSumValue = error ? "—" : confirmedSum === null ? "…" : confirmedSum;
-  const notPlayedCountValue = error ? "—" : pendingBetsCount === null ? "…" : String(pendingBetsCount);
-  const notPlayedSumValue = error ? "—" : pendingBetsSum === null ? "…" : pendingBetsSum;
-
   return (
     <section className="grid gap-6 md:grid-cols-2 xl:grid-cols-4">
+      <StatCard title="Players" value={playersValue} description={playersDescription} icon="users" accent="blue" />
+
       <StatCard
-        title="Active Players"
-        value={activePlayersValue}
-        description={activePlayersDescription}
-        icon="users"
+        title="Available"
+        value={availableValue}
+        description={availableDescription}
+        icon="credit-card"
+        accent="blue"
       />
 
       <StatCard
-        title="Available Credit"
-        value={creditValue}
-        description={creditDescription}
-        icon="credit-card"
+        title="Exposure"
+        value={exposureValue}
+        description={exposureDescription}
+        icon="chart-bar"
+        accent="blue"
       />
 
       <StatCard
         title="Pending Bets"
         value={pendingBetsValue}
         description={pendingBetsDescription}
-      />
-
-      <PlayStatusCard
-        playedCount={playedCountValue}
-        playedSum={playedSumValue}
-        notPlayedCount={notPlayedCountValue}
-        notPlayedSum={notPlayedSumValue}
+        icon="hourglass"
+        accent="green"
+        emphasize={pendingBetsCount !== null && pendingBetsCount > 0}
       />
     </section>
   );

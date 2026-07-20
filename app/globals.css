@@ -26,6 +26,17 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
+/* Stage 6.2 — Dashboard page background: near-black navy with one soft
+   radial highlight, aligned with the Mini App's dark palette but deliberately
+   calmer (no noise texture, no multi-layer glow — see MiniAppBackground.tsx
+   for the heavier version used there, which the Dashboard intentionally does
+   not reuse). */
+.dashboard-shell {
+  background:
+    radial-gradient(circle at top, rgba(37, 99, 235, 0.12), transparent 42%),
+    #020817;
+}
+
 /* BetTicket (Stage 4.5G) — fade/scale on mount, a small bounce on the
    status checkmark, and a row-by-row stagger. Kept as plain CSS rather
    than a JS animation library (none is installed in this project) and

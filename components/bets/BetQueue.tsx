@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import BetQueueItem, { type PendingBet } from "./BetQueueItem";
+import EmptyState from "@/components/dashboard/EmptyState";
 
 export default function BetQueue() {
   const [bets, setBets] = useState<PendingBet[] | null>(null);
@@ -55,7 +56,7 @@ export default function BetQueue() {
 
   return (
     <section className="mt-10">
-      <h2 className="mb-6 text-2xl font-semibold">Pending Bets</h2>
+      <h2 className="mb-6 text-center text-2xl font-semibold sm:text-left">Pending Bets</h2>
 
       {isInitialLoad && !error && <p className="text-slate-400">Loading...</p>}
 
@@ -64,7 +65,11 @@ export default function BetQueue() {
       )}
 
       {bets !== null && bets.length === 0 && !error && (
-        <p className="text-slate-400">No pending bets.</p>
+        <EmptyState
+          icon="inbox"
+          title="No pending bets."
+          description="New bets will appear here for confirmation."
+        />
       )}
 
       {bets !== null && bets.length > 0 && (

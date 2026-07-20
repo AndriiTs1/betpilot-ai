@@ -9,21 +9,6 @@ export async function GET(request: NextRequest) {
   if (!auth.ok) return auth.response;
 
   try {
-    // findMany({distinct}) is Prisma's purpose-built API for "give me the
-    // distinct values of a field" (translates to SELECT DISTINCT ON in
-    // Postgres). groupBy is designed for per-group aggregation (sum/avg/etc
-    // per playerId) — it would also work here, but that's the wrong tool
-    // for a plain dedup. Neither can return a single COUNT(DISTINCT ...)
-    // scalar through Prisma's query builder, so both pull one row per
-    // distinct player into the app and count .length; at this app's scale
-    // that's fine. A raw $queryRaw`SELECT COUNT(DISTINCT "playerId") ...`
-    // would be the next step if the player base grows large enough for the
-    // row-transfer cost to matter.
-    const distinctPlayers = await prisma.bet.findMany({
-      distinct: ["playerId"],
-      select: { playerId: true },
-    });
-
     // Deliberately computed in JS, not as a single SQL aggregate: the
     // per-player "remaining credit" branches on the sign of currentCredit,
     // and this figure is correctness-critical (it's a credit exposure
@@ -73,9 +58,23 @@ export async function GET(request: NextRequest) {
       new Prisma.Decimal(0),
     );
 
+    // Stage 6.1 — Available = remaining credit limit minus currently-
+    // confirmed exposure, summed across all players. Algebraically this is
+    // Σ(remaining_i) − Σ(exposure_i) regardless of how exposure is grouped,
+    // so it reuses the two sums already computed above rather than a new
+    // per-player query. Same formula the Mini App and the Players list
+    // already use per-player (app/api/miniapp/me/route.ts) — previously
+    // this KPI only showed totalRemainingCredit, which didn't subtract
+    // exposure and could visibly disagree with the per-player figure for
+    // the same underlying state; added here as a new field (not a rename)
+    // so totalRemainingCredit's own meaning is unchanged for any other
+    // consumer.
+    const totalAvailable = totalRemainingCredit.minus(confirmedSum);
+
     return NextResponse.json({
-      activePlayers: distinctPlayers.length,
+      activePlayers: players.length,
       totalRemainingCredit: totalRemainingCredit.toString(),
+      totalAvailable: totalAvailable.toString(),
       pendingBetsCount,
       pendingBetsSum: pendingBetsSum.toString(),
       confirmedCount,
