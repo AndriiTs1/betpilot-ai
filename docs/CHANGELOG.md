@@ -99,3 +99,14 @@ Production review of the screenshot recognition pipeline: architecture summary, 
 - Already-authenticated visitors to `/operator/login` are redirected to `/` (the Dashboard's real current route — there is no separate `/dashboard` route). This check is local to the login page only; no middleware was added.
 - **No Dashboard or API route protection yet** — `/` and every `/api/dashboard/*` route are unchanged and still fully open. That's Stage 5.0D.
 - 13 new unit tests (34 total in `lib/auth/`) — login outcomes, malformed-body handling, and rate-limiter behavior — all against in-memory fakes, no real database touched.
+
+## Stage 5.0D — Dashboard and API Protection
+
+- `/` (the Dashboard page) and all six `/api/dashboard/*` routes (`overview`, `players`, `bets/pending`, `bets/history`, `bets/[id]/confirm`, `bets/[id]/reject`) now require a valid operator session — the entire operator area identified as open in `OPERATOR_AUTH_AUDIT.md` is closed.
+- New shared helper `lib/auth/requireOperator.ts`: `requireOperatorApi()` for Route Handlers (`401 { ok: false, error: "UNAUTHORIZED" }` on failure), `requireOperatorPage()` for the Dashboard Server Component (`redirect("/operator/login")` on failure). Both built directly on Stage 5.0B's already-tested session validation — no new auth logic.
+- Unauthorized API responses are identical regardless of cause (missing/malformed/expired/revoked session) — no internal detail leaks across the boundary.
+- No `middleware.ts` introduced — evaluated and documented as unjustified for seven call sites that a two-line shared-helper call already fully de-duplicates; see `docs/OPERATOR_AUTH_IMPLEMENTATION.md` for the full reasoning (matcher-misconfiguration risk, unproven middleware/Prisma runtime compatibility, and consistency with this project's existing explicit-per-route-check convention).
+- `OPERATOR_SECRET` on `/api/bets/*` is untouched — session auth and the static secret are now both in effect on the dashboard proxy routes, layered rather than one replacing the other.
+- `app/page.tsx` is now dynamically rendered (was previously statically prerendered) — an expected consequence of reading the session cookie before rendering.
+- 9 new unit tests (43 total in `lib/auth/`) — including a same-signature check confirming `next/navigation`'s `redirect()` can be asserted on directly (via its digest) without mocking `next/headers` or spinning up a real request.
+- Mini App (`/miniapp`, `/api/miniapp/*`) fully unaffected — confirmed unchanged and independently verified live.

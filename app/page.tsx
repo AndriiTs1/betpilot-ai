@@ -2,8 +2,14 @@ import DashboardOverview from "@/components/dashboard/DashboardOverview";
 import BetQueue from "@/components/bets/BetQueue";
 import BetHistory from "@/components/bets/BetHistory";
 import PlayerList from "@/components/players/PlayerList";
+import { requireOperatorPage } from "@/lib/auth/requireOperator";
 
-export default function Home() {
+// Stage 5.0D: redirects to /operator/login for anyone without a valid
+// operator session, before any Dashboard content is rendered. This is the
+// only change in this file — no UI/business logic touched.
+export default async function Home() {
+  await requireOperatorPage();
+
   return (
     <main className="min-h-screen bg-slate-950 text-white">
       <div className="mx-auto max-w-7xl px-6 pt-4 pb-10 sm:pt-6">

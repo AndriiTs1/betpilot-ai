@@ -1,6 +1,7 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { Prisma } from "@/lib/generated/prisma/client";
+import { requireOperatorApi } from "@/lib/auth/requireOperator";
 
 const SETTLEMENT_TIME_ZONE = "Europe/Zurich";
 
@@ -50,7 +51,10 @@ function getSettlementPeriod(): { periodStart: Date; nextSettlementDate: Date } 
   };
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const auth = await requireOperatorApi(request);
+  if (!auth.ok) return auth.response;
+
   try {
     const { periodStart, nextSettlementDate } = getSettlementPeriod();
 

@@ -1,8 +1,8 @@
-# Operator Authentication — Implementation Notes (Stages 5.0B–5.0C)
+# Operator Authentication — Implementation Notes (Stages 5.0B–5.0D)
 
-This document describes the operator authentication work built so far, per the architecture approved in `OPERATOR_AUTH_AUDIT.md`. **Stage 5.0B** (password hashing, database-backed sessions, cookie policy) built the standalone, tested utilities. **Stage 5.0C** (this update) wires those utilities into a real login page, a login API route, and a logout API route.
+This document describes the operator authentication work built so far, per the architecture approved in `OPERATOR_AUTH_AUDIT.md`. **Stage 5.0B** (password hashing, database-backed sessions, cookie policy) built the standalone, tested utilities. **Stage 5.0C** wired those utilities into a real login page, a login API route, and a logout API route. **Stage 5.0D** (this update) closes the loop: `/` and every `/api/dashboard/*` route now require a valid operator session.
 
-**Still true after Stage 5.0C**: `/` and every `/api/dashboard/*` route are exactly as unprotected as `OPERATOR_AUTH_AUDIT.md` originally found them. Logging in now creates a real, valid session cookie — but nothing anywhere checks for that cookie before serving the Dashboard or its API routes yet. That is Stage 5.0D's job, deliberately not started here. See "What Stage 5.0C does *not* do" at the end of this document.
+**As of Stage 5.0D**: the entire operator area — the Dashboard page and its six API routes — is closed to anyone without a valid session. This was the last stage in the original plan from `OPERATOR_AUTH_AUDIT.md`; there is no more intentionally-open operator surface left.
 
 ## Password hash format
 
@@ -199,9 +199,75 @@ A durable store (Vercel KV/Upstash, or a database table) would remove both limit
 - On failure: the password field is cleared and a single generic message ("Invalid phone or password.") is shown in a `role="alert"` element — the same message regardless of why the login failed, matching the API's own generic error.
 - Visual design deliberately matches the **Dashboard's** existing Tailwind palette (`bg-slate-950`/`bg-slate-900`/`border-slate-800`, plain `green-500`/`red-950` accents, Tabler icon font) rather than the Mini App's distinct green-glow/inline-style theme — this page leads into the Dashboard, not the Mini App, and the existing per-domain icon-library convention (Mini App → `lucide-react`, Dashboard → Tabler icon font) is preserved rather than crossed. One restrained radial gradient behind the card is the only gradient on the page.
 
-### What Stage 5.0C does *not* do
+### What Stage 5.0C left open (now closed by Stage 5.0D)
 
-- **No Dashboard or API route protection.** `/` and every `/api/dashboard/*` route are byte-for-byte unchanged from Stage 5.0B (confirmed via `git diff` before this stage's commit) — they remain fully open to an unauthenticated caller. Logging in successfully now produces a real, valid session cookie, but nothing checks for it anywhere except the login page's own already-authenticated redirect.
-- **No `middleware.ts`.** Still none anywhere in this project.
-- **No session revocation UI**, no "log out everywhere" action, no password reset flow — all explicitly deferred, per the original audit.
-- **`OPERATOR_SECRET`** (the pre-existing static-secret check on `/api/bets/*`) is untouched.
+At the end of Stage 5.0C, `/` and every `/api/dashboard/*` route were still byte-for-byte unchanged from Stage 5.0B — fully open to an unauthenticated caller. That gap is what Stage 5.0D closes; see below.
+
+---
+
+## Stage 5.0D — Dashboard and API protection
+
+### Shared helper: `lib/auth/requireOperator.ts`
+
+Next.js App Router has two distinct contexts that need protecting, and they don't share a request/response shape — Route Handlers get a `NextRequest` and return a `NextResponse`; Server Components read cookies via `next/headers` and signal "go elsewhere" by calling `redirect()`, which throws rather than returning a value. `requireOperator.ts` provides one function per context, both built directly on Stage 5.0B's already-tested `getOperatorSessionFromRequest()` / `validateOperatorSession()` — no new session-validation logic, no new cookie-parsing logic, just two thin adapters:
+
+- **`requireOperatorApi(request, store?)`** — for Route Handlers. Returns `{ ok: true, operator: { operatorId } }` on a valid session, or `{ ok: false, response }` with a ready-to-return `401 { ok: false, error: "UNAUTHORIZED" }` `NextResponse` otherwise. Every protected route handler does exactly:
+  ```ts
+  const auth = await requireOperatorApi(request);
+  if (!auth.ok) return auth.response;
+  ```
+- **`requireOperatorPage()`** — for Server Component pages. Reads the session cookie via `next/headers`'s `cookies()`, and either returns `{ operatorId }` or calls `redirect("/operator/login")` (which never returns). Used as:
+  ```ts
+  export default async function Home() {
+    await requireOperatorPage();
+    // ...renders normally
+  }
+  ```
+- **`resolveOperatorPageAuth(token, store?)`** — the redirect-vs-authenticated decision, factored out of `requireOperatorPage()` specifically so it's unit-testable without `next/headers`. `next/navigation`'s `redirect()` throws a synchronous, digest-tagged `Error` (`NEXT_REDIRECT;<type>;<url>;...`) regardless of whether it's called inside a real Next.js request — it doesn't depend on any request-scoped context to do that (confirmed by reading `node_modules/next/dist/client/components/redirect.js`) — so this function's behavior is safely testable in isolation.
+
+Both public functions accept an optional injectable `store` (same `OperatorSessionStore` type from Stage 5.0B), so tests never touch the real database.
+
+### Protected routes
+
+| Route | Protection |
+|---|---|
+| `GET /` (Dashboard page) | `requireOperatorPage()` — redirects to `/operator/login` |
+| `GET /api/dashboard/overview` | `requireOperatorApi()` — `401` |
+| `GET /api/dashboard/players` | `requireOperatorApi()` — `401` |
+| `GET /api/dashboard/bets/pending` | `requireOperatorApi()` — `401` |
+| `GET /api/dashboard/bets/history` | `requireOperatorApi()` — `401` |
+| `POST /api/dashboard/bets/[id]/confirm` | `requireOperatorApi()` — `401` |
+| `POST /api/dashboard/bets/[id]/reject` | `requireOperatorApi()` — `401` |
+
+Every one of the six API routes runs the check as its very first statement, before touching Prisma or (for the four proxy routes) calling `proxyToOperatorApi()`. `app/page.tsx` calls `requireOperatorPage()` before rendering any Dashboard content. No route's actual business logic, response shape, or query changed — the only edit to each file is the added guard (plus, for `overview`/`players`, adding the previously-unused `request: NextRequest` parameter the check needs).
+
+### Unauthorized response contract
+
+- **Page**: `redirect("/operator/login")` — a real HTTP `307` for a full navigation, or a client-side route change for an in-app navigation. No page content is ever sent before this check runs.
+- **API**: `401` with body `{ "ok": false, "error": "UNAUTHORIZED" }` — identical for a missing cookie, a malformed token, an expired session, and a revoked session. This mirrors the login route's own "never reveal which specific thing failed" discipline (Stage 5.0C) — an attacker probing `/api/dashboard/*` learns nothing about *why* a request was rejected, only that it was.
+
+### Middleware decision: not introduced
+
+Evaluated and rejected for this stage. Reasoning:
+
+- **Scope is small and already de-duplicated.** Exactly seven call sites (one page, six routes) need protection, and `requireOperatorApi()`/`requireOperatorPage()` already eliminate any duplication — each call site is two lines. Middleware would move *where* the check happens, not reduce how much code exists.
+- **A misconfigured matcher is a real, previously-identified risk.** `OPERATOR_AUTH_AUDIT.md` §9 flagged this exact failure mode for this exact stage: a `middleware.ts` matcher that's too broad, too narrow, or subtly wrong is either a security hole (routes that should be protected aren't) or an outage (the Mini App or login page itself gets accidentally gated). Explicit per-route guards can't misfire across routes the way a shared matcher config can — a route either has the two-line check or it doesn't, visibly, in its own file.
+- **Runtime uncertainty.** This project's session validation goes through Prisma (`@prisma/adapter-neon`) and `node:crypto`, both already proven to work in Route Handlers with `export const runtime = "nodejs"` (e.g. the screenshot preview route). Whether the same stack behaves identically in Next.js middleware wasn't a risk worth taking on for a project with zero prior middleware usage, when the simpler option has no such open question.
+- **This project's own established convention is explicit, per-route checks.** `isOperatorAuthorized()` (`/api/bets/*`) and `verifyInitData()` (`/api/miniapp/*`) are both already called explicitly at the top of each route, not centralized in middleware. `requireOperatorApi`/`requireOperatorPage` extend that same pattern rather than introducing a second, different one alongside it.
+
+If the protected surface grows substantially (many more operator routes, or a real `/dashboard/*` route tree), middleware would be worth revisiting — but for six API routes and one page, it adds a new architectural concept and a new failure mode without removing any actual duplication.
+
+### Security decisions
+
+- **No new session/cookie/auth mechanism** — `requireOperator.ts` is pure composition of Stage 5.0B primitives.
+- **The `reason` field never crosses the API boundary.** `requireOperatorApi` reads `OperatorSessionValidation.valid`, nothing else — `"not_found"`/`"expired"`/`"revoked"`/`"malformed"` stay internal, exactly as Stage 5.0B's own doc comment on that field requires.
+- **`OPERATOR_SECRET` (`/api/bets/*`) is still untouched.** The four proxy routes under `/api/dashboard/*` now require a valid session *before* they even call `proxyToOperatorApi()`, which still attaches the static secret server-side as before — session auth and the static secret are both in effect now, deliberately layered rather than one replacing the other in this stage.
+- **`app/page.tsx` switched from statically prerendered to dynamically rendered** — an unavoidable, correct consequence of calling `cookies()` (via `requireOperatorPage`) before rendering; Next.js can't prerender a page whose content depends on a per-request cookie. Confirmed in the build output (`○` → `ƒ`).
+- **No auth logic in any Client Component.** Every dashboard-facing `"use client"` component (`DashboardOverview`, `BetQueue`, `PlayerList`, etc.) is completely unmodified — they still just `fetch()` their existing URLs with no `Authorization` header, exactly as before; the browser's cookie is sent automatically, and the new server-side check is invisible to them unless it fails (in which case they already handle a non-OK response the same way they handle any other failure).
+
+### What's still deliberately out of scope
+
+- No middleware (see above).
+- No session-revocation UI, no "log out everywhere," no password reset flow.
+- No rate limiting on the Dashboard/API routes themselves beyond what already exists on login (Stage 5.0C).
+- `OPERATOR_SECRET` has not been retired — it remains as defense-in-depth on `/api/bets/*`, per the plan since Stage 5.0B.

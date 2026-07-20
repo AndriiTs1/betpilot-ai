@@ -1,9 +1,13 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { Prisma } from "@/lib/generated/prisma/client";
 import { computeRemainingCredit } from "@/lib/players/credit";
+import { requireOperatorApi } from "@/lib/auth/requireOperator";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const auth = await requireOperatorApi(request);
+  if (!auth.ok) return auth.response;
+
   try {
     // findMany({distinct}) is Prisma's purpose-built API for "give me the
     // distinct values of a field" (translates to SELECT DISTINCT ON in
