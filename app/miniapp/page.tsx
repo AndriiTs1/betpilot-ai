@@ -176,15 +176,16 @@ function BannerScreen({
 
   return (
     <div
-      className="flex flex-col items-center justify-center"
+      className="flex flex-col items-center justify-center min-[480px]:justify-start min-[480px]:pt-16"
       style={{ minHeight: containerHeight }}
     >
-      {/* Banner art already contains the logo and tagline — no redundant text on top.
-          Fixed height (natural width-scaled height at a 390px baseline + ~24px) with
-          object-cover keeps the image from stretching — it crops a little off the
-          left/right edges instead of deforming, while the logo/robot (centered in the
-          source art) and the bottom fade into the dark background stay fully intact. */}
-      <div className="relative w-full overflow-hidden" style={{ height: 288 }}>
+      {/* object-cover crops the sides instead of stretching. Above ~480px
+          the box is capped at max-w-[420px] so it keeps cropping the
+          sides only, not the logo/tagline at the top/bottom. */}
+      <div
+        className="relative w-full overflow-hidden min-[480px]:mx-auto min-[480px]:max-w-[420px]"
+        style={{ height: 288 }}
+      >
         <Image
           src="/miniapp/banner.jpg"
           alt="BetPilot AI — AI Betting Assistant"
@@ -193,12 +194,8 @@ function BannerScreen({
           className="object-cover object-center"
         />
 
-        {/* Soft fade over the banner's own bottom margin only (well below
-            the robot/tagline in the source art) — blends the hard bottom
-            edge into the app's dark background instead of a visible seam.
-            #07111F matches MiniAppBackground's own top color stop, since
-            that's the ambient tone directly around the banner near the top
-            of the page. */}
+        {/* Fades into #07111F — MiniAppBackground's own top color — to
+            blend the banner's bottom edge into the page background. */}
         <div
           aria-hidden="true"
           className="pointer-events-none absolute inset-x-0 bottom-0"
