@@ -6,14 +6,36 @@ import StatusBadge from "@/components/bets/StatusBadge";
 import BetActionSheet from "./BetActionSheet";
 import BetTextForm from "./BetTextForm";
 import BetScreenshotForm from "./BetScreenshotForm";
+import BetTicket, { type BetTicketData } from "./BetTicket";
 import type { ConfirmedBet } from "./betConfirmApi";
 import type { RecentBet } from "./types";
 
 interface BetScreenProps {
+  playerName: string;
   availableCredit: string;
   exposure: string;
   pendingExposure: string;
   recentBets: RecentBet[];
+  onNavigateToHistory: () => void;
+}
+
+// ConfirmedBet.status is always the literal "PENDING" — the player-side
+// confirm step (Stage 4.4B) only ever creates a pending Bet; only the
+// operator dashboard's own confirm step (a different action, same word)
+// can move it to CONFIRMED. The ticket badge says "Submitted", not
+// "Confirmed", specifically to avoid implying the operator has already
+// accepted it — see the Stage 4.5G changelog entry.
+function toBetTicketData(bet: ConfirmedBet, playerName: string, availableCredit: string): BetTicketData {
+  return {
+    id: bet.id,
+    status: "submitted",
+    player: playerName,
+    createdAt: bet.createdAt,
+    selections: [{ sport: bet.sport, league: null, event: bet.event, selection: bet.outcome, odds: bet.odds }],
+    stake: bet.stake,
+    totalOdds: bet.totalOdds,
+    availableCredit,
+  };
 }
 
 const RECENT_ACTIVITY_LIMIT = 2;
@@ -24,10 +46,12 @@ const RECENT_ACTIVITY_LIMIT = 2;
 // BetScreenshotForm — both preview -> confirm -> real Bet (Stage 4.4B /
 // 4.5D), sharing the same confirmed-Bet success screen below.
 export default function BetScreen({
+  playerName,
   availableCredit,
   exposure,
   pendingExposure,
   recentBets,
+  onNavigateToHistory,
 }: BetScreenProps) {
   const [isSheetOpen, setSheetOpen] = useState(false);
   const [isTextFormOpen, setTextFormOpen] = useState(false);
@@ -57,10 +81,13 @@ export default function BetScreen({
 
   if (confirmedBet) {
     return (
-      <BetConfirmedCard
-        bet={confirmedBet}
-        onCreateNew={() => setConfirmedBet(null)}
-        onBack={closeToDashboard}
+      <BetTicket
+        ticket={toBetTicketData(confirmedBet, playerName, availableCredit)}
+        onDone={closeToDashboard}
+        onViewHistory={() => {
+          closeToDashboard();
+          onNavigateToHistory();
+        }}
       />
     );
   }
@@ -180,95 +207,6 @@ function SummaryItem({ label, value }: { label: string; value: string }) {
     <div className="flex flex-1 flex-col items-center px-1">
       <p className="text-[11px] text-slate-400">{label}</p>
       <p className="mt-0.5 text-sm font-semibold text-white">{value}</p>
-    </div>
-  );
-}
-
-// Shown once after a successful POST .../confirm — deliberately excludes
-// Bet.id, previewId, playerId and every other internal field; potentialWin
-// is a client-side calculation, never trusted from any server field.
-function BetConfirmedCard({
-  bet,
-  onCreateNew,
-  onBack,
-}: {
-  bet: ConfirmedBet;
-  onCreateNew: () => void;
-  onBack: () => void;
-}) {
-  const potentialWin =
-    bet.totalOdds !== null && Number.isFinite(bet.totalOdds) && Number.isFinite(bet.stake)
-      ? bet.stake * bet.totalOdds
-      : null;
-
-  return (
-    <div>
-      <button
-        type="button"
-        onClick={onBack}
-        className="text-sm font-medium text-slate-400"
-        aria-label="Back"
-      >
-        ‹ Back
-      </button>
-
-      <div
-        className="mt-4 flex flex-col items-center rounded-3xl px-6 py-7 text-center"
-        style={{
-          background: "linear-gradient(160deg, rgba(96,232,74,0.10), rgba(20,30,48,0.6))",
-          border: "1px solid rgba(96,232,74,0.20)",
-        }}
-      >
-        <p className="text-xl font-bold text-white">Bet request created</p>
-        <p className="mt-1 text-sm text-slate-300">Pending — awaiting operator confirmation</p>
-      </div>
-
-      <div
-        className="mt-4 rounded-2xl p-4"
-        style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
-      >
-        <ConfirmedRow label="Sport" value={bet.sport} />
-        <ConfirmedRow label="Event" value={bet.event} wrap />
-        <ConfirmedRow label="Selection" value={bet.outcome} wrap />
-        <ConfirmedRow label="Stake" value={bet.stake.toFixed(2)} />
-        <ConfirmedRow label="Odds" value={bet.totalOdds !== null ? bet.totalOdds.toFixed(2) : "Not provided"} />
-        <ConfirmedRow
-          label="Potential win"
-          value={potentialWin !== null ? potentialWin.toFixed(2) : "Not available"}
-          last
-        />
-      </div>
-
-      <button
-        type="button"
-        onClick={onCreateNew}
-        aria-label="Create new bet"
-        className="mt-4 min-h-11 w-full rounded-2xl text-[15px] font-semibold"
-        style={{ background: "#60E84A", color: "#04170C" }}
-      >
-        Create new bet
-      </button>
-    </div>
-  );
-}
-
-function ConfirmedRow({
-  label,
-  value,
-  wrap = false,
-  last = false,
-}: {
-  label: string;
-  value: string;
-  wrap?: boolean;
-  last?: boolean;
-}) {
-  return (
-    <div className={`flex items-start justify-between gap-3 ${last ? "" : "mb-2"}`}>
-      <span className="shrink-0 text-xs text-slate-400">{label}</span>
-      <span className={`min-w-0 text-right text-sm font-medium text-white ${wrap ? "break-words" : ""}`}>
-        {value}
-      </span>
     </div>
   );
 }

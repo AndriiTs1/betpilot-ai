@@ -71,3 +71,10 @@ Production review of the screenshot recognition pipeline: architecture summary, 
 ## Documentation
 
 `README.md` updated to reflect the shipped text and screenshot bet-submission flow (previously described as unbuilt); `docs/decisions/` (Architecture Decision Records) and this changelog introduced.
+
+## Stage 4.5G — Digital Bet Ticket Experience
+
+- Replaced the plain post-submission summary card with `BetTicket.tsx`, a premium, ticket-styled confirmation screen (perforated dividers, side notches, animated checkmark, decorative barcode).
+- Built data-driven (`BetTicketData`/`BetTicketStatus`) rather than tied to the single-bet `ConfirmedBet` shape, so PARLAY legs, settled outcomes, and a later PDF/PNG export or QR verification can reuse the same component without a redesign — none of those are implemented yet, only the layout is shaped for them.
+- Ticket status badge reads "Submitted," not "Confirmed": the player-side confirm step only creates a `PENDING` bet, and "Confirmed" is already a distinct, later operator-dashboard state — the copy was chosen to avoid overstating what just happened.
+- UI/UX only — no database, Prisma, API, preview/confirm, previewToken, AI parsing, dashboard, settlement, PARLAY, or Telegram auth changes.
