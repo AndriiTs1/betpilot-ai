@@ -249,7 +249,15 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
   const showPreviewBlock = phase === "ready" || phase === "confirming";
 
   return (
-    <div className="mx-auto w-full max-w-[420px]">
+    // min-h-[70dvh]: this component doesn't own its page shell (the
+    // surrounding WelcomeBanner/BottomNav layout lives in page.tsx/
+    // BetScreen.tsx, out of scope here), so there's no exact "remaining
+    // viewport height" this file can compute. 70dvh is a deliberate,
+    // documented approximation — tall enough that the flex-1 group below
+    // reads as genuinely centered on real phone screens, conservative
+    // enough to avoid pushing content under the fixed bottom nav before
+    // that's even a concern.
+    <div className="mx-auto flex min-h-[70dvh] w-full max-w-[420px] flex-col">
       <button
         type="button"
         onClick={onBack}
@@ -258,22 +266,6 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
       >
         ‹ Back
       </button>
-
-      {/* Centered hero: same ScanLine icon as the action sheet entry
-          (BetActionSheet.tsx) and BetScreen's own main CTA, so the visual
-          thread carries through from "tap Send screenshot" to landing here.
-          mt-8 (vs. the previous mt-3) is the "slightly lower" breathing
-          room requested in the UX review. */}
-      <div className="mt-8 flex flex-col items-center text-center">
-        <div
-          className="flex h-14 w-14 items-center justify-center rounded-full"
-          style={{ background: "rgba(96,232,74,0.14)", boxShadow: "0 0 24px 4px rgba(96,232,74,0.20)" }}
-        >
-          <ScanLine size={26} strokeWidth={2} color="#60E84A" aria-hidden="true" />
-        </div>
-        <p className="mt-3 text-xl font-bold text-white">Upload your bet slip</p>
-        <p className="mt-1 text-sm text-slate-400">Choose a photo from your gallery or take a new one.</p>
-      </div>
 
       {/* Both inputs stay mounted (hidden) regardless of phase, so the
           trigger buttons below can always ref.click() them reliably. */}
@@ -295,129 +287,148 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
         className="hidden"
       />
 
-      {showSelectionBlock && (
-        <div className="mt-6">
-          {!file && (
-            <div className="flex flex-col gap-2">
-              <button
-                type="button"
-                onClick={() => galleryInputRef.current?.click()}
-                aria-label="Choose image from gallery"
-                className="flex min-h-11 w-full items-center justify-center gap-2 rounded-2xl text-[15px] font-semibold"
-                style={{
-                  background: "#60E84A",
-                  color: "#04170C",
-                }}
-              >
-                <Images size={18} strokeWidth={2} aria-hidden="true" />
-                Choose from gallery
-              </button>
-
-              <button
-                type="button"
-                onClick={() => cameraInputRef.current?.click()}
-                aria-label="Take a photo"
-                className="flex min-h-11 w-full items-center justify-center gap-2 rounded-2xl text-[15px] font-medium text-slate-400"
-                style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
-              >
-                <Camera size={18} strokeWidth={2} aria-hidden="true" />
-                Take photo
-              </button>
-            </div>
-          )}
-
-          {file && previewUrl && (
-            <div>
-              <div
-                className="overflow-hidden rounded-2xl"
-                style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
-              >
-                {/* eslint-disable-next-line @next/next/no-img-element -- a
-                    local blob: object URL, not an optimizable remote image */}
-                <img
-                  src={previewUrl}
-                  alt="Selected bet slip screenshot"
-                  className="max-h-64 w-full object-contain"
-                />
-              </div>
-
-              <div className="mt-2 flex items-center justify-between gap-3">
-                <p className="min-w-0 flex-1 truncate text-sm text-slate-300">{file.name}</p>
-                <span className="shrink-0 text-xs text-slate-500">{formatFileSize(file.size)}</span>
-              </div>
-
-              <button
-                type="button"
-                onClick={handleRecognize}
-                disabled={!canRecognize}
-                aria-label="Recognize bet"
-                className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
-                style={{
-                  background: "#60E84A",
-                  color: "#04170C",
-                }}
-              >
-                {phase === "recognizing" ? "Recognizing..." : "Recognize bet"}
-              </button>
-
-              <button
-                type="button"
-                onClick={handleRemove}
-                disabled={phase === "recognizing"}
-                aria-label="Remove image"
-                className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-medium text-slate-400 disabled:opacity-50"
-                style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
-              >
-                Remove
-              </button>
-            </div>
-          )}
-
-          {error && (
-            <p role="alert" className="mt-3 text-sm text-red-400">
-              {error}
-            </p>
-          )}
+      {/* Everything below Back is one vertical group — hero icon, title,
+          subtitle, and whichever action content the current phase shows
+          (the two choice buttons, or the selected-image/preview states) —
+          centered together in the remaining space below Back, not just a
+          centered text block sitting at the top. Same ScanLine icon as the
+          action sheet entry (BetActionSheet.tsx) and BetScreen's own main
+          CTA, so the visual thread carries through from "tap Send
+          screenshot" to landing here. */}
+      <div className="flex flex-1 flex-col items-center justify-center text-center">
+        <div
+          className="flex h-16 w-16 items-center justify-center rounded-full"
+          style={{ background: "rgba(96,232,74,0.14)", boxShadow: "0 0 28px 6px rgba(96,232,74,0.22)" }}
+        >
+          <ScanLine size={32} strokeWidth={2} color="#60E84A" aria-hidden="true" />
         </div>
-      )}
+        <p className="mt-5 text-xl font-bold text-white">Upload your bet slip</p>
+        <p className="mt-2 text-sm text-slate-400">Choose a photo from your gallery or take a new one.</p>
 
-      {showPreviewBlock && preview && (
-        <div className="mt-4">
-          <PreviewCard preview={preview.preview} />
-          <OddsStatus oddsCheck={preview.oddsCheck} />
+        {showSelectionBlock && (
+          <div className="mt-8 w-full">
+            {!file && (
+              <div className="flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={() => galleryInputRef.current?.click()}
+                  aria-label="Choose image from gallery"
+                  className="flex min-h-11 w-full items-center justify-center gap-2 rounded-2xl text-[15px] font-semibold"
+                  style={{
+                    background: "#60E84A",
+                    color: "#04170C",
+                  }}
+                >
+                  <Images size={18} strokeWidth={2} aria-hidden="true" />
+                  Choose from gallery
+                </button>
 
-          {error && (
-            <p role="alert" className="mt-3 text-sm text-red-400">
-              {error}
-            </p>
-          )}
+                <button
+                  type="button"
+                  onClick={() => cameraInputRef.current?.click()}
+                  aria-label="Take a photo"
+                  className="flex min-h-11 w-full items-center justify-center gap-2 rounded-2xl text-[15px] font-medium text-slate-400"
+                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
+                >
+                  <Camera size={18} strokeWidth={2} aria-hidden="true" />
+                  Take photo
+                </button>
+              </div>
+            )}
 
-          <button
-            type="button"
-            onClick={handleConfirm}
-            disabled={!canConfirm}
-            aria-label="Confirm bet"
-            className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
-            style={{
-              background: "#60E84A",
-              color: "#04170C",
-            }}
-          >
-            {phase === "confirming" ? "Confirming..." : "Confirm bet"}
-          </button>
+            {file && previewUrl && (
+              <div>
+                <div
+                  className="overflow-hidden rounded-2xl"
+                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element -- a
+                      local blob: object URL, not an optimizable remote image */}
+                  <img
+                    src={previewUrl}
+                    alt="Selected bet slip screenshot"
+                    className="max-h-64 w-full object-contain"
+                  />
+                </div>
 
-          <button
-            type="button"
-            onClick={handleChooseDifferent}
-            disabled={phase === "confirming"}
-            aria-label="Choose different image"
-            className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-medium text-slate-400 disabled:opacity-50"
-            style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
-          >
-            Choose different image
-          </button>
-        </div>
-      )}
+                <div className="mt-2 flex items-center justify-between gap-3">
+                  <p className="min-w-0 flex-1 truncate text-sm text-slate-300">{file.name}</p>
+                  <span className="shrink-0 text-xs text-slate-500">{formatFileSize(file.size)}</span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleRecognize}
+                  disabled={!canRecognize}
+                  aria-label="Recognize bet"
+                  className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
+                  style={{
+                    background: "#60E84A",
+                    color: "#04170C",
+                  }}
+                >
+                  {phase === "recognizing" ? "Recognizing..." : "Recognize bet"}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleRemove}
+                  disabled={phase === "recognizing"}
+                  aria-label="Remove image"
+                  className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-medium text-slate-400 disabled:opacity-50"
+                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
+                >
+                  Remove
+                </button>
+              </div>
+            )}
+
+            {error && (
+              <p role="alert" className="mt-3 text-sm text-red-400">
+                {error}
+              </p>
+            )}
+          </div>
+        )}
+
+        {showPreviewBlock && preview && (
+          <div className="mt-4 w-full">
+            <PreviewCard preview={preview.preview} />
+            <OddsStatus oddsCheck={preview.oddsCheck} />
+
+            {error && (
+              <p role="alert" className="mt-3 text-sm text-red-400">
+                {error}
+              </p>
+            )}
+
+            <button
+              type="button"
+              onClick={handleConfirm}
+              disabled={!canConfirm}
+              aria-label="Confirm bet"
+              className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
+              style={{
+                background: "#60E84A",
+                color: "#04170C",
+              }}
+            >
+              {phase === "confirming" ? "Confirming..." : "Confirm bet"}
+            </button>
+
+            <button
+              type="button"
+              onClick={handleChooseDifferent}
+              disabled={phase === "confirming"}
+              aria-label="Choose different image"
+              className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-medium text-slate-400 disabled:opacity-50"
+              style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
+            >
+              Choose different image
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
