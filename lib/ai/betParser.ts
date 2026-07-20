@@ -8,12 +8,20 @@ const OLLAMA_TIMEOUT_MS = 8000;
 const CLAUDE_MODEL = "claude-sonnet-4-6";
 const CLAUDE_TIMEOUT_MS = 8000;
 
+// Shared across every odds field this file validates (text SINGLE, image
+// SINGLE, image PARLAY legs) — a single ceiling, not a per-schema guess.
+// Real bookmaker decimal odds essentially never reach four figures; this
+// exists to catch an obvious OCR/decimal-separator misread (e.g. "2,10"
+// read as 210, or "10.50" read as 1050) rather than to model a genuine
+// odds limit — see SCREENSHOT_RECOGNITION_REPORT.md.
+export const MAX_DECIMAL_ODDS = 1000;
+
 const betFieldsSchema = z.object({
   sport: z.string().min(1),
   event: z.string().min(1),
   selection: z.string().min(1),
   stake: z.number().positive(),
-  odds: z.number().positive().nullable(),
+  odds: z.number().finite().positive().max(MAX_DECIMAL_ODDS, "Decimal odds exceed the supported maximum").nullable(),
 });
 
 const validBetSchema = betFieldsSchema.extend({ valid: z.literal(true) });
@@ -276,7 +284,7 @@ const parlaySelectionFieldsSchema = z.object({
   sport: z.string().trim().min(1),
   event: z.string().trim().min(1),
   selection: z.string().trim().min(1),
-  odds: z.number().positive().finite().nullable(),
+  odds: z.number().finite().positive().max(MAX_DECIMAL_ODDS, "Decimal odds exceed the supported maximum").nullable(),
 });
 
 const parlayBetFieldsSchema = z.object({

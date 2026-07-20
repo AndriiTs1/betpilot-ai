@@ -62,6 +62,12 @@ Screenshot upload UI (gallery + camera capture, preview, confirm) — reuses the
 
 Production review of the screenshot recognition pipeline: architecture summary, prompt/validation weaknesses, bookmaker-specific considerations, and a prioritized list of recommended improvements. Analysis only — no code changed.
 
+## Stage 4.5F — Odds validation hardening
+
+- Added a shared maximum for decimal odds.
+- Values above 1000 are rejected during AI output validation.
+- Prevents obvious OCR/decimal-separator misreads from reaching preview.
+
 ## Documentation
 
 `README.md` updated to reflect the shipped text and screenshot bet-submission flow (previously described as unbuilt); `docs/decisions/` (Architecture Decision Records) and this changelog introduced.
