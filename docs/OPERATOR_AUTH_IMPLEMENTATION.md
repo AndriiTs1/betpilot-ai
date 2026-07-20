@@ -1,6 +1,8 @@
-# Operator Authentication — Implementation Notes (Stage 5.0B)
+# Operator Authentication — Implementation Notes (Stages 5.0B–5.0C)
 
-This document describes the authentication **foundation** built in Stage 5.0B, per the architecture approved in `OPERATOR_AUTH_AUDIT.md`. It covers what exists today: password hashing, database-backed sessions, and cookie policy — as standalone, tested utilities. **Nothing in this stage is wired into a route yet.** There is no login page, no login API route, no logout UI, no middleware, and no Dashboard/API route protection — those are Stage 5.0C (login UI) and Stage 5.0D (route protection), not this one. Today, `/` and every `/api/dashboard/*` route are exactly as unprotected as `OPERATOR_AUTH_AUDIT.md` found them.
+This document describes the operator authentication work built so far, per the architecture approved in `OPERATOR_AUTH_AUDIT.md`. **Stage 5.0B** (password hashing, database-backed sessions, cookie policy) built the standalone, tested utilities. **Stage 5.0C** (this update) wires those utilities into a real login page, a login API route, and a logout API route.
+
+**Still true after Stage 5.0C**: `/` and every `/api/dashboard/*` route are exactly as unprotected as `OPERATOR_AUTH_AUDIT.md` originally found them. Logging in now creates a real, valid session cookie — but nothing anywhere checks for that cookie before serving the Dashboard or its API routes yet. That is Stage 5.0D's job, deliberately not started here. See "What Stage 5.0C does *not* do" at the end of this document.
 
 ## Password hash format
 
@@ -108,4 +110,98 @@ Neither is (or should ever be) prefixed `NEXT_PUBLIC_` — both are read only in
 - **No secrets exposed to the client**: `passwordHash`, `tokenHash`, and the raw session token are never returned from any function whose result could plausibly flow into a client component or an HTTP response body in this stage. (No route consumes any of this yet, but the shape of every return value already excludes them — `OperatorSessionValidation`'s success case carries only `operatorId`.)
 - **Generic failure behavior**: both `validateOperatorSession` and `revokeOperatorSession` return/behave identically regardless of *why* a token failed or whether it existed — the distinguishing detail (`reason`) is retained only for internal use, never surfaced.
 - **`OPERATOR_SECRET` is untouched**: the existing static-secret check on `/api/bets/*` (`lib/auth/operatorAuth.ts`) is not modified or removed in this stage. It remains in place as-is until a later stage explicitly retires or supersedes it once session-based auth is actually protecting the routes that matter.
-- **What this stage does *not* protect**: `/` and every `/api/dashboard/*` route remain exactly as open as `OPERATOR_AUTH_AUDIT.md` found them. This document is not a claim that the Dashboard is now secured — only that the primitives it will be secured with now exist and are tested.
+- **What Stage 5.0B does *not* protect**: `/` and every `/api/dashboard/*` route remain exactly as open as `OPERATOR_AUTH_AUDIT.md` found them. This document is not a claim that the Dashboard is now secured — only that the primitives it will be secured with now exist and are tested.
+
+---
+
+## Stage 5.0C — Login and logout
+
+### Login route
+
+`POST /api/operator/auth/login` (`app/api/operator/auth/login/route.ts`).
+
+**Request body**:
+```json
+{ "phone": "+41000000000", "password": "..." }
+```
+
+**Success response** — `200`:
+```json
+{ "ok": true }
+```
+The response also carries a `Set-Cookie` header for the session, built exclusively via `buildOperatorSessionCookie()` (Stage 5.0B) — no cookie options are ever constructed inline in the route.
+
+**Failure response** — `401`, identical shape for every failure reason:
+```json
+{ "ok": false, "error": "INVALID_CREDENTIALS" }
+```
+This single response covers: unknown phone, an operator with no `passwordHash` set yet, a wrong password, *and* a rate-limited request (see below) — deliberately indistinguishable from one another.
+
+**Malformed request** — `400`:
+```json
+{ "ok": false, "error": "INVALID_REQUEST" }
+```
+Used for non-JSON bodies, missing/wrong-typed `phone`/`password` fields, or a phone/password that's blank after trimming. This is safe to distinguish from `INVALID_CREDENTIALS` — a malformed request reveals nothing about whether any particular phone number has an account; it's a client-side shape error, checked before the database is ever touched.
+
+**Unexpected server error** — `500`:
+```json
+{ "ok": false, "error": "INTERNAL_ERROR" }
+```
+Matches this codebase's existing convention on every other route (e.g. `app/api/miniapp/bets/text/preview/route.ts`) for a genuinely unexpected exception — not an account-enumeration vector, since it's symmetric regardless of which phone was submitted.
+
+**Login logic is split across two testable, DI-friendly functions in `lib/auth/operatorLogin.ts`, not inlined in the route**:
+- `parseOperatorLoginRequestBody(body)` — pure validation of the already-JSON-parsed body; returns `{ phone, password } | null`. Tested directly with a table of malformed inputs, no `NextRequest` needed.
+- `attemptOperatorLogin(phone, password, lookup?, sessionStore?)` — looks up the `Operator` by `phone`, verifies the password, and creates a session on success. Takes no HTTP concerns at all (no headers, no cookies) so it's testable with an injected in-memory `OperatorLookup` and `OperatorSessionStore`, never the real database.
+
+**Constant-time defense against account enumeration**: `attemptOperatorLogin` always calls `verifyPassword()` — the expensive `scrypt` step — exactly once per attempt, whether or not the operator exists or has a `passwordHash` set yet. When there's no real hash to check against, it checks against a fixed, precomputed, valid-format dummy hash (`DUMMY_PASSWORD_HASH` in `operatorLogin.ts`) instead of skipping the computation. Without this, "unknown phone" (near-instant, no `scrypt` call) would be measurably faster than "wrong password" (one real `scrypt` call), which is exactly the kind of timing side-channel an attacker could use to enumerate valid phone numbers. A test (`lib/auth/operatorLogin.test.ts`) asserts the two paths land within the same order of magnitude.
+
+### Logout route
+
+`POST /api/operator/auth/logout` (`app/api/operator/auth/logout/route.ts`).
+
+**Always responds** `200 { "ok": true }` — regardless of whether a session cookie was present, valid, expired, or already revoked. Behavior:
+1. Read the session cookie, if present.
+2. If present, call `revokeOperatorSession(token)` (Stage 5.0B) — which itself already no-ops safely for any token that doesn't match an active session, rather than throwing.
+3. Always clear the cookie via `buildOperatorSessionClearCookie()`.
+
+This route has no branch that can fail the request — it's idempotent by construction, not by an explicit "already logged out" check, because Stage 5.0B's `revokeOperatorSession` was already built to behave that way.
+
+### Already-authenticated login behavior
+
+`app/operator/login/page.tsx` is a Server Component. On every request, it reads the session cookie via `next/headers`'s `cookies()` and calls `validateOperatorSession()` directly (Stage 5.0B). If the session is valid, it calls `redirect("/")` before rendering the form at all — an already-authenticated operator never sees the login form flash on screen.
+
+**Deviation from the task's literal wording, explained**: the task's preferred behavior said "redirect to `/dashboard`." No `/dashboard` route exists in this project — the Dashboard's actual route is `/` (`app/page.tsx`), confirmed in `OPERATOR_AUTH_AUDIT.md`'s own route matrix. The redirect target used is `/`, matching what actually exists. If a future stage introduces a real `/dashboard` route as part of protecting it, this redirect target needs a one-line update to match.
+
+This check is intentionally **local to the login page only** — no `middleware.ts` was added (there still isn't one anywhere in this project), and `/` itself is not gated by this change in any way. An operator who is not logged in can still open `/` directly and see the Dashboard, exactly as before — this redirect only decides what the *login page itself* shows to someone who's already got a valid session.
+
+### Rate-limiting policy
+
+`lib/auth/loginRateLimit.ts` — an in-memory limiter, keyed by `` `${clientIp}|${normalizedPhone}` ``, checked in the login route before any database/`scrypt` work happens.
+
+- **Policy**: 5 failed attempts within a 15-minute window blocks further attempts for that key. A successful login clears the count for that key outright.
+- **Client IP** is read from the `x-forwarded-for` header (what Vercel sets); falls back to the literal string `"unknown"` locally, where there's no proxy in front of the dev server.
+- **Response when rate-limited**: the exact same `401 { "ok": false, "error": "INVALID_CREDENTIALS" }` as a wrong password — not a distinct `429`, and not a distinct error code. The task's requirement to "not reveal which key triggered the limit" was interpreted conservatively here: the response doesn't reveal that a rate limit was hit *at all*, only that the attempt failed, exactly like every other failure reason.
+
+**Known limitation — explicitly not a production-grade rate limiter**, documented directly in `loginRateLimit.ts`'s file header as well as here:
+1. **Per-instance only.** Vercel serverless functions don't share memory across concurrent invocations or regions. The `Map` backing a limiter instance is *not* a global counter across a real multi-instance deployment — an attacker whose requests happen to land on several different warm instances could exceed the intended 5-attempt limit before any single instance's counter reaches it.
+2. **Resets on cold start or redeploy.** A fresh function instance starts with an empty `Map`; any accumulated failure count is lost.
+
+A durable store (Vercel KV/Upstash, or a database table) would remove both limitations. Deliberately not introduced in this stage — the task explicitly ruled out adding Redis solely for this, and this in-memory version is judged an acceptable *basic* defense (not a complete one) for a small, low-traffic, internal operator login. `createLoginRateLimiter()` is a factory (not a bare module-level `Map`) specifically so this can be swapped for a durable-store-backed implementation later without changing its interface or any caller.
+
+### Login page
+
+`/operator/login` (`app/operator/login/page.tsx` + `components/operator/OperatorLoginForm.tsx`).
+
+- Server Component page (already-authenticated redirect, above) rendering a Client Component form.
+- Plain `fetch()` + React state — no third-party auth UI library.
+- Phone (`type="tel"`) and password (`type="password"`) inputs, each with a real `<label htmlFor>` (not just `aria-label`) for accessibility; native `required` attributes; a real `<form onSubmit>` so Enter submits naturally, with no custom key handling needed.
+- Loading state disables both inputs and the submit button and changes its label to "Signing in...".
+- On failure: the password field is cleared and a single generic message ("Invalid phone or password.") is shown in a `role="alert"` element — the same message regardless of why the login failed, matching the API's own generic error.
+- Visual design deliberately matches the **Dashboard's** existing Tailwind palette (`bg-slate-950`/`bg-slate-900`/`border-slate-800`, plain `green-500`/`red-950` accents, Tabler icon font) rather than the Mini App's distinct green-glow/inline-style theme — this page leads into the Dashboard, not the Mini App, and the existing per-domain icon-library convention (Mini App → `lucide-react`, Dashboard → Tabler icon font) is preserved rather than crossed. One restrained radial gradient behind the card is the only gradient on the page.
+
+### What Stage 5.0C does *not* do
+
+- **No Dashboard or API route protection.** `/` and every `/api/dashboard/*` route are byte-for-byte unchanged from Stage 5.0B (confirmed via `git diff` before this stage's commit) — they remain fully open to an unauthenticated caller. Logging in successfully now produces a real, valid session cookie, but nothing checks for it anywhere except the login page's own already-authenticated redirect.
+- **No `middleware.ts`.** Still none anywhere in this project.
+- **No session revocation UI**, no "log out everywhere" action, no password reset flow — all explicitly deferred, per the original audit.
+- **`OPERATOR_SECRET`** (the pre-existing static-secret check on `/api/bets/*`) is untouched.

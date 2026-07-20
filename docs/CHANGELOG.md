@@ -89,3 +89,13 @@ Production review of the screenshot recognition pipeline: architecture summary, 
 - `scripts/create-operator.ts` (`npm run operator:create`) — manual, one-off provisioning script; uses `Operator.phone` (already unique) as the login identifier rather than adding a new email field.
 - Strictly separate from Telegram player authentication — different cookie, different table, no shared code path with `lib/telegram/verifyInitData.ts`.
 - 21 unit tests (`node --test`, no new test framework dependency) covering password hashing, session lifecycle, and cookie policy.
+
+## Stage 5.0C — Operator Login and Logout
+
+- `POST /api/operator/auth/login` and `POST /api/operator/auth/logout` — real, working login/logout using Stage 5.0B's foundation. `/operator/login` is a new page with a centered, Dashboard-styled login form (no third-party auth UI library).
+- Login always returns the same generic `401 INVALID_CREDENTIALS` for an unknown phone, an operator with no password set yet, a wrong password, or a rate-limited attempt — never a distinguishable reason.
+- Constant-time defense: `attemptOperatorLogin` (`lib/auth/operatorLogin.ts`) always runs one real `scrypt` verification per attempt, against a fixed dummy hash when there's no real one to check, so "unknown phone" and "wrong password" can't be told apart by response time.
+- Basic in-memory brute-force protection (`lib/auth/loginRateLimit.ts`): 5 failed attempts per 15 minutes, keyed by IP + phone. Explicitly documented as per-instance-only and reset-on-cold-start — not a substitute for a durable store, which was deliberately not added this stage.
+- Already-authenticated visitors to `/operator/login` are redirected to `/` (the Dashboard's real current route — there is no separate `/dashboard` route). This check is local to the login page only; no middleware was added.
+- **No Dashboard or API route protection yet** — `/` and every `/api/dashboard/*` route are unchanged and still fully open. That's Stage 5.0D.
+- 13 new unit tests (34 total in `lib/auth/`) — login outcomes, malformed-body handling, and rate-limiter behavior — all against in-memory fakes, no real database touched.
