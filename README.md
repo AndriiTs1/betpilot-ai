@@ -6,6 +6,17 @@ Live deployment: [betpilot-ai-five.vercel.app](https://betpilot-ai-five.vercel.a
 
 > `docs/MVP.md`, `docs/architecture/PROJECT_ARCHITECTURE.md`, `docs/domain/DOMAIN_MODEL.md` are the **original pre-implementation planning docs** (WhatsApp + wallet-balance design). The actual system diverged from them (Telegram instead of WhatsApp, a credit-limit model instead of a wallet balance, a Mini App instead of in-chat text parsing — see below) and they have not been updated to match. Treat this README as the source of truth for current behavior.
 
+## Documentation
+
+Current project documentation:
+
+- `README.md` — what the system does today (this file)
+- `docs/CHANGELOG.md` — chronological log of completed development stages
+- `docs/decisions/` — Architecture Decision Records (ADRs): why significant technical/product decisions were made
+- `docs/architecture/`, `docs/domain/` — original pre-implementation planning docs (outdated, see note above)
+
+**README is the source of truth for current behavior. Architecture decisions are stored as ADRs** — see `docs/decisions/README.md` for the format and rules, and `docs/decisions/ADR-0001-project-history.md` for how the system got here.
+
 ## Status
 
 Operator workflow (queue, confirm/reject against credit limit, player notification) and the player-facing Telegram Mini App (balance, active bets, history) are built and running in production on a real Postgres database. **Bet submission is now wired up** for both text and screenshot input — a player can describe a bet or upload/photograph a bet-slip screenshot, get an AI-parsed preview with live odds verification, and confirm it into a real `Bet` row that lands in the operator's existing queue. Only single-selection (non-parlay) bets can be confirmed today — a detected parlay/express is shown to the player but safely rejected at confirm time (see below). Settlement (grading bets after a match finishes and paying out) is also not implemented. See [What's not done](#whats-not-done-yet).
