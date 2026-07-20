@@ -1,6 +1,6 @@
 # BetPilot AI
 
-AI-powered sports betting operations platform. A player opens a Telegram Mini App to see their credit/balance and bet history, and (once submission is wired up — see below) will send a bet as text or a coupon screenshot; an LLM will extract the structured bet (sport, event, selection, stake, odds); the odds get checked against a live sportsbook API; an operator reviews the request in a web dashboard and confirms or rejects it against the player's credit limit; the player gets notified back on Telegram.
+AI-powered sports betting operations platform. A player opens a Telegram Mini App to see their credit/balance and bet history, and sends a bet as text or a coupon screenshot; an LLM extracts the structured bet (sport, event, selection, stake, odds); the odds get checked against a live sportsbook API; an operator reviews the request in a web dashboard and confirms or rejects it against the player's credit limit; the player gets notified back on Telegram.
 
 Live deployment: [betpilot-ai-five.vercel.app](https://betpilot-ai-five.vercel.app) · Repo: [AndriiTs1/betpilot-ai](https://github.com/AndriiTs1/betpilot-ai)
 
@@ -8,13 +8,13 @@ Live deployment: [betpilot-ai-five.vercel.app](https://betpilot-ai-five.vercel.a
 
 ## Status
 
-Operator workflow (queue, confirm/reject against credit limit, player notification) and the player-facing Telegram Mini App (balance, active bets, history) are built and running in production on a real Postgres database. **Bet submission itself is not wired up yet** — the Mini App's "Отправить ставку" flow is UI-only (opens a bottom sheet, no backend call), and the AI-parsing/odds-verification pipeline that used to run off the bot webhook is now orphaned dead code since the webhook was pivoted to a Mini-App-only redirect (see below). Settlement (grading bets after a match finishes and paying out) is also not implemented. See [What's not done](#whats-not-done-yet).
+Operator workflow (queue, confirm/reject against credit limit, player notification) and the player-facing Telegram Mini App (balance, active bets, history) are built and running in production on a real Postgres database. **Bet submission is now wired up** for both text and screenshot input — a player can describe a bet or upload/photograph a bet-slip screenshot, get an AI-parsed preview with live odds verification, and confirm it into a real `Bet` row that lands in the operator's existing queue. Only single-selection (non-parlay) bets can be confirmed today — a detected parlay/express is shown to the player but safely rejected at confirm time (see below). Settlement (grading bets after a match finishes and paying out) is also not implemented. See [What's not done](#whats-not-done-yet).
 
 ## What's been built
 
 **Data layer**
 
-- Prisma 7 schema on Neon Postgres (`prisma/schema.prisma`), 5 migrations applied: `Operator`, `Player`, `Bet`, `BetSelection`, `OddsSnapshot`, `Transaction`, `Message`, `Wallet`.
+- Prisma 7 schema on Neon Postgres (`prisma/schema.prisma`), 6 migrations applied: `Operator`, `Player`, `Bet` (including `previewId`, a unique idempotency key for confirm — see "Bet submission" below), `BetSelection`, `OddsSnapshot`, `Transaction`, `Message`, `Wallet`.
 - Prisma 7's new `"prisma-client"` generator (full TS source, output to `lib/generated/prisma`, gitignored, regenerated via `postinstall`) with the `@prisma/adapter-neon` driver adapter for serverless.
 - `prisma/seed.ts` — test fixtures (one operator, two players: `Andrii`, `Zegna`).
 - **In-progress `Bet` → `Bet` + `BetSelection` migration** (parlay/express support), done in small additive stages, each shipped and verified in production before the next:
@@ -23,17 +23,17 @@ Operator workflow (queue, confirm/reject against credit limit, player notificati
   - `scripts/backfill-bet-selections.ts` — idempotent, transactional backfill utility (selects `type: SINGLE` bets with zero selections, creates one matching `BetSelection` + sets `totalOdds = odds`; re-running is a safe no-op). Already run once in production — all existing bets now have exactly one `BetSelection` each.
   - `GET /api/bets/pending`, `/api/bets/history`, `/api/miniapp/me`, `GET /api/dashboard/players` now all fetch and return `selections`/`totalOdds` alongside the old flat fields (`lib/bets/serialize.ts`'s `serializeBet`/`serializeBetSelection` make the Decimal→string conversion explicit rather than relying on `Prisma.Decimal.toJSON()`'s implicit behavior). `components/miniapp/types.ts`'s `RecentBet` type now matches this contract (`totalOdds`, `selections: MiniAppBetSelection[]`, both required).
   - **The Mini App now renders accumulators** — see `BetSelectionsList.tsx` below. The **operator dashboard does not**: `BetQueueItem.tsx`/`BetHistory.tsx`/`PlayerCard.tsx` still render only the old flat `event`/`outcome`/`odds` fields, unaffected by this migration so far.
-  - **Not done yet**: nothing creates a `BetSelection` for a _new_ bet (moot today since bet creation is dead code — see below), there's still no `BetSelectionStatus` (a single leg can't be voided/settled independently of the whole slip), `OddsSnapshot` is still tied to `Bet` rather than per-selection, and the operator dashboard hasn't been updated to match the Mini App. See [What's not done](#whats-not-done-yet).
+  - **Not done yet**: nothing creates a `BetSelection` for a bet confirmed today (text/screenshot confirm both only ever produce a `type: SINGLE` `Bet` with the flat fields — see "Bet submission" below), there's still no `BetSelectionStatus` (a single leg can't be voided/settled independently of the whole slip), `OddsSnapshot` is still tied to `Bet` rather than per-selection, and the operator dashboard hasn't been updated to match the Mini App. See [What's not done](#whats-not-done-yet).
 
-**AI bet parsing — implemented but currently orphaned** (`lib/ai/betParser.ts`, `lib/telegram/betHandler.ts`, `lib/bets/betService.ts`)
+**AI bet parsing** (`lib/ai/betParser.ts`)
 
-- `parseBetMessage()` extracts `{ sport, event, selection, stake, odds }` from a free-text message. Dual provider, switchable via `AI_PROVIDER` env var: local **Ollama** (default, no API key) or **Claude** (`@anthropic-ai/sdk`, strict tool-use schema).
-- `processBet()`/`handleIncomingBet()` chain this into a full "parse → verify odds → create Bet" flow, with **no credit check at creation** (by design — the operator should see risky requests too).
-- **Confirmed dead code**: nothing calls `processBet`/`handleIncomingBet`/`parseBetMessage` from any live route today (verified by grep). This chain was built for the earlier WhatsApp/in-chat-text design; once the Telegram webhook was pivoted to Mini-App-only (see below), it lost its only caller. Fully reusable logic, but not currently reachable by any user action.
+- `parseBetMessage()` extracts `{ sport, event, selection, stake, odds }` from a free-text message. Dual provider, switchable via `AI_PROVIDER` env var: local **Ollama** (default, no API key) or **Claude** (`@anthropic-ai/sdk`, strict tool-use schema). Called live from `POST /api/miniapp/bets/text/preview`.
+- `parseImageWithClaude()` extracts the same fields from a bet-slip screenshot via Claude's multimodal API — always Claude regardless of `AI_PROVIDER` (Ollama's default model has no vision support). Detects `SINGLE` vs `PARLAY` (multi-selection); a detected parlay's legs are returned to the client but can't be confirmed yet (see "Bet submission" below). Called live from `POST /api/miniapp/bets/screenshot/preview`.
+- `processBet()`/`handleIncomingBet()` (`lib/bets/betService.ts`, `lib/telegram/betHandler.ts`) — the older WhatsApp-era chain that parsed a message and created a `Bet` directly, with no preview step — remain dead code, fully superseded by the preview → confirm flow below. Not called from any live route today.
 
-**Odds verification — same status: implemented, orphaned** (`lib/odds/oddsVerifier.ts`)
+**Odds verification** (`lib/odds/oddsVerifier.ts`)
 
-- Looks up the event on **The Odds API** and compares the player-submitted odds against the live market, with sport-key mapping and fuzzy RU/EN team-name matching. Only ever called from the dead `betService.ts` chain above, so also currently unreachable. Known bug: `matched` is hardcoded to `false` even on a successful match (never actually set `true`) — hasn't surfaced as a live bug only because the calling code is dead.
+- Looks up the event on **The Odds API** and compares the player-submitted odds against the live market, with sport-key mapping and fuzzy RU/EN team-name matching. Called live from both `POST /api/miniapp/bets/text/preview` and `POST /api/miniapp/bets/screenshot/preview`. `matched` (event/market/selection actually found) and `withinTolerance` (submitted odds close enough to the source price) are separate verdicts, not conflated into one flag.
 
 **Telegram integration** (`lib/telegram/`, `app/api/webhooks/telegram/`)
 
@@ -47,10 +47,19 @@ Operator workflow (queue, confirm/reject against credit limit, player notificati
 
 - Player-facing PWA-like app opened from the bot's "Open app" button. Verifies Telegram `initData` server-side (`lib/telegram/verifyInitData.ts`, HMAC-SHA256 per Telegram's spec, rejects data older than 5 minutes) via `Authorization: tma <initData>` on `GET /api/miniapp/me`.
 - 4-tab bottom navigation (`BottomNav.tsx`): **Bet** (`BetScreen.tsx`), **Active** (`ActiveBetsScreen.tsx`), **History** (`HistoryScreen.tsx`), **Balance** (`BalanceScreen.tsx`) — active/history are classified client-side purely from the existing `Bet.status` values, no separate API/query needed.
-- `BetScreen.tsx` — current "AI Assistant First" composition: compact status header, one primary CTA that opens `BetActionSheet.tsx` (a hand-rolled, no-dependency bottom sheet — Escape/backdrop-click/focus/scroll-lock handled manually) offering "Отправить скриншот" / "Написать ставку", a compact credit summary bar, and the last 2 bets. **Both options in the sheet are currently no-ops** — see [What's not done](#whats-not-done-yet).
+- `BetScreen.tsx` — current "AI Assistant First" composition: compact status header, one primary CTA that opens `BetActionSheet.tsx` (a hand-rolled, no-dependency bottom sheet — Escape/backdrop-click/focus/scroll-lock handled manually) offering "Отправить скриншот" / "Написать ставку", a compact credit summary bar, and the last 2 bets. Both options now open a real preview → confirm flow — see "Bet submission" below.
 - `BetSelectionsList.tsx` — renders an accumulator's legs. Purely presentational: returns `null` for a single/missing/empty `selections` array (leaving a single bet's card exactly as it always looked), otherwise a native `<details>/<summary>` ("Экспресс ×N", no library, no JS state, collapsed by default) listing each leg's `sport`/`event`/`outcome`/`odds`. Wired into `ActiveBetsScreen.tsx` and `HistoryScreen.tsx` (full expandable list) and, more compactly, into `BetScreen.tsx`'s "Последняя активность" mini-list (single-line `Экспресс ×N · {event}` label, no expansion — that row has no room for a second line). All three also switch the displayed odds from `bet.odds` to `bet.totalOdds` whenever `selections.length > 1`. No real accumulator exists in production yet to visually confirm against live data — verified locally instead via a mocked multi-leg response.
 - `WelcomeBanner.tsx` — one-shot, auto-dismissing (~2.75s) greeting shown once per session, respects `prefers-reduced-motion`.
 - `MiniAppBackground.tsx` — static, decorative "premium sports arena" background (layered CSS gradients, no images/canvas/video), shared across all tabs via `app/miniapp/layout.tsx`.
+
+**Bet submission — text and screenshot** (`components/miniapp/BetTextForm.tsx`, `BetScreenshotForm.tsx`, `BetPreviewCard.tsx`, `app/api/miniapp/bets/`)
+
+- Player flow: describe a bet as text or upload/photograph a bet-slip screenshot → AI-parsed preview with live odds verification → confirm → a real `Bet` row (`status: PENDING`) lands in the same queue the operator dashboard already reads, confirms, and rejects against the credit limit — no changes needed on the operator side.
+- `POST /api/miniapp/bets/text/preview` and `POST /api/miniapp/bets/screenshot/preview` are preview-only: zero DB writes beyond a read-only `Player` lookup. Each parses the input (`betParser.ts`), verifies odds (`oddsVerifier.ts`), and returns a short-lived HMAC-signed `previewToken` (`lib/betPreview/previewToken.ts`, 180s TTL, versioned payload) carrying everything the confirm step needs — nothing is persisted between preview and confirm.
+- `POST /api/miniapp/bets/text/confirm` verifies the `previewToken`, then creates the `Bet` (+ `OddsSnapshot` if odds were checked) inside one transaction (`lib/bets/createBetFromPreview.ts`). Idempotent and race-safe: `Bet.previewId` has a unique DB constraint, so confirming the same token twice — sequentially or concurrently — returns the same `Bet` instead of creating a duplicate. The screenshot flow reuses this exact same confirm endpoint; it doesn't have (or need) its own.
+- Screenshot upload additionally validates the file server-side before it ever reaches Claude: MIME allow-list (`image/jpeg`/`png`/`webp`, no SVG), a 10 MB size limit, and a real magic-byte signature check (catches a mislabeled/renamed file even when its declared `Content-Type` looks fine). The image only ever exists in memory for the duration of the request — never written to disk or a storage bucket.
+- **Only single-selection (non-parlay) bets can be confirmed today.** The screenshot parser can detect a multi-selection (parlay/accumulator) slip and returns the recognized legs to the client, but `previewToken`/confirm only model a single selection — a detected parlay gets an explicit `422 PARLAY_CONFIRM_NOT_SUPPORTED` instead of silently being confirmed as (or collapsed into) a single bet. See [What's not done](#whats-not-done-yet).
+- `PreviewCard`/`OddsStatus` (`BetPreviewCard.tsx`) are the one preview UI both `BetTextForm` and `BetScreenshotForm` render — the two flows return an identical response contract, so there's exactly one preview screen, not two.
 
 **Credit-limit risk model** (replaced an earlier `Wallet.balance` design)
 
@@ -74,6 +83,8 @@ Operator workflow (queue, confirm/reject against credit limit, player notificati
 | `GET /api/dashboard/overview`, `GET /api/dashboard/players` | **none** | Direct Prisma reads, no auth check at all (see [Known gaps](#whats-not-done-yet)) |
 | `POST /api/webhooks/telegram` | `X-Telegram-Bot-Api-Secret-Token` vs `TELEGRAM_WEBHOOK_SECRET` | Bot webhook — Mini-App-only redirect, never creates a `Bet` |
 | `GET /api/miniapp/me` | `Authorization: tma <initData>` (Telegram Mini App HMAC verification) | Player's own credit/exposure summary + last 20 bets (read-only) |
+| `POST /api/miniapp/bets/text/preview`, `POST /api/miniapp/bets/screenshot/preview` | `Authorization: tma <initData>` | AI-parsed bet preview + odds check + signed `previewToken`; zero DB writes |
+| `POST /api/miniapp/bets/text/confirm` | `Authorization: tma <initData>` | Verifies `previewToken`, creates the `Bet` (idempotent). Shared by both preview routes |
 
 **Infra / ops**
 
@@ -84,18 +95,18 @@ Operator workflow (queue, confirm/reject against credit limit, player notificati
 
 ## What's not done yet
 
-- **Bet submission from the Mini App is UI-only.** `BetActionSheet.tsx`'s two options ("Отправить скриншот" / "Написать ставку") only close the sheet — no API call, no handler. There is currently **no way for a player to create a bet at all** (the old webhook text-parsing path is also dead — see above), only to view existing ones. A researched-but-not-yet-approved plan exists for a minimal text + screenshot submission flow (new `POST /api/miniapp/bets/text` and `/screenshot` routes, reusing `betParser.ts`/`oddsVerifier.ts`, Claude multimodal instead of a separate OCR lib, `@vercel/blob` for image storage).
-- **Express/parlay (multi-leg) bets — schema, API contract, and Mini App display are in place; operator dashboard display and bet creation are not.** `BetSelection`/`Bet.type`/`Bet.totalOdds` exist, are migrated to production, and every existing bet has been backfilled with exactly one selection (see "Data layer" above). The Mini App (`ActiveBetsScreen`/`HistoryScreen`/`BetScreen`, via `BetSelectionsList.tsx`) now renders a real accumulator when one exists — untested against live data only because no such bet exists in production yet. Still missing: the **operator dashboard** (`BetQueueItem.tsx`/`BetHistory.tsx`/`PlayerCard.tsx`) still renders only the old flat fields; nothing **creates** a `BetSelection` for a new bet; there's still no `BetSelectionStatus` (so a single leg of a parlay can't be voided/settled independently); and `OddsSnapshot` is still tied to `Bet` rather than per-selection — moving it needs its own migration-ordering analysis before it happens. Single bets work today unaffected by any of this.
-- **`types/bet.ts`'s `BetStatus` is out of sync with Prisma's.** Prisma: `PENDING/CONFIRMED/REJECTED/SETTLED_WIN/SETTLED_LOSS/VOID`. `types/bet.ts`: a completely different 7-value union (`RECEIVED/AI_ANALYZED/WAITING_CONFIRMATION/CONFIRMED/SETTLED/PAID/REJECTED`) that shares only 2 of 7 values. Confirmed dead — nothing imports it as a status type (only `oddsVerifier.ts` reads its `Bet` interface shape, which itself has a naming bug: `selection` vs. Prisma's `outcome`). `components/bets/StatusBadge.tsx` is the one place that's correctly in sync with Prisma. Should be deleted/rewritten as part of whichever task next touches `oddsVerifier.ts`.
-- **AI parsing (`lib/ai/betParser.ts`) and odds verification (`lib/odds/oddsVerifier.ts`) are implemented but orphaned** — no live caller since the webhook pivoted to Mini-App-only (see above). Fully reusable for the submission-flow plan above, but not reachable by any user action today. `oddsVerifier.ts` also has a pre-existing bug: `matched` is hardcoded `false` even on a successful match.
+- **Parlay/express bets can't be confirmed.** The screenshot parser detects a multi-selection slip and returns its legs to the client (`422 PARLAY_CONFIRM_NOT_SUPPORTED`), and the text parser could in principle be extended the same way, but `previewToken`'s payload and `createBetFromPreview.ts` only model a single selection — `Bet.type` is hardcoded to `SINGLE` on every confirm-created row. `BetSelection`/`Bet.totalOdds` exist in the schema and are already backfilled/displayed for existing accumulators (see "Data layer"), but nothing **creates** a `BetSelection` for a newly confirmed bet, and the **operator dashboard** (`BetQueueItem.tsx`/`BetHistory.tsx`/`PlayerCard.tsx`) still renders only the old flat fields. There's also still no `BetSelectionStatus` (a single leg can't be voided/settled independently), and `OddsSnapshot` is still tied to `Bet` rather than per-selection. Single-selection bets — text or screenshot — are unaffected by any of this and work today.
+- **No rate limiting** on `POST /api/miniapp/bets/text/preview`, `/text/confirm`, or `/screenshot/preview` — a registered player (or anyone who can forge valid-looking requests past Telegram auth) can call these as fast as the AI provider/odds API will respond. Not exploited, just not built yet.
+- **Screenshot uploads are never persisted.** By design for now (see "Bet submission" above) — the image only exists in memory for the request. No storage integration (`@vercel/blob` or otherwise) exists, which also means there's no way for an operator to later review the original screenshot behind a confirmed bet.
+- **`types/bet.ts`'s `BetStatus` is out of sync with Prisma's.** Prisma: `PENDING/CONFIRMED/REJECTED/SETTLED_WIN/SETTLED_LOSS/VOID`. `types/bet.ts`: a completely different 7-value union (`RECEIVED/AI_ANALYZED/WAITING_CONFIRMATION/CONFIRMED/SETTLED/PAID/REJECTED`) that shares only 2 of 7 values, and its own `Currency = "USDC"` no longer matches the Mini App UI (which now shows plain numbers, no currency label). Confirmed dead — nothing imports it. `components/bets/StatusBadge.tsx` is the one place that's correctly in sync with Prisma. Should be deleted as part of whichever task next touches this area.
 - **Settlement.** Nothing determines match results or moves `currentCredit`/creates payout records after a bet is graded. `Bet.status` has `SETTLED_WIN`/`SETTLED_LOSS`/`VOID` in the enum but nothing ever sets them.
 - **`Wallet` and `Transaction` models are dead code.** Both still exist in `prisma/schema.prisma` and get seeded/cleaned up in `prisma/seed.ts`, but no application code reads or writes them anymore since the switch to the credit-limit model (confirmed via grep: zero `.wallet.*`/`.transaction.*` calls outside `seed.ts`). Either wire them into settlement or drop them.
-- **No operator authentication for the dashboard itself.** `app/page.tsx` and `GET /api/dashboard/overview` / `GET /api/dashboard/players` have no login and no secret check — only the bet action routes are gated. Anyone with the URL can currently view all players, balances, and bet history.
+- **No operator authentication for the dashboard itself.** `app/page.tsx` and `GET /api/dashboard/overview` / `GET /api/dashboard/players` have no login and no secret check — only the bet action routes are gated. Anyone with the URL can currently view all players, balances, and bet history. `POST /api/dashboard/bets/[id]/confirm` / `/reject` are also unauthenticated at the client-facing layer (they proxy to the real, secret-protected `/api/bets/*` routes server-side, but nothing checks who's allowed to trigger that proxy).
 - **Dead/leftover files**: `components/bets/BetPreview.tsx` (empty), `lib/wallet/balance.ts` + `types/wallet.ts` (unused, pre-date the credit-limit model), `types/player.ts` (unused).
 - **`docs/`** (`MVP.md`, `PROJECT_ARCHITECTURE.md`, `DOMAIN_MODEL.md`) describe the original WhatsApp/wallet/NestJS plan and don't reflect the current Telegram/credit-limit/Mini-App/Next.js-only implementation.
 - **No automated tests.** Correctness currently rests on `tsc --noEmit` + `eslint` + manual verification (and ad-hoc Playwright checks during development, not committed as a test suite).
 - **No multi-operator scoping**: schema allows multiple `Operator`s, but nothing in the UI/API scopes by operator — `/api/dashboard/*` reads across all operators.
-- Git→Vercel auto-deploy has silently not fired at least once after a push (root cause not diagnosed — worked around with `vercel --prod`); worth keeping an eye on.
+- Git→Vercel auto-deploy has repeatedly not fired after a push in practice (root cause not diagnosed — worked around with `vercel --prod` when noticed); worth keeping an eye on, it isn't reliable.
 
 ## Tech Stack
 
@@ -140,7 +151,11 @@ app/
     dashboard/                   Browser-facing routes
       overview/ players/         direct Prisma reads, unauthenticated
       bets/                      proxy to /api/bets/* (injects OPERATOR_SECRET)
-    miniapp/me/                  GET — player's own summary + recent bets (initData-verified)
+    miniapp/
+      me/                        GET — player's own summary + recent bets (initData-verified)
+      bets/text/preview/         POST — text bet AI preview + odds check + signed previewToken
+      bets/text/confirm/         POST — verifies previewToken, creates the Bet (idempotent)
+      bets/screenshot/preview/   POST — same contract as text preview, multipart image input
     webhooks/telegram/           Telegram bot webhook — Mini-App-only redirect
 components/
   dashboard/                     Overview stat cards
@@ -148,11 +163,16 @@ components/
   players/                       PlayerList, PlayerCard (responsive)
   miniapp/                       BottomNav, BetScreen, BetActionSheet, ActiveBetsScreen,
                                   HistoryScreen, BalanceScreen, WelcomeBanner, MiniAppBackground,
-                                  BetSelectionsList (renders accumulator legs, or nothing for a single bet)
+                                  BetSelectionsList (renders accumulator legs, or nothing for a single bet),
+                                  BetTextForm / BetScreenshotForm (preview -> confirm UI, share
+                                  BetPreviewCard.tsx for the actual preview render),
+                                  betPreviewApi.ts / betScreenshotApi.ts / betConfirmApi.ts (client API layer)
 lib/
-  ai/betParser.ts                Ollama/Claude bet extraction (orphaned, see "What's not done yet")
-  odds/oddsVerifier.ts           The Odds API integration (orphaned, same caveat)
-  bets/                          betService (orchestration, orphaned), serialize
+  ai/betParser.ts                Ollama/Claude text extraction + Claude-only image (multimodal) extraction
+  odds/oddsVerifier.ts           The Odds API integration — live, called from both preview routes
+  betPreview/previewToken.ts     Signed, short-lived (180s) HMAC token carrying a preview's content
+  bets/                          betService (orchestration, orphaned — see "What's not done yet"),
+                                  createBetFromPreview.ts (idempotent confirm-time Bet creation), serialize
   telegram/                      webhook handler, sendMessage, escapeHtml, verifyInitData
   auth/                          operatorAuth.ts (Bearer-token), telegramWebhookAuth.ts (secret_token)
   players/credit.ts              computeRemainingCredit — shared credit-limit math
