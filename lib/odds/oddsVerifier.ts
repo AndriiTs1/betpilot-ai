@@ -28,7 +28,29 @@ export interface OddsVerificationInput {
 // Basic mapping only. "Football"/"Soccer" defaults to the Premier League —
 // The Odds API has no single sport_key covering every league, and Bet.sport
 // doesn't carry enough info (e.g. which league) to disambiguate further.
-const SPORT_KEY_ALIASES: Record<string, string> = {
+//
+// Tennis is different in kind, not just missing: unlike basketball_nba or
+// icehockey_nhl, The Odds API has no persistent year-round ATP/WTA tour
+// sport_key at all — tennis is only exposed per Grand Slam, and only while
+// that tournament is actually being played. There is no single key that
+// "covers tennis" the way soccer_epl approximates football. The entry below
+// is a list of every currently-documented Grand Slam key (ATP + WTA); a
+// match is queried against whichever of these is presently in season.
+// Outside all four Grand Slam windows, every one of them legitimately
+// returns zero events — that will surface as "no matching event found", not
+// as an unmapped sport, which is the correct and honest distinction.
+const TENNIS_SPORT_KEYS = [
+  "tennis_atp_aus_open_singles",
+  "tennis_wta_aus_open_singles",
+  "tennis_atp_french_open",
+  "tennis_wta_french_open",
+  "tennis_atp_wimbledon",
+  "tennis_wta_wimbledon",
+  "tennis_atp_us_open",
+  "tennis_wta_us_open",
+];
+
+const SPORT_KEY_ALIASES: Record<string, string | string[]> = {
   football: "soccer_epl",
   soccer: "soccer_epl",
   футбол: "soccer_epl",
@@ -47,10 +69,19 @@ const SPORT_KEY_ALIASES: Record<string, string> = {
   "ice hockey": "icehockey_nhl",
   хоккей: "icehockey_nhl",
   nhl: "icehockey_nhl",
+  tennis: TENNIS_SPORT_KEYS,
+  теннис: TENNIS_SPORT_KEYS,
+  atp: TENNIS_SPORT_KEYS,
+  wta: TENNIS_SPORT_KEYS,
 };
 
-function getSportKey(sport: string): string | null {
-  return SPORT_KEY_ALIASES[sport.toLowerCase().trim()] ?? null;
+// Returns one or more sport_keys to try, in order — plural because tennis
+// (see above) has no single key. Every other sport still resolves to
+// exactly one key, so their existing single-request behavior is unchanged.
+function getSportKeys(sport: string): string[] | null {
+  const value = SPORT_KEY_ALIASES[sport.toLowerCase().trim()];
+  if (!value) return null;
+  return Array.isArray(value) ? value : [value];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -280,31 +311,43 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
     note: null,
   };
 
-  const sportKey = getSportKey(bet.sport);
+  const sportKeys = getSportKeys(bet.sport);
 
-  if (!sportKey) {
+  if (!sportKeys) {
     return { ...baseResult, note: `Sport/league "${bet.sport}" is not mapped to a The Odds API sport_key` };
   }
 
-  let events: OddsApiEvent[];
+  // Single-key sports (football/basketball/etc.) make exactly the one
+  // request they always did. Multi-key sports (currently only tennis) query
+  // each candidate and merge — an empty result from an out-of-season Grand
+  // Slam key is expected, not an error, so only report a failure if every
+  // key in the list failed to fetch at all.
+  let events: OddsApiEvent[] = [];
+  let lastFetchError: string | null = null;
+  let successCount = 0;
 
-  try {
-    events = await fetchOddsForSport(sportKey);
-  } catch (err) {
-    const message =
-      err instanceof Error && err.name === "AbortError"
-        ? `The Odds API request timed out after ${ODDS_API_TIMEOUT_MS}ms`
-        : err instanceof Error
-          ? err.message
-          : "Unknown error calling The Odds API";
+  for (const sportKey of sportKeys) {
+    try {
+      events = events.concat(await fetchOddsForSport(sportKey));
+      successCount += 1;
+    } catch (err) {
+      lastFetchError =
+        err instanceof Error && err.name === "AbortError"
+          ? `The Odds API request timed out after ${ODDS_API_TIMEOUT_MS}ms`
+          : err instanceof Error
+            ? err.message
+            : "Unknown error calling The Odds API";
+    }
+  }
 
-    return { ...baseResult, note: message };
+  if (successCount === 0 && lastFetchError) {
+    return { ...baseResult, note: lastFetchError };
   }
 
   const event = findMatchingEvent(events, bet.event);
 
   if (!event) {
-    return { ...baseResult, note: `No matching event found for "${bet.event}" in ${sportKey}` };
+    return { ...baseResult, note: `No matching event found for "${bet.event}" in ${sportKeys.join(", ")}` };
   }
 
   const bookmakerPick = pickBookmaker(event);

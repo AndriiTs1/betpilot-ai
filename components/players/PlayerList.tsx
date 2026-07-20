@@ -55,8 +55,16 @@ export default function PlayerList() {
     // — refresh immediately instead of only on next page load.
     window.addEventListener(DASHBOARD_REFRESH_EVENT, loadPlayers);
 
+    // Stage 8 — the event above only fires for an action taken in this same
+    // browser tab. A new bet placed via Telegram, or a Confirm/Reject done
+    // from another tab/device, never dispatches it, so player cards
+    // (Exposure/Available/Active Bets) went stale until a manual refresh.
+    // Same 10s interval as BetQueue's own polling (components/bets/BetQueue.tsx).
+    const intervalId = setInterval(loadPlayers, 10000);
+
     return () => {
       cancelled = true;
+      clearInterval(intervalId);
       window.removeEventListener(DASHBOARD_REFRESH_EVENT, loadPlayers);
     };
   }, []);

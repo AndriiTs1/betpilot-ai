@@ -51,8 +51,16 @@ export default function DashboardOverview() {
     // instead of only on next page load. See lib/dashboard/refreshEvent.ts.
     window.addEventListener(DASHBOARD_REFRESH_EVENT, loadOverview);
 
+    // Stage 8 — the event above only fires for an action taken in this same
+    // browser tab (e.g. this operator's own Confirm/Reject click). A new bet
+    // placed via Telegram, or a Confirm/Reject done from another tab/device,
+    // never dispatches it, so these KPIs went stale until a manual refresh.
+    // Same 10s interval as BetQueue's own polling (components/bets/BetQueue.tsx).
+    const intervalId = setInterval(loadOverview, 10000);
+
     return () => {
       cancelled = true;
+      clearInterval(intervalId);
       window.removeEventListener(DASHBOARD_REFRESH_EVENT, loadOverview);
     };
   }, []);
