@@ -1,9 +1,5 @@
 const REQUEST_TIMEOUT_MS = 15000;
 
-// A request timeout already existed (15s, via AbortController below) before
-// Stage 7.2 — kept as-is rather than replaced with a new one.
-const CONFIRM_ENDPOINT = "/api/miniapp/bets/text/confirm";
-
 export interface ConfirmedBet {
   id: string;
   status: "PENDING";
@@ -82,22 +78,6 @@ export async function fetchBetConfirm(
   previewToken: string,
   externalSignal?: AbortSignal,
 ): Promise<BetConfirmResult> {
-  // Stage 7.2 — temporary diagnostic instrumentation to find why Confirm
-  // bet sometimes never reaches the server. Never logs initData/previewToken
-  // in full, only presence + length. Remove once the root cause is found.
-  const initDataPresent = initData.length > 0;
-  const previewTokenPresent = previewToken.length > 0;
-
-  console.log("[ConfirmBet] fetchBetConfirm: start", {
-    url: CONFIRM_ENDPOINT,
-    method: "POST",
-    initDataPresent,
-    initDataLength: initData.length,
-    previewTokenPresent,
-    previewTokenLength: previewToken.length,
-    authorizationHeaderPresent: initDataPresent,
-  });
-
   const controller = new AbortController();
   let timedOut = false;
   const timeout = setTimeout(() => {
@@ -111,7 +91,7 @@ export async function fetchBetConfirm(
   let response: Response;
 
   try {
-    response = await fetch(CONFIRM_ENDPOINT, {
+    response = await fetch("/api/miniapp/bets/text/confirm", {
       method: "POST",
       headers: {
         Authorization: `tma ${initData}`,
@@ -122,36 +102,17 @@ export async function fetchBetConfirm(
     });
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
-      if (timedOut) {
-        console.error("[ConfirmBet] fetchBetConfirm: timed out", { timeoutMs: REQUEST_TIMEOUT_MS });
-        return { ok: false, failure: { kind: "timeout" } };
-      }
-      console.log("[ConfirmBet] fetchBetConfirm: aborted (external signal — unmount/replacement)");
+      if (timedOut) return { ok: false, failure: { kind: "timeout" } };
       return { ok: false, failure: { kind: "aborted" } };
     }
-
-    const e = err as Partial<Error> & { cause?: unknown };
-    console.error("[ConfirmBet] fetchBetConfirm: network exception", {
-      name: e?.name,
-      message: e?.message,
-      stack: e?.stack,
-      cause: e?.cause,
-    });
     return { ok: false, failure: { kind: "network" } };
   } finally {
     clearTimeout(timeout);
     externalSignal?.removeEventListener("abort", onExternalAbort);
   }
 
-  console.log("[ConfirmBet] fetchBetConfirm: response received", {
-    status: response.status,
-    ok: response.ok,
-  });
-
   if (!response.ok) {
     const body: unknown = await response.json().catch(() => null);
-    console.error("[ConfirmBet] fetchBetConfirm: error response body", body);
-
     const code =
       typeof body === "object" && body !== null && typeof (body as { error?: unknown }).error === "string"
         ? ((body as { error: string }).error as BetConfirmErrorCode | "UNKNOWN")
@@ -163,11 +124,8 @@ export async function fetchBetConfirm(
   const body: unknown = await response.json().catch(() => null);
 
   if (!isBetConfirmSuccess(body)) {
-    console.error("[ConfirmBet] fetchBetConfirm: response body failed shape validation", body);
     return { ok: false, failure: { kind: "invalid_response" } };
   }
-
-  console.log("[ConfirmBet] fetchBetConfirm: success", { betId: body.bet.id, idempotent: body.idempotent });
 
   return { ok: true, data: body };
 }

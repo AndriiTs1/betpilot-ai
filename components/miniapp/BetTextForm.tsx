@@ -62,10 +62,6 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
   // timeout) so a retry doesn't require re-previewing.
   const [preview, setPreview] = useState<BetPreviewSuccess | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Stage 7.2 — temporary diagnostic status, visible under Confirm bet, so
-  // the confirm flow can be observed without Telegram WebView console
-  // access. Not part of normal UX; remove once the root cause is found.
-  const [debugStatus, setDebugStatus] = useState<{ text: string; isError: boolean } | null>(null);
 
   // inFlightRef guards against a double click firing two requests: React
   // state updates aren't guaranteed to be visible to a second synchronous
@@ -101,7 +97,6 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     if (preview) {
       setPreview(null);
       setPhase("editing");
-      setDebugStatus(null);
     }
   }
 
@@ -144,65 +139,25 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     setPreview(null);
     setPhase("editing");
     setError(null);
-    setDebugStatus(null);
   }
 
-  // Stage 7.2 — temporary diagnostic logging throughout this function (tag
-  // "[ConfirmBet]") plus the debugStatus text shown under the Confirm bet
-  // button. Never logs initData/previewToken in full, only presence/length.
-  // No business logic changed — every setPhase/setPreview/setError call and
-  // every early-return condition below is identical to before Stage 7.2.
   async function handleConfirm() {
-    console.log("[ConfirmBet] handleConfirm: entered", {
-      phase,
-      hasPreview: preview !== null,
-      canConfirm,
-      inFlight: inFlightRef.current,
-    });
-
-    if (!canConfirm || !preview || inFlightRef.current) {
-      console.log("[ConfirmBet] handleConfirm: blocked by guard clause — no request will be sent", {
-        canConfirm,
-        hasPreview: preview !== null,
-        inFlight: inFlightRef.current,
-      });
-      return;
-    }
+    if (!canConfirm || !preview || inFlightRef.current) return;
 
     // window.Telegram?.WebApp / .initData are property reads on an object
     // injected by Telegram's own script — wrapped so a broken WebView
-    // implementation surfaces as a visible diagnostic instead of a silent,
-    // unexplained no-op.
+    // implementation can't crash the handler outright.
     let tg: NonNullable<typeof window.Telegram>["WebApp"] | undefined;
     let initDataValue = "";
     try {
       tg = window.Telegram?.WebApp;
       initDataValue = tg?.initData ?? "";
-    } catch (err) {
-      const e = err as Partial<Error>;
-      console.error("[ConfirmBet] handleConfirm: reading window.Telegram.WebApp/initData threw", {
-        name: e?.name,
-        message: e?.message,
-        stack: e?.stack,
-      });
-      setDebugStatus({ text: "Telegram WebApp is unavailable.", isError: true });
+    } catch {
+      setError("Telegram WebApp is unavailable.");
       return;
     }
 
-    if (!tg) {
-      console.log("[ConfirmBet] handleConfirm: window.Telegram.WebApp is undefined — no request will be sent");
-      setDebugStatus({ text: "Telegram WebApp is unavailable.", isError: true });
-      return;
-    }
-
-    console.log("[ConfirmBet] handleConfirm: pre-flight check", {
-      initDataPresent: initDataValue.length > 0,
-      initDataLength: initDataValue.length,
-      previewTokenPresent: preview.previewToken.length > 0,
-      previewTokenLength: preview.previewToken.length,
-    });
-
-    setDebugStatus({ text: "Confirm handler started", isError: false });
+    if (!tg) return;
 
     inFlightRef.current = true;
     const myRequest = ++requestTokenRef.current;
@@ -213,45 +168,27 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     setPhase("confirming");
     setError(null);
 
-    setDebugStatus({ text: "Sending request...", isError: false });
-    console.log("[ConfirmBet] handleConfirm: calling fetchBetConfirm");
-
     let result;
     try {
       result = await fetchBetConfirm(initDataValue, preview.previewToken, controller.signal);
-    } catch (err) {
+    } catch {
       // fetchBetConfirm always returns a BetConfirmResult and never throws
-      // under normal operation — this catch is a diagnostic safety net only,
-      // in case something unexpected escapes it.
-      const e = err as Partial<Error> & { cause?: unknown };
-      console.error("[ConfirmBet] handleConfirm: fetchBetConfirm threw unexpectedly", {
-        name: e?.name,
-        message: e?.message,
-        stack: e?.stack,
-        cause: e?.cause,
-      });
+      // under normal operation — this is a defensive fallback only, so an
+      // unexpected exception can't leave the button stuck on "Confirming...".
       inFlightRef.current = false;
       confirmControllerRef.current = null;
       setPhase("ready");
-      setDebugStatus({ text: `Unexpected error: ${e?.message ?? "unknown"}`, isError: true });
+      setError("Something went wrong. Please try again.");
       return;
     }
 
     inFlightRef.current = false;
     confirmControllerRef.current = null;
-    if (!isMountedRef.current || requestTokenRef.current !== myRequest) {
-      console.log("[ConfirmBet] handleConfirm: result discarded (unmounted or superseded by a newer request)");
-      return;
-    }
+    if (!isMountedRef.current || requestTokenRef.current !== myRequest) return;
 
     if (!result.ok) {
-      console.error("[ConfirmBet] handleConfirm: fetchBetConfirm failed", result.failure);
-
       // Intentional cancellation (unmount/replacement) — never a real error.
-      if (result.failure.kind === "aborted") {
-        setDebugStatus(null);
-        return;
-      }
+      if (result.failure.kind === "aborted") return;
 
       if (shouldResetPreviewAfterConfirmFailure(result.failure)) {
         setPreview(null);
@@ -260,20 +197,10 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
         setPhase("ready");
       }
 
-      const diagnosticText =
-        result.failure.kind === "timeout" ? "Confirm request timed out." : getBetConfirmErrorMessage(result.failure);
-
       setError(getBetConfirmErrorMessage(result.failure));
-      setDebugStatus({ text: diagnosticText, isError: true });
       triggerHaptic("error");
       return;
     }
-
-    console.log("[ConfirmBet] handleConfirm: success", {
-      betId: result.data.bet.id,
-      idempotent: result.data.idempotent,
-    });
-    setDebugStatus({ text: "Bet submitted", isError: false });
 
     triggerHaptic("success");
     setPreview(null);
@@ -364,16 +291,6 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
           >
             {phase === "confirming" ? "Confirming..." : "Confirm bet"}
           </button>
-
-          {/* Stage 7.2 — temporary diagnostic status, remove once the root
-              cause of the missing confirm request is found. */}
-          {debugStatus && (
-            <p
-              className={`mt-1.5 text-center text-xs ${debugStatus.isError ? "text-red-400" : "text-slate-500"}`}
-            >
-              {debugStatus.text}
-            </p>
-          )}
 
           <button
             type="button"

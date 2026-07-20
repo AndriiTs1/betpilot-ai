@@ -214,6 +214,15 @@ export async function POST(request: NextRequest) {
         ? await verifyOdds({ sport: bet.sport, event: bet.event, selection: bet.selection, odds: bet.odds })
         : null;
 
+    // Stage 9 — oddsCheck.note can contain sport_key values, internal
+    // tournament identifiers, or raw upstream API error text (see
+    // lib/odds/oddsVerifier.ts) — useful for debugging, never for a player.
+    // Logged here, then stripped before the response is built below; the
+    // Mini App shows one fixed, friendly message instead (BetPreviewCard.tsx).
+    if (oddsCheck && !oddsCheck.matched) {
+      console.log("POST /api/miniapp/bets/screenshot/preview: odds not matched:", oddsCheck.note);
+    }
+
     const previewToken = signPreviewToken(
       {
         playerId: player.id,
@@ -246,7 +255,8 @@ export async function POST(request: NextRequest) {
         totalOdds: bet.odds,
         potentialWin: bet.odds !== null ? roundTo2(bet.stake * bet.odds) : null,
       },
-      oddsCheck,
+      // note is server-side only (logged above) — never forwarded to the client.
+      oddsCheck: oddsCheck ? { ...oddsCheck, note: null } : null,
       previewToken,
     });
   } catch (err) {

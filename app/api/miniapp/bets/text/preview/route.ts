@@ -112,6 +112,15 @@ export async function POST(request: NextRequest) {
           })
         : null;
 
+    // Stage 9 — oddsCheck.note can contain sport_key values, internal
+    // tournament identifiers, or raw upstream API error text (see
+    // lib/odds/oddsVerifier.ts) — useful for debugging, never for a player.
+    // Logged here, then stripped before the response is built below; the
+    // Mini App shows one fixed, friendly message instead (BetPreviewCard.tsx).
+    if (oddsCheck && !oddsCheck.matched) {
+      console.log("POST /api/miniapp/bets/text/preview: odds not matched:", oddsCheck.note);
+    }
+
     const previewToken = signPreviewToken(
       {
         playerId: player.id,
@@ -144,7 +153,8 @@ export async function POST(request: NextRequest) {
         totalOdds: parsed.odds,
         potentialWin: parsed.odds !== null ? roundTo2(parsed.stake * parsed.odds) : null,
       },
-      oddsCheck,
+      // note is server-side only (logged above) — never forwarded to the client.
+      oddsCheck: oddsCheck ? { ...oddsCheck, note: null } : null,
       previewToken,
     });
   } catch (err) {

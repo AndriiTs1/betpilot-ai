@@ -67,11 +67,18 @@ export function OddsStatus({ oddsCheck }: { oddsCheck: BetOddsCheck | null }) {
   }
 
   if (!oddsCheck.matched) {
+    // Stage 9 — one fixed, player-facing message for every "couldn't verify"
+    // case (event not found, sport not covered, provider error, etc.), same
+    // across Football/Basketball/Tennis. The specific technical reason
+    // (oddsCheck.note server-side) is never shown here — see the preview
+    // API routes, which log it and strip it before the response reaches
+    // this component. Never blocks Confirm bet — canConfirm doesn't depend
+    // on oddsCheck at all (see BetTextForm.tsx/BetScreenshotForm.tsx).
     return (
       <StatusBox
         tone="warning"
         label="Odds could not be verified"
-        description={oddsCheck.note ?? "No matching market was found."}
+        description="This event is not currently available from the odds provider. You can still submit the bet for operator review."
       />
     );
   }
