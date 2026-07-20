@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   fetchBetPreview,
   getBetPreviewErrorMessage,
@@ -8,9 +8,16 @@ import {
   type BetPreview,
   type BetPreviewSuccess,
 } from "./betPreviewApi";
+import {
+  fetchBetConfirm,
+  getBetConfirmErrorMessage,
+  shouldResetPreviewAfterConfirmFailure,
+  type ConfirmedBet,
+} from "./betConfirmApi";
 
 interface BetTextFormProps {
   onBack: () => void;
+  onConfirmed: (bet: ConfirmedBet) => void;
 }
 
 const MESSAGE_MIN_LENGTH = 3;
@@ -46,47 +53,88 @@ function formatAmount(value: number): string {
   return value.toFixed(2);
 }
 
+type FormPhase = "editing" | "previewing" | "ready" | "confirming";
+
 // "Place a bet" screen: free-text message -> POST /api/miniapp/bets/text/preview
-// -> read-only preview + odds status. No confirm/create action exists yet —
-// see BetActionSheet's "Написать ставку" for how this is reached.
-export default function BetTextForm({ onBack }: BetTextFormProps) {
+// -> read-only preview + odds status -> POST .../confirm -> a real Bet
+// (Stage 4.4B). `phase` is the single source of truth for which block is
+// rendered; `preview !== null` is the single source of truth for whether a
+// still-usable previewToken exists (never duplicated elsewhere).
+export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
   const [message, setMessage] = useState("");
-  // previewResponse.previewToken (Stage 4.3) lives here in memory only —
-  // never rendered, decoded, logged, or persisted to storage.
-  const [previewResponse, setPreviewResponse] = useState<BetPreviewSuccess | null>(null);
-  const [isSubmitting, setSubmitting] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [phase, setPhase] = useState<FormPhase>("editing");
+  // preview.previewToken (Stage 4.3) lives here in memory only — never
+  // rendered, decoded, logged, or persisted to storage. Cleared on confirm
+  // success, on PREVIEW_EXPIRED/PREVIEW_INVALID/auth/registration failures,
+  // and whenever the user edits the message or the odds no longer match the
+  // text on screen. Kept across transient confirm failures (network/500/
+  // timeout) so a retry doesn't require re-previewing.
+  const [preview, setPreview] = useState<BetPreviewSuccess | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // inFlightRef guards against a double click firing two requests: React
+  // state updates aren't guaranteed to be visible to a second synchronous
+  // click handler in the same tick, so the disabled-button prop alone isn't
+  // enough. requestTokenRef + isMountedRef discard a response that's been
+  // superseded (component unmounted, or a newer request started) so a late
+  // reply can never overwrite a more recent state.
+  const isMountedRef = useRef(true);
+  const requestTokenRef = useRef(0);
+  const inFlightRef = useRef(false);
+  const confirmControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    // Explicitly reset on (re)mount, not just at useRef(true) declaration —
+    // React Strict Mode's dev-only mount->cleanup->mount replay would
+    // otherwise leave this permanently false after the very first render,
+    // since a ref mutation survives that replay while the effect re-runs.
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      confirmControllerRef.current?.abort();
+    };
+  }, []);
 
   const trimmedLength = message.trim().length;
-  const canSubmit = trimmedLength >= MESSAGE_MIN_LENGTH && !isSubmitting;
+  const canSubmitPreview = phase === "editing" && trimmedLength >= MESSAGE_MIN_LENGTH;
+  const canConfirm = phase === "ready" && preview !== null;
 
   function handleMessageChange(value: string) {
     setMessage(value);
-    // Never show a preview that no longer matches the text on screen.
-    if (previewResponse) setPreviewResponse(null);
+    // Never show a preview (or keep a token) that no longer matches the
+    // text on screen.
+    if (preview) {
+      setPreview(null);
+      setPhase("editing");
+    }
   }
 
-  async function handleSubmit() {
-    if (!canSubmit) return;
+  async function handlePreviewSubmit() {
+    if (!canSubmitPreview || inFlightRef.current) return;
 
     const tg = window.Telegram?.WebApp;
     if (!tg) return;
 
-    setSubmitting(true);
-    setErrorMessage(null);
-    setPreviewResponse(null);
+    inFlightRef.current = true;
+    const myRequest = ++requestTokenRef.current;
+
+    setPhase("previewing");
+    setError(null);
 
     const result = await fetchBetPreview(tg.initData, message.trim());
 
-    setSubmitting(false);
+    inFlightRef.current = false;
+    if (!isMountedRef.current || requestTokenRef.current !== myRequest) return;
 
     if (!result.ok) {
-      setErrorMessage(getBetPreviewErrorMessage(result.failure));
+      setPhase("editing");
+      setError(getBetPreviewErrorMessage(result.failure));
       triggerHaptic("error");
       return;
     }
 
-    setPreviewResponse(result.data);
+    setPreview(result.data);
+    setPhase("ready");
 
     if (result.data.oddsCheck && result.data.oddsCheck.matched && result.data.oddsCheck.withinTolerance === false) {
       triggerHaptic("warning-light");
@@ -96,8 +144,56 @@ export default function BetTextForm({ onBack }: BetTextFormProps) {
   }
 
   function handleEditMessage() {
-    setPreviewResponse(null);
+    if (phase === "confirming") return;
+    setPreview(null);
+    setPhase("editing");
+    setError(null);
   }
+
+  async function handleConfirm() {
+    if (!canConfirm || !preview || inFlightRef.current) return;
+
+    const tg = window.Telegram?.WebApp;
+    if (!tg) return;
+
+    inFlightRef.current = true;
+    const myRequest = ++requestTokenRef.current;
+
+    const controller = new AbortController();
+    confirmControllerRef.current = controller;
+
+    setPhase("confirming");
+    setError(null);
+
+    const result = await fetchBetConfirm(tg.initData, preview.previewToken, controller.signal);
+
+    inFlightRef.current = false;
+    confirmControllerRef.current = null;
+    if (!isMountedRef.current || requestTokenRef.current !== myRequest) return;
+
+    if (!result.ok) {
+      // Intentional cancellation (unmount/replacement) — never a real error.
+      if (result.failure.kind === "aborted") return;
+
+      if (shouldResetPreviewAfterConfirmFailure(result.failure)) {
+        setPreview(null);
+        setPhase("editing");
+      } else {
+        setPhase("ready");
+      }
+
+      setError(getBetConfirmErrorMessage(result.failure));
+      triggerHaptic("error");
+      return;
+    }
+
+    triggerHaptic("success");
+    setPreview(null);
+    onConfirmed(result.data.bet);
+  }
+
+  const showEditingBlock = phase === "editing" || phase === "previewing";
+  const showPreviewBlock = phase === "ready" || phase === "confirming";
 
   return (
     <div>
@@ -113,7 +209,7 @@ export default function BetTextForm({ onBack }: BetTextFormProps) {
       <p className="mt-3 text-xl font-bold text-white">Place a bet</p>
       <p className="mt-1 text-sm text-slate-400">Describe your bet in one message</p>
 
-      {!previewResponse && (
+      {showEditingBlock && (
         <div className="mt-4">
           <textarea
             value={message}
@@ -121,7 +217,7 @@ export default function BetTextForm({ onBack }: BetTextFormProps) {
             maxLength={MESSAGE_MAX_LENGTH}
             placeholder="Real Madrid win, stake 100, odds 2.10"
             aria-label="Bet message"
-            disabled={isSubmitting}
+            disabled={phase === "previewing"}
             className="w-full resize-none rounded-2xl p-3 text-base text-white placeholder:text-slate-500"
             style={{
               minHeight: 110,
@@ -136,8 +232,8 @@ export default function BetTextForm({ onBack }: BetTextFormProps) {
 
           <button
             type="button"
-            onClick={handleSubmit}
-            disabled={!canSubmit}
+            onClick={handlePreviewSubmit}
+            disabled={!canSubmitPreview}
             aria-label="Preview bet"
             className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
             style={{
@@ -145,26 +241,48 @@ export default function BetTextForm({ onBack }: BetTextFormProps) {
               color: "#04170C",
             }}
           >
-            {isSubmitting ? "Checking bet..." : "Preview bet"}
+            {phase === "previewing" ? "Checking bet..." : "Preview bet"}
           </button>
 
-          {errorMessage && (
+          {error && (
             <p role="alert" className="mt-3 text-sm text-red-400">
-              {errorMessage}
+              {error}
             </p>
           )}
         </div>
       )}
 
-      {previewResponse && (
+      {showPreviewBlock && preview && (
         <div className="mt-4">
-          <PreviewCard preview={previewResponse.preview} />
-          <OddsStatus oddsCheck={previewResponse.oddsCheck} />
+          <PreviewCard preview={preview.preview} />
+          <OddsStatus oddsCheck={preview.oddsCheck} />
+
+          {error && (
+            <p role="alert" className="mt-3 text-sm text-red-400">
+              {error}
+            </p>
+          )}
+
+          <button
+            type="button"
+            onClick={handleConfirm}
+            disabled={!canConfirm}
+            aria-label="Confirm bet"
+            className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
+            style={{
+              background: "#60E84A",
+              color: "#04170C",
+            }}
+          >
+            {phase === "confirming" ? "Confirming..." : "Confirm bet"}
+          </button>
 
           <button
             type="button"
             onClick={handleEditMessage}
-            className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-medium text-slate-400"
+            disabled={phase === "confirming"}
+            aria-label="Edit message"
+            className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-medium text-slate-400 disabled:opacity-50"
             style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
           >
             Edit message
