@@ -20,9 +20,26 @@ enum BetStatus {
 // done yet" / parlay research). Purely additive: existing single-event bets
 // keep working unchanged via the old sport/event/outcome/odds fields below,
 // which are NOT removed yet.
+//
+// Stage 12 — PARLAY renamed to EXPRESS (0 rows used this value in
+// production at the time of the rename, verified directly against the
+// database before migrating, not just against local schema state).
 enum BetType {
   SINGLE
-  PARLAY
+  EXPRESS
+}
+
+// Stage 12 — per-selection odds-verification outcome. PENDING is the
+// column default but isn't actually reachable by any current code path:
+// odds are always verified synchronously before a previewToken is signed,
+// so a selection is created already carrying one of the other four values.
+// Reserved for a possible future async/re-verification stage.
+enum BetSelectionOddsStatus {
+  PENDING
+  VERIFIED
+  ODDS_CHANGED
+  NOT_FOUND
+  UNAVAILABLE
 }
 
 enum TransactionType {
@@ -110,15 +127,21 @@ model Bet {
   // Transitional single-event fields — still the source of truth for every
   // existing bet today. Not removed in Stage 1; see README for the planned
   // backfill (Stage 2) before these are ever dropped.
+  //
+  // Stage 12 — event/outcome made nullable: an EXPRESS bet has no single
+  // event/outcome of its own (that detail now lives per-leg on
+  // BetSelection). Existing SINGLE rows are unaffected — this is a
+  // widening, not a data change.
   sport   String
-  event   String
-  outcome String
+  event   String?
+  outcome String?
   odds    Decimal? @db.Decimal(6, 2)
   stake   Decimal  @db.Decimal(18, 6) // USDC
 
-  // Stage 1 additions for parlay support. `type` defaults to SINGLE so every
-  // existing row is valid without a backfill; `totalOdds` is nullable and
-  // unused until something actually populates it for a PARLAY bet.
+  // Stage 1 additions for express/parlay support. `type` defaults to SINGLE
+  // so every existing row is valid without a backfill; `totalOdds` is
+  // nullable and unused until something actually populates it for an
+  // EXPRESS bet.
   type       BetType        @default(SINGLE)
   totalOdds  Decimal?       @db.Decimal(10, 2)
   selections BetSelection[]
@@ -150,6 +173,12 @@ model Bet {
 // switch API/UI consumers over, then (much later) drop Bet's own
 // sport/event/outcome/odds fields. No BetSelection-level status yet — bet
 // results are still tracked only on Bet.status for now.
+//
+// Stage 12 — `outcome` and `odds` are intentionally NOT renamed even though
+// they're now understood as "selection" and "submittedOdds" respectively:
+// both already have real backfilled data and existing readers
+// (BetSelectionsList.tsx, BetTicket.tsx, serialize.ts). A physical rename is
+// a separate, later cleanup once every consumer is ready to move together.
 model BetSelection {
   id    String @id @default(cuid())
   betId String
@@ -159,6 +188,12 @@ model BetSelection {
   event   String
   outcome String
   odds    Decimal? @db.Decimal(6, 2)
+
+  // Stage 12 additions for EXPRESS support — all additive, nullable/defaulted,
+  // don't affect any already-backfilled row's meaning.
+  market      String?
+  currentOdds Decimal?               @db.Decimal(6, 2)
+  oddsStatus  BetSelectionOddsStatus @default(PENDING)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -5,8 +5,9 @@ import { PrismaNeon } from "@prisma/adapter-neon";
 // Stage 2B backfill: creates exactly one BetSelection per existing SINGLE
 // Bet that doesn't have one yet, copying sport/event/outcome/odds, and sets
 // Bet.totalOdds = Bet.odds. Does not touch OddsSnapshot, status, stake,
-// playerId, rawMessage, or timestamps. Does not touch PARLAY bets (there are
-// none today, but the selection criterion below excludes them regardless).
+// playerId, rawMessage, or timestamps. Does not touch EXPRESS bets (formerly
+// PARLAY — there are none today, but the selection criterion below excludes
+// them regardless).
 //
 // Idempotent by construction: the selection criterion is "type: SINGLE AND
 // selections: none", so once a Bet has its one BetSelection, it no longer
@@ -31,8 +32,12 @@ function maskId(id: string): string {
 interface CandidateBet {
   id: string;
   sport: string;
-  event: string;
-  outcome: string;
+  // Stage 12 — Bet.event/outcome became nullable (an EXPRESS bet has
+  // neither), but this script only ever selects type: SINGLE, and every
+  // real SINGLE row still has both set. The runtime guard in runBackfill()
+  // below asserts that, matching this file's existing defense-in-depth style.
+  event: string | null;
+  outcome: string | null;
   odds: Prisma.Decimal | null;
   type: string;
 }
@@ -47,12 +52,12 @@ async function findCandidates(): Promise<CandidateBet[]> {
 
 async function runDryRun(): Promise<void> {
   const candidates = await findCandidates();
-  const parlayCount = await prisma.bet.count({ where: { type: "PARLAY" } });
+  const expressCount = await prisma.bet.count({ where: { type: "EXPRESS" } });
   const oddsSnapshotCountBefore = await prisma.oddsSnapshot.count();
 
   console.log("=== DRY RUN — no data will be written ===");
   console.log("Candidate bets (type=SINGLE, selections: none):", candidates.length);
-  console.log("PARLAY bets in database (never touched by this script):", parlayCount);
+  console.log("EXPRESS bets in database (never touched by this script):", expressCount);
   console.log("OddsSnapshot count (will remain unchanged):", oddsSnapshotCountBefore);
   console.log("");
   console.log("Planned changes:");
@@ -81,6 +86,10 @@ async function runBackfill(): Promise<void> {
       // corrupt data — any violation aborts the whole transaction.
       if (bet.type !== "SINGLE") {
         throw new Error(`Refusing to backfill non-SINGLE bet ${maskId(bet.id)} (type=${bet.type})`);
+      }
+
+      if (bet.event === null || bet.outcome === null) {
+        throw new Error(`Refusing to backfill bet ${maskId(bet.id)} — event/outcome unexpectedly null`);
       }
 
       const existingSelections = await tx.betSelection.count({ where: { betId: bet.id } });
