@@ -7,8 +7,9 @@ import BetActionSheet from "./BetActionSheet";
 import BetTextForm from "./BetTextForm";
 import BetScreenshotForm from "./BetScreenshotForm";
 import BetTicket, { type BetTicketData } from "./BetTicket";
-import type { ConfirmedBet } from "./betConfirmApi";
+import type { AnyConfirmedBet } from "./betConfirmApi";
 import type { RecentBet } from "./types";
+import { getSportIcon } from "./sportIcons";
 
 interface BetScreenProps {
   playerName: string;
@@ -19,21 +20,53 @@ interface BetScreenProps {
   onNavigateToHistory: () => void;
 }
 
-// ConfirmedBet.status is always the literal "PENDING" — the player-side
-// confirm step (Stage 4.4B) only ever creates a pending Bet; only the
-// operator dashboard's own confirm step (a different action, same word)
-// can move it to CONFIRMED. The ticket badge says "Submitted", not
-// "Confirmed", specifically to avoid implying the operator has already
-// accepted it — see the Stage 4.5G changelog entry.
-function toBetTicketData(bet: ConfirmedBet, playerName: string, availableCredit: string): BetTicketData {
+// bet.status is always the literal "PENDING" for either shape — the
+// player-side confirm step (Stage 4.4B, extended to EXPRESS in Phase 4
+// Step 4) only ever creates a pending Bet; only the operator dashboard's
+// own confirm step (a different action, same word) can move it to
+// CONFIRMED. The ticket badge says "Submitted", not "Confirmed",
+// specifically to avoid implying the operator has already accepted it —
+// see the Stage 4.5G changelog entry.
+//
+// Stage 12, Phase 4, Step 5 — SINGLE branch is byte-for-byte what this
+// function has always done. EXPRESS builds a real multi-entry
+// selections[] from bet.selections instead of the single hardcoded entry;
+// stake/totalOdds are parsed from confirm's decimal strings into numbers
+// purely for this display-only ticket (BetTicket.tsx already renders
+// every other number as a plain JS number) — no precision-sensitive
+// storage or calculation happens here, the exact values already came from
+// the server as strings and are shown, not recomputed.
+export function toBetTicketData(bet: AnyConfirmedBet, playerName: string, availableCredit: string): BetTicketData {
+  if (bet.type === "SINGLE") {
+    return {
+      id: bet.id,
+      status: "submitted",
+      player: playerName,
+      createdAt: bet.createdAt,
+      selections: [{ sport: bet.sport, league: null, event: bet.event, selection: bet.outcome, odds: bet.odds }],
+      stake: bet.stake,
+      totalOdds: bet.totalOdds,
+      availableCredit,
+    };
+  }
+
   return {
     id: bet.id,
     status: "submitted",
     player: playerName,
     createdAt: bet.createdAt,
-    selections: [{ sport: bet.sport, league: null, event: bet.event, selection: bet.outcome, odds: bet.odds }],
-    stake: bet.stake,
-    totalOdds: bet.totalOdds,
+    selections: bet.selections.map((selection) => ({
+      sport: selection.sport,
+      league: null,
+      event: selection.event,
+      selection: selection.outcome,
+      odds: selection.odds !== null ? Number(selection.odds) : null,
+      market: selection.market,
+      currentOdds: selection.currentOdds !== null ? Number(selection.currentOdds) : null,
+      oddsStatus: selection.oddsStatus,
+    })),
+    stake: Number(bet.stake),
+    totalOdds: bet.totalOdds !== null ? Number(bet.totalOdds) : null,
     availableCredit,
   };
 }
@@ -58,7 +91,7 @@ export default function BetScreen({
   const [isScreenshotFormOpen, setScreenshotFormOpen] = useState(false);
   // Set only after a real POST .../confirm success (Stage 4.4B) — holds the
   // whitelisted server response only, never previewId/playerId/previewToken.
-  const [confirmedBet, setConfirmedBet] = useState<ConfirmedBet | null>(null);
+  const [confirmedBet, setConfirmedBet] = useState<AnyConfirmedBet | null>(null);
   const recentActivity = recentBets.slice(0, RECENT_ACTIVITY_LIMIT);
 
   const closeSheet = () => setSheetOpen(false);
@@ -167,23 +200,29 @@ export default function BetScreen({
           <p className="mt-2 text-sm text-slate-500">Здесь появятся ваши последние ставки</p>
         ) : (
           <div className="mt-2 space-y-2">
-            {recentActivity.map((bet) => (
-              <div
-                key={bet.id}
-                className="flex items-center justify-between gap-3 rounded-xl px-3 py-2.5"
-                style={{ background: "rgba(255,255,255,0.03)" }}
-              >
-                <p className="min-w-0 flex-1 truncate text-sm font-medium text-white">
-                  {bet.selections && bet.selections.length > 1
-                    ? `Экспресс ×${bet.selections.length} · ${bet.event}`
-                    : bet.event}
-                </p>
-                <span className="shrink-0 text-xs text-slate-400">
-                  {(bet.selections && bet.selections.length > 1 ? bet.totalOdds : bet.odds) ?? "—"}
-                </span>
-                <StatusBadge status={bet.status} />
-              </div>
-            ))}
+            {recentActivity.map((bet) => {
+              const SportIcon = getSportIcon(bet.sport);
+              return (
+                <div
+                  key={bet.id}
+                  className="flex items-center justify-between gap-3 rounded-xl px-3 py-2.5"
+                  style={{ background: "rgba(255,255,255,0.03)" }}
+                >
+                  <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                    <SportIcon size={16} className="shrink-0 text-slate-500" aria-hidden="true" />
+                    <p className="min-w-0 truncate text-sm font-medium text-white">
+                      {bet.selections && bet.selections.length > 1
+                        ? `Экспресс ×${bet.selections.length} · ${bet.event}`
+                        : bet.event}
+                    </p>
+                  </div>
+                  <span className="shrink-0 text-xs text-slate-400">
+                    {(bet.selections && bet.selections.length > 1 ? bet.totalOdds : bet.odds) ?? "—"}
+                  </span>
+                  <StatusBadge status={bet.status} />
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

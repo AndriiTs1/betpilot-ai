@@ -1,5 +1,12 @@
 const REQUEST_TIMEOUT_MS = 15000;
 
+// ConfirmedBet — unchanged since Phase 3, byte-for-byte. Kept exactly as
+// this shape (not widened, not renamed): Phase 4 Step 4 found that turning
+// this into a union directly broke BetScreen.tsx's then out-of-scope
+// toBetTicketData (`Type 'string | null' is not assignable to type
+// 'string'`), so the EXPRESS shape lives under new names instead — see
+// AnyConfirmedBet below, which is what BetScreen.tsx/BetTicket.tsx/
+// BetTextForm.tsx/BetScreenshotForm.tsx actually consume as of Step 5.
 export interface ConfirmedBet {
   id: string;
   status: "PENDING";
@@ -13,8 +20,43 @@ export interface ConfirmedBet {
   createdAt: string;
 }
 
+// The shape app/api/miniapp/bets/text/confirm/route.ts returns for a
+// confirmed EXPRESS bet (Phase 4, Step 4) — now actually rendered by
+// BetTicket.tsx (Step 5).
+export interface ConfirmedExpressSelection {
+  id: string;
+  sport: string;
+  event: string;
+  outcome: string;
+  market: string | null;
+  odds: string | null;
+  currentOdds: string | null;
+  oddsStatus: string;
+}
+
+export interface ConfirmedExpressBet {
+  id: string;
+  status: "PENDING";
+  type: "EXPRESS";
+  sport: string;
+  event: null;
+  outcome: null;
+  odds: null;
+  stake: string;
+  totalOdds: string | null;
+  createdAt: string;
+  selections: ConfirmedExpressSelection[];
+}
+
+// Stage 12, Phase 4, Step 5 — the discriminated union the UI now consumes:
+// BetTextForm.tsx/BetScreenshotForm.tsx/BetScreen.tsx/BetTicket.tsx all
+// branch on `.type` to render either shape. ConfirmedBet itself is left
+// completely alone (still exactly its Phase 3 shape) — only this union and
+// BetConfirmSuccess.bet's type change.
+export type AnyConfirmedBet = ConfirmedBet | ConfirmedExpressBet;
+
 export interface BetConfirmSuccess {
-  bet: ConfirmedBet;
+  bet: AnyConfirmedBet;
   idempotent: boolean;
 }
 
@@ -39,8 +81,63 @@ export type BetConfirmResult =
   | { ok: true; data: BetConfirmSuccess }
   | { ok: false; failure: BetConfirmFailure };
 
+// Plain boolean helpers, not `value is X` predicates — same reasoning as
+// this file's earlier attempt: a type predicate's return type must be
+// assignable to its parameter type, and `Record<string, unknown>` (no
+// index signature) isn't assignable to/from a concrete interface.
+// isBetConfirmSuccess below narrows via the already-boolean result and its
+// own local `b.type` check instead.
+function isConfirmedSingleBetShape(b: Record<string, unknown>): boolean {
+  return (
+    typeof b.id === "string" &&
+    b.status === "PENDING" &&
+    b.type === "SINGLE" &&
+    typeof b.sport === "string" &&
+    typeof b.event === "string" &&
+    typeof b.outcome === "string" &&
+    typeof b.stake === "number" &&
+    (b.odds === null || typeof b.odds === "number") &&
+    (b.totalOdds === null || typeof b.totalOdds === "number") &&
+    typeof b.createdAt === "string"
+  );
+}
+
+function isConfirmedExpressSelectionShape(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const s = value as Record<string, unknown>;
+  return (
+    typeof s.id === "string" &&
+    typeof s.sport === "string" &&
+    typeof s.event === "string" &&
+    typeof s.outcome === "string" &&
+    (s.market === null || typeof s.market === "string") &&
+    (s.odds === null || typeof s.odds === "string") &&
+    (s.currentOdds === null || typeof s.currentOdds === "string") &&
+    typeof s.oddsStatus === "string"
+  );
+}
+
+function isConfirmedExpressBetShape(b: Record<string, unknown>): boolean {
+  return (
+    typeof b.id === "string" &&
+    b.status === "PENDING" &&
+    b.type === "EXPRESS" &&
+    typeof b.sport === "string" &&
+    b.event === null &&
+    b.outcome === null &&
+    b.odds === null &&
+    typeof b.stake === "string" &&
+    (b.totalOdds === null || typeof b.totalOdds === "string") &&
+    typeof b.createdAt === "string" &&
+    Array.isArray(b.selections) &&
+    b.selections.every(isConfirmedExpressSelectionShape)
+  );
+}
+
 // Minimal structural check before trusting the response shape — same
 // discipline as betPreviewApi.ts's isBetPreviewSuccess. No blind cast.
+// Stage 12, Phase 4, Step 5 — now accepts either a SINGLE or an EXPRESS
+// confirmed bet, dispatched by the already-validated `type` field.
 function isBetConfirmSuccess(value: unknown): value is BetConfirmSuccess {
   if (
     typeof value !== "object" ||
@@ -56,18 +153,7 @@ function isBetConfirmSuccess(value: unknown): value is BetConfirmSuccess {
   if (typeof bet !== "object" || bet === null) return false;
 
   const b = bet as Record<string, unknown>;
-  return (
-    typeof b.id === "string" &&
-    b.status === "PENDING" &&
-    b.type === "SINGLE" &&
-    typeof b.sport === "string" &&
-    typeof b.event === "string" &&
-    typeof b.outcome === "string" &&
-    typeof b.stake === "number" &&
-    (b.odds === null || typeof b.odds === "number") &&
-    (b.totalOdds === null || typeof b.totalOdds === "number") &&
-    typeof b.createdAt === "string"
-  );
+  return isConfirmedSingleBetShape(b) || isConfirmedExpressBetShape(b);
 }
 
 // externalSignal lets the caller cancel on unmount/replacement; it's

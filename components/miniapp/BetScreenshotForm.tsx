@@ -11,14 +11,15 @@ import {
   fetchBetConfirm,
   getBetConfirmErrorMessage,
   shouldResetPreviewAfterConfirmFailure,
-  type ConfirmedBet,
+  type AnyConfirmedBet,
 } from "./betConfirmApi";
 import { OddsStatus, PreviewCard } from "./BetPreviewCard";
 import type { BetPreviewSuccess } from "./betPreviewApi";
+import { canConfirmBetSlip } from "./canConfirmBetSlip";
 
 interface BetScreenshotFormProps {
   onBack: () => void;
-  onConfirmed: (bet: ConfirmedBet) => void;
+  onConfirmed: (bet: AnyConfirmedBet) => void;
 }
 
 // Mirrors the screenshot preview endpoint's own limits
@@ -153,14 +154,13 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
   }
 
   const canRecognize = phase === "selected" && file !== null;
-  // Stage 12, Phase 3 — EXPRESS confirm isn't implemented yet
-  // (createBetFromPreview.ts only models one selection, and
-  // buildBetSlipPreview.ts deliberately never signs a token for EXPRESS —
-  // see that file's own comment). previewToken !== null is the real
-  // technical guard; preview.type === "SINGLE" is checked too so this
-  // reads as the actual business rule, not just "a token happened to exist".
-  const canConfirm =
-    phase === "ready" && preview !== null && preview.preview.type === "SINGLE" && preview.previewToken !== null;
+  // Stage 12, Phase 4, Step 5 — EXPRESS confirm is now implemented
+  // end-to-end (buildBetSlipPreview.ts signs an EXPRESS previewToken
+  // whenever every selection's odds are known; the confirm route redeems
+  // either token type). previewToken !== null is still the real guard —
+  // it's null exactly when there's nothing valid to submit, regardless of
+  // type.
+  const canConfirm = canConfirmBetSlip(phase === "ready", preview);
 
   async function handleRecognize() {
     if (!canRecognize || !file || inFlightRef.current) return;
@@ -431,14 +431,6 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
             >
               {phase === "confirming" ? "Confirming..." : "Confirm bet"}
             </button>
-
-            {/* Stage 12, Phase 3 — EXPRESS confirm isn't implemented yet;
-                see the canConfirm comment above for why. */}
-            {preview.preview.type === "EXPRESS" && (
-              <p className="mt-2 text-center text-xs text-slate-500">
-                Express confirmation will be enabled in the next phase.
-              </p>
-            )}
 
             <button
               type="button"

@@ -1,6 +1,7 @@
 import { forwardRef } from "react";
 import type { LucideIcon } from "lucide-react";
 import { Ban, Barcode, Calendar, CircleCheckBig, CircleX, Clock, Hash, Trophy, User, Zap } from "lucide-react";
+import { getSportIcon } from "./sportIcons";
 
 // The signature post-submission screen (Stage 4.5G) — replaces the plain
 // BetConfirmedCard that used to live inline in BetScreen.tsx. Deliberately
@@ -10,6 +11,12 @@ import { Ban, Barcode, Calendar, CircleCheckBig, CircleX, Clock, Hash, Trophy, U
 // this exact component without a redesign — see docs/CHANGELOG.md's
 // Stage 4.5G entry for what's intentionally deferred (those exports/share
 // actions are not implemented here, only the layout is shaped for them).
+// Stage 12, Phase 4, Step 5 — that deferred multi-leg case is now real:
+// BetScreen.tsx's toBetTicketData builds a real multi-entry selections[]
+// for a confirmed EXPRESS bet, using this exact same component unchanged
+// in structure — only the per-selection row grew market/currentOdds/
+// oddsStatus, all optional so a SINGLE ticket (which never sets them)
+// renders identically to before.
 //
 // No shared Card/Button/Badge primitives exist in this codebase (verified —
 // every miniapp screen uses inline styles), so "reuse existing" here means
@@ -27,6 +34,13 @@ export interface BetTicketSelection {
   event: string;
   selection: string;
   odds: number | null;
+  // EXPRESS-only (Step 5) — left undefined for SINGLE, exactly as before.
+  // oddsStatus/currentOdds are independently optional: an EXPRESS leg can
+  // have a real oddsStatus (e.g. UNAVAILABLE) with no currentOdds value at
+  // all, and that's shown as-is, never backfilled with a fake number.
+  market?: string | null;
+  currentOdds?: number | null;
+  oddsStatus?: string | null;
 }
 
 export interface BetTicketData {
@@ -211,29 +225,43 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
 
         {/* Event */}
         <div className="px-5 py-5">
-          {ticket.selections.map((selection, index) => (
-            <div
-              key={index}
-              className={`ticket-row-animate ${index > 0 ? "mt-4" : ""}`}
-              style={{ animationDelay: ticketRowDelay(TICKET_META_ROW_COUNT + index) }}
-            >
-              {isParlay && (
-                <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                  Leg {index + 1}
+          {ticket.selections.map((selection, index) => {
+            const SportIcon = getSportIcon(selection.sport);
+            // Both undefined for SINGLE (toBetTicketData never sets them) —
+            // this row renders nothing extra, identical to before Step 5.
+            const showStatusRow = selection.currentOdds != null || selection.oddsStatus != null;
+
+            return (
+              <div
+                key={index}
+                className={`ticket-row-animate ${index > 0 ? "mt-4" : ""}`}
+                style={{ animationDelay: ticketRowDelay(TICKET_META_ROW_COUNT + index) }}
+              >
+                {isParlay && (
+                  <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    Leg {index + 1}
+                  </p>
+                )}
+                <div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-slate-500">
+                  <SportIcon size={13} strokeWidth={2} aria-hidden="true" />
+                  {selection.sport}
+                  {selection.league ? ` · ${selection.league}` : ""}
+                </div>
+                <p className="mt-1 text-[15px] font-semibold text-white break-words">{selection.event}</p>
+                <p className="mt-0.5 text-sm break-words" style={{ color: "#60E84A" }}>
+                  {selection.selection}
+                  {selection.market ? ` · ${selection.market}` : ""}
+                  {selection.odds !== null ? ` · ${formatAmount(selection.odds)}` : ""}
                 </p>
-              )}
-              <div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-slate-500">
-                <Trophy size={13} strokeWidth={2} aria-hidden="true" />
-                {selection.sport}
-                {selection.league ? ` · ${selection.league}` : ""}
+                {showStatusRow && (
+                  <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
+                    {selection.currentOdds != null && <span>Current: {formatAmount(selection.currentOdds)}</span>}
+                    {selection.oddsStatus != null && <OddsStatusPill status={selection.oddsStatus} />}
+                  </div>
+                )}
               </div>
-              <p className="mt-1 text-[15px] font-semibold text-white break-words">{selection.event}</p>
-              <p className="mt-0.5 text-sm break-words" style={{ color: "#60E84A" }}>
-                {selection.selection}
-                {selection.odds !== null ? ` · ${formatAmount(selection.odds)}` : ""}
-              </p>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         <TicketDivider />
@@ -390,6 +418,33 @@ function FinancialRow({
         {value}
       </span>
     </div>
+  );
+}
+
+// EXPRESS-only, per-selection status badge (Step 5) — same palette
+// BetPreviewCard.tsx's SelectionStatusBadge already established for the
+// same five statuses, kept as its own small local copy rather than an
+// import (BetPreviewCard.tsx is out of this step's scope) so this
+// component's known set stays self-contained. An unrecognized string
+// (oddsStatus is typed loosely as `string` on the wire) falls back to a
+// neutral label instead of silently rendering nothing.
+const ODDS_STATUS_LABELS: Record<string, { label: string; color: string }> = {
+  VERIFIED: { label: "Verified", color: "#60E84A" },
+  ODDS_CHANGED: { label: "Odds changed", color: "#E8B84A" },
+  NOT_FOUND: { label: "Not found", color: "#94a3b8" },
+  UNAVAILABLE: { label: "Unavailable", color: "#94a3b8" },
+  PENDING: { label: "Pending", color: "#94a3b8" },
+};
+
+function OddsStatusPill({ status }: { status: string }) {
+  const { label, color } = ODDS_STATUS_LABELS[status] ?? { label: status, color: "#94a3b8" };
+  return (
+    <span
+      className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium"
+      style={{ background: `${color}1A`, color }}
+    >
+      {label}
+    </span>
   );
 }
 

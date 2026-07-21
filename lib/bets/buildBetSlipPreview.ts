@@ -5,18 +5,19 @@ import { validateBetSlipType, BetSlipValidationError } from "@/lib/bets/betSlipR
 import { computeTotalOdds, computePotentialWin } from "@/lib/bets/expressMath";
 import { mapOddsCheckToSelectionStatus } from "@/lib/odds/mapOddsStatus";
 import { verifyOdds, type OddsVerificationInput } from "@/lib/odds/oddsVerifier";
-import { signPreviewToken } from "@/lib/betPreview/previewToken";
+import { signPreviewToken, signExpressPreviewToken } from "@/lib/betPreview/previewToken";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 
 // Stage 12, Phase 3 — the one shared pipeline both the text and screenshot
 // preview routes run a parsed slip through: validate shape -> verify odds
-// per selection in parallel -> compute totals -> sign a previewToken (SINGLE
-// only, for now). Exists so this logic isn't duplicated between the two
-// routes (they only differ in how they got a ParsedBetSlip in the first
-// place). Does NOT write to the database and does NOT touch
-// createBetFromPreview.ts — this only ever produces the response Preview
-// shows the player, plus (for SINGLE) the exact same kind of signed token
-// confirm already accepts.
+// per selection in parallel -> compute totals -> sign a previewToken. Exists
+// so this logic isn't duplicated between the two routes (they only differ
+// in how they got a ParsedBetSlip in the first place). Does NOT write to
+// the database and does NOT touch createBetFromPreview.ts — this only ever
+// produces the response Preview shows the player, plus the same kind of
+// signed token confirm already accepts for SINGLE (Phase 3) and now signs
+// for EXPRESS too (Phase 4, Step 2) — Confirm itself still only knows how
+// to redeem a SINGLE token; that's Phase 4, Step 3's job, not this file's.
 
 export interface BetSlipPreviewSelection {
   sport: string;
@@ -40,11 +41,17 @@ export interface BetSlipPreview {
 
 export interface BuildBetSlipPreviewResult {
   preview: BetSlipPreview;
-  // Only ever set for SINGLE — EXPRESS confirm isn't implemented yet
-  // (createBetFromPreview.ts only models one selection), so no token is
-  // signed for it. The Mini App blocks Confirm for EXPRESS client-side;
-  // this is the server-side backstop — there is nothing to submit even if
-  // that UI guard were bypassed.
+  // SINGLE: always set (unchanged since Phase 3). EXPRESS (Phase 4, Step 2):
+  // set whenever totalOdds/potentialWin could be computed, i.e. every
+  // selection had a known submittedOdds — same condition that already
+  // decides whether the preview itself shows real totals instead of null.
+  // If any selection's odds are unknown, there's nothing valid to put in
+  // an EXPRESS token's required (non-nullable) totalOdds/potentialWin
+  // fields, so previewToken stays null exactly as it already would have.
+  // createBetFromPreview.ts still only knows how to redeem a SINGLE token
+  // (Phase 4, Step 3), and the Mini App still blocks EXPRESS Confirm
+  // client-side regardless of this token's presence — signing it here is
+  // just this step's scope, not a green light to submit yet.
   previewToken: string | null;
 }
 
@@ -122,12 +129,17 @@ export async function buildBetSlipPreview(
   // computeTotalOdds/computePotentialWin, not to duplicate their math.
   const allOddsKnown = slip.selections.every((selection) => selection.submittedOdds !== null);
 
+  // Kept as a Decimal (not re-derived from the number a second time below)
+  // so the EXPRESS branch's stake string comes from the exact same
+  // instance already used for potentialWin's math, not a fresh conversion.
+  const stakeDecimal = new Prisma.Decimal(slip.stake);
+
   let totalOdds: Prisma.Decimal | null = null;
   let potentialWin: Prisma.Decimal | null = null;
 
   if (allOddsKnown) {
     totalOdds = computeTotalOdds(slip.selections.map((selection) => new Prisma.Decimal(selection.submittedOdds!)));
-    potentialWin = computePotentialWin(new Prisma.Decimal(slip.stake), totalOdds);
+    potentialWin = computePotentialWin(stakeDecimal, totalOdds);
   }
 
   let previewToken: string | null = null;
@@ -153,6 +165,34 @@ export async function buildBetSlipPreview(
               bookmaker: rawOddsCheck.bookmaker,
             }
           : null,
+      },
+      previewTokenSecret,
+    );
+  } else if (slip.type === "EXPRESS" && totalOdds !== null && potentialWin !== null) {
+    // Not caught here: signExpressPreviewToken's own selections-count guard
+    // (lib/betPreview/previewToken.ts) can only ever throw for a count
+    // outside 2-10, and validateBetSlipType already enforced that same
+    // range at the top of this function — this call is not expected to
+    // throw in practice, but if it somehow did, the existing model this
+    // function already follows for BetSlipValidationError applies equally
+    // here: let it propagate uncaught rather than silently degrading to a
+    // null token.
+    previewToken = signExpressPreviewToken(
+      {
+        playerId,
+        stake: stakeDecimal.toString(),
+        totalOdds: totalOdds.toString(),
+        potentialWin: potentialWin.toString(),
+        selections: previewSelections.map((selection) => ({
+          sport: selection.sport,
+          event: selection.event,
+          outcome: selection.selection,
+          market: selection.market,
+          submittedOdds:
+            selection.submittedOdds !== null ? new Prisma.Decimal(selection.submittedOdds).toString() : null,
+          currentOdds: selection.currentOdds !== null ? new Prisma.Decimal(selection.currentOdds).toString() : null,
+          oddsStatus: selection.oddsStatus,
+        })),
       },
       previewTokenSecret,
     );

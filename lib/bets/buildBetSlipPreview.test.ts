@@ -4,6 +4,7 @@ import { buildBetSlipPreview, BetSlipValidationError } from "./buildBetSlipPrevi
 import type { ParsedBetSlip } from "./betSlip";
 import type { OddsVerificationInput } from "@/lib/odds/oddsVerifier";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
+import { verifyPreviewToken, verifyExpressPreviewToken } from "@/lib/betPreview/previewToken";
 
 const TEST_SECRET = "test-preview-token-secret";
 
@@ -72,7 +73,24 @@ test("buildBetSlipPreview: SINGLE regression — token signed, totals correct, V
   assert.ok(result.previewToken && result.previewToken.length > 0);
 });
 
-test("buildBetSlipPreview: EXPRESS with 2 selections — matches the acceptance criteria (3.06 / 153.00), no token", async () => {
+test("buildBetSlipPreview: SINGLE token is still redeemable via the unchanged verifyPreviewToken", async () => {
+  const slip = singleSlip(1.95);
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: fakeVerifyOddsFn({ "Manchester City vs Chelsea": verified(1.95, 1.95) }),
+  });
+
+  assert.ok(result.previewToken !== null);
+  const verified_ = verifyPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verified_.ok, true);
+  if (!verified_.ok) return;
+  assert.equal(verified_.payload.type, "SINGLE");
+  assert.equal(verified_.payload.playerId, "player-1");
+  assert.equal(verified_.payload.event, "Manchester City vs Chelsea");
+  assert.equal(verified_.payload.outcome, "Manchester City Win");
+  assert.equal(verified_.payload.stake, 75);
+});
+
+test("buildBetSlipPreview: EXPRESS with 2 selections — matches the acceptance criteria (3.06 / 153.00), token now signed", async () => {
   const slip: ParsedBetSlip = {
     type: "EXPRESS",
     stake: 50,
@@ -93,6 +111,129 @@ test("buildBetSlipPreview: EXPRESS with 2 selections — matches the acceptance 
   assert.equal(result.preview.selections.length, 2);
   assert.equal(result.preview.totalOdds, 3.06);
   assert.equal(result.preview.potentialWin, 153);
+  assert.equal(typeof result.previewToken, "string");
+  assert.ok(result.previewToken && result.previewToken.length > 0);
+});
+
+test("buildBetSlipPreview: EXPRESS token is redeemable via verifyExpressPreviewToken with the exact decimal strings and playerId/previewId set", async () => {
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 50,
+    selections: [
+      { sport: "Football", event: "Real Madrid vs Barcelona", market: "Match Winner", selection: "Real Madrid Win", submittedOdds: 1.8 },
+      { sport: "Tennis", event: "Inter vs Juventus", market: null, selection: "Over 2.5", submittedOdds: 1.7 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-42", TEST_SECRET, {
+    verifyOddsFn: fakeVerifyOddsFn({
+      "Real Madrid vs Barcelona": verified(1.8, 1.8),
+      "Inter vs Juventus": verified(1.7, 1.7),
+    }),
+  });
+
+  assert.ok(result.previewToken !== null);
+  const verified_ = verifyExpressPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verified_.ok, true);
+  if (!verified_.ok) return;
+
+  const { payload } = verified_;
+  assert.equal(payload.type, "EXPRESS");
+  assert.equal(payload.playerId, "player-42");
+  assert.equal(typeof payload.previewId, "string");
+  assert.ok(payload.previewId.length > 0);
+  assert.equal(payload.stake, "50"); // Prisma.Decimal(50).toString() — exact, not a re-parsed float
+  assert.equal(payload.totalOdds, "3.06");
+  assert.equal(payload.potentialWin, "153");
+  assert.equal(payload.selections.length, 2);
+
+  assert.equal(payload.selections[0].sport, "Football");
+  assert.equal(payload.selections[0].event, "Real Madrid vs Barcelona");
+  assert.equal(payload.selections[0].outcome, "Real Madrid Win");
+  assert.equal(payload.selections[0].market, "Match Winner");
+  assert.equal(payload.selections[0].submittedOdds, "1.8");
+  assert.equal(payload.selections[0].currentOdds, "1.8");
+  assert.equal(payload.selections[0].oddsStatus, "VERIFIED");
+
+  assert.equal(payload.selections[1].sport, "Tennis");
+  assert.equal(payload.selections[1].event, "Inter vs Juventus");
+  assert.equal(payload.selections[1].market, null);
+  assert.equal(payload.selections[1].submittedOdds, "1.7");
+  assert.equal(payload.selections[1].oddsStatus, "VERIFIED");
+});
+
+test("buildBetSlipPreview: EXPRESS token's currentOdds is null for a selection whose odds check never ran", async () => {
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 40,
+    selections: [
+      { sport: "Football", event: "Verified Match", market: null, selection: "A Win", submittedOdds: 2.0 },
+      { sport: "Football", event: "Rejected Match", market: null, selection: "D Win", submittedOdds: 1.6 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: fakeVerifyOddsFn({
+      "Verified Match": verified(2.0, 2.0),
+      "Rejected Match": "reject",
+    }),
+  });
+
+  assert.ok(result.previewToken !== null);
+  const verified_ = verifyExpressPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verified_.ok, true);
+  if (!verified_.ok) return;
+
+  assert.equal(verified_.payload.selections[0].currentOdds, "2");
+  assert.equal(verified_.payload.selections[0].oddsStatus, "VERIFIED");
+  // The rejected odds check means no sourceOdds was ever obtained — null,
+  // not a stale or fabricated value — and the status reflects that too.
+  assert.equal(verified_.payload.selections[1].currentOdds, null);
+  assert.equal(verified_.payload.selections[1].oddsStatus, "UNAVAILABLE");
+});
+
+test("buildBetSlipPreview: EXPRESS token signed with exactly 10 selections (the maximum)", async () => {
+  const events = Array.from({ length: 10 }, (_, i) => `Match ${i}`);
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 10,
+    selections: events.map((event) => ({
+      sport: "Football",
+      event,
+      market: null,
+      selection: "Win",
+      submittedOdds: 1.1,
+    })),
+  };
+
+  const byEvent = Object.fromEntries(events.map((event) => [event, verified(1.1, 1.1)]));
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: fakeVerifyOddsFn(byEvent),
+  });
+
+  assert.ok(result.previewToken !== null);
+  const verified_ = verifyExpressPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verified_.ok, true);
+  if (!verified_.ok) return;
+  assert.equal(verified_.payload.selections.length, 10);
+});
+
+test("buildBetSlipPreview: EXPRESS with unknown odds still has no token (nothing valid to sign)", async () => {
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 40,
+    selections: [
+      { sport: "Football", event: "Known Odds", market: null, selection: "A Win", submittedOdds: 2.0 },
+      { sport: "Football", event: "Unknown Odds", market: null, selection: "B Win", submittedOdds: null },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: fakeVerifyOddsFn({ "Known Odds": verified(2.0, 2.0) }),
+  });
+
+  assert.equal(result.preview.totalOdds, null);
+  assert.equal(result.preview.potentialWin, null);
   assert.equal(result.previewToken, null);
 });
 
@@ -190,6 +331,19 @@ test("buildBetSlipPreview: statuses are mapped independently across a mixed EXPR
   assert.equal(b.oddsStatus, "ODDS_CHANGED");
   assert.equal(c.oddsStatus, "NOT_FOUND");
   assert.equal(d.oddsStatus, "UNAVAILABLE");
+
+  // The signed token must carry the same four statuses per selection, not
+  // just the preview response — the two are built from the same
+  // previewSelections array but assigned to independently.
+  assert.ok(result.previewToken !== null);
+  const verified_ = verifyExpressPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verified_.ok, true);
+  if (!verified_.ok) return;
+  const [ta, tb, tc, td] = verified_.payload.selections;
+  assert.equal(ta.oddsStatus, "VERIFIED");
+  assert.equal(tb.oddsStatus, "ODDS_CHANGED");
+  assert.equal(tc.oddsStatus, "NOT_FOUND");
+  assert.equal(td.oddsStatus, "UNAVAILABLE");
 });
 
 test("buildBetSlipPreview: a selection with no submitted odds is skipped by verifyOddsFn and totals become null", async () => {
