@@ -1,8 +1,4 @@
-// Stage 11.1 — temporarily 30000 (was 15000), diagnostic-only, to find out
-// whether the server actually answers later than 15s or the request hangs
-// indefinitely. Revert to 15000 once the trace data is in. Not a UX/business
-// logic change — see the Stage 11 report for why this was requested.
-const REQUEST_TIMEOUT_MS = 30000;
+const REQUEST_TIMEOUT_MS = 15000;
 
 export interface BetPreview {
   type: "SINGLE";
@@ -86,21 +82,7 @@ export function isBetPreviewSuccess(value: unknown): value is BetPreviewSuccess 
   );
 }
 
-// Stage 11.1 — temporary, unique per call, sent as x-request-id so a given
-// client-side attempt can be matched against its exact server-side log
-// lines. Never contains player data — just a random tracing id.
-function generateRequestId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID();
-  }
-  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
 export async function fetchBetPreview(initData: string, message: string): Promise<BetPreviewResult> {
-  const requestId = generateRequestId();
-  const startedAt = Date.now();
-  console.log(`[PreviewTrace] ${requestId}: sending POST /api/miniapp/bets/text/preview`);
-
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
@@ -112,24 +94,18 @@ export async function fetchBetPreview(initData: string, message: string): Promis
       headers: {
         Authorization: `tma ${initData}`,
         "Content-Type": "application/json",
-        "x-request-id": requestId,
       },
       body: JSON.stringify({ message }),
       signal: controller.signal,
     });
   } catch (err) {
-    const elapsed = Date.now() - startedAt;
     if (err instanceof DOMException && err.name === "AbortError") {
-      console.error(`[PreviewTrace] ${requestId}: client timeout after ${elapsed}ms`);
       return { ok: false, failure: { kind: "timeout" } };
     }
-    console.error(`[PreviewTrace] ${requestId}: network error after ${elapsed}ms`, err);
     return { ok: false, failure: { kind: "network" } };
   } finally {
     clearTimeout(timeout);
   }
-
-  console.log(`[PreviewTrace] ${requestId}: response status ${response.status} after ${Date.now() - startedAt}ms`);
 
   if (!response.ok) {
     const body: unknown = await response.json().catch(() => null);

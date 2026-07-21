@@ -64,10 +64,6 @@ async function parseWithOllama(text: string): Promise<ParseBetResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
 
-  // Stage 11 — temporary timing, same as parseWithClaude below. Remove once
-  // the slow stage is confirmed.
-  const t0 = Date.now();
-
   let rawContent: string;
 
   try {
@@ -86,8 +82,6 @@ async function parseWithOllama(text: string): Promise<ParseBetResult> {
       signal: controller.signal,
     });
 
-    console.log(`parseWithOllama: [timing] fetch resolved in ${Date.now() - t0}ms`);
-
     if (!response.ok) {
       return {
         valid: false,
@@ -98,8 +92,6 @@ async function parseWithOllama(text: string): Promise<ParseBetResult> {
     const data = (await response.json()) as OllamaChatResponse;
     rawContent = data.message?.content ?? "";
   } catch (err) {
-    console.error(`parseWithOllama: [timing] fetch threw after ${Date.now() - t0}ms`);
-
     const message =
       err instanceof Error && err.name === "AbortError"
         ? `Ollama request timed out after ${OLLAMA_TIMEOUT_MS}ms`
@@ -190,11 +182,6 @@ function getAnthropicClient(): Anthropic {
 async function parseWithClaude(text: string): Promise<ParseBetResult> {
   const client = getAnthropicClient();
 
-  // Stage 11 — temporary timing, to see whether the Claude call itself
-  // (not surrounding route overhead) is what's slow. Never logs the
-  // player's message text. Remove once the slow stage is confirmed.
-  const t0 = Date.now();
-
   let response: Anthropic.Beta.BetaMessage;
 
   try {
@@ -209,10 +196,7 @@ async function parseWithClaude(text: string): Promise<ParseBetResult> {
       },
       { timeout: CLAUDE_TIMEOUT_MS },
     );
-    console.log(`parseWithClaude: [timing] client.beta.messages.create resolved in ${Date.now() - t0}ms`);
   } catch (err) {
-    console.error(`parseWithClaude: [timing] client.beta.messages.create threw after ${Date.now() - t0}ms`);
-
     const message =
       err instanceof Anthropic.APIError
         ? err.message
