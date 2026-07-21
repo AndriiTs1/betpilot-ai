@@ -143,10 +143,15 @@ export function getBetConfirmErrorMessage(failure: BetConfirmFailure): string {
       return "Your Telegram session needs to be refreshed. Reopen the Mini App.";
     case "PLAYER_NOT_FOUND":
       return "Your player account could not be found.";
+    // Stage 10 — same friendly message for every reason a previewToken can
+    // no longer be confirmed (expired, signature/shape invalid, or the
+    // token simply doesn't match what confirm expects). The player never
+    // needs to tell these apart; server-side logs still capture the real
+    // reason. Rendered with whitespace-pre-line so the blank lines below
+    // actually show up (see BetTextForm.tsx / BetScreenshotForm.tsx).
     case "PREVIEW_EXPIRED":
-      return "This preview has expired. Please create a new one.";
     case "PREVIEW_INVALID":
-      return "This preview is no longer valid. Please create a new one.";
+      return "⏳ This preview has expired.\n\nOdds may have changed.\n\nPlease generate a new preview.";
     case "INVALID_REQUEST":
     case "INTERNAL_ERROR":
     default:

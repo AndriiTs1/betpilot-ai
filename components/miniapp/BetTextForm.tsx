@@ -260,7 +260,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
           </button>
 
           {error && (
-            <p role="alert" className="mt-3 text-sm text-red-400">
+            <p role="alert" className="mt-3 whitespace-pre-line text-sm text-red-400">
               {error}
             </p>
           )}
@@ -273,7 +273,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
           <OddsStatus oddsCheck={preview.oddsCheck} />
 
           {error && (
-            <p role="alert" className="mt-3 text-sm text-red-400">
+            <p role="alert" className="mt-3 whitespace-pre-line text-sm text-red-400">
               {error}
             </p>
           )}
