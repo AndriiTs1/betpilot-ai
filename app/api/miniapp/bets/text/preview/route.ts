@@ -33,6 +33,22 @@ function roundTo2(value: number): number {
 }
 
 export async function POST(request: NextRequest) {
+  // Stage 11 / 11.1 — temporary per-stage timing, to find why a Preview
+  // request can take long enough to blow the Mini App's client timeout even
+  // though the server eventually returns 200. Every line is tagged with the
+  // client-generated x-request-id (see betPreviewApi.ts) so a specific
+  // client-side attempt can be matched to its exact server-side trace, even
+  // across two back-to-back Preview calls. Logs elapsed ms and the request
+  // id only — never the message text, initData, or any token. Remove once
+  // the slow stage is confirmed.
+  const t0 = Date.now();
+  const elapsed = () => Date.now() - t0;
+  const requestId = request.headers.get("x-request-id") ?? "no-request-id";
+  const log = (stage: string) =>
+    console.log(`POST /api/miniapp/bets/text/preview: [trace ${requestId}] ${stage} at ${elapsed()}ms`);
+
+  log("received");
+
   const initData = extractInitData(request);
   if (!initData) {
     return NextResponse.json({ error: "malformed" }, { status: 401 });
@@ -51,6 +67,7 @@ export async function POST(request: NextRequest) {
   }
 
   const verification = verifyInitData(initData, botToken);
+  log("auth done");
 
   if (!verification.ok) {
     return NextResponse.json({ error: verification.reason }, { status: 401 });
@@ -79,17 +96,23 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "INVALID_MESSAGE" }, { status: 422 });
   }
 
+  log("body parsed");
+
   try {
     const player = await prisma.player.findUnique({
       where: { telegramId: String(verification.user.id) },
       select: { id: true },
     });
 
+    log("player lookup done");
+
     if (!player) {
       return NextResponse.json({ error: "PLAYER_NOT_FOUND" }, { status: 404 });
     }
 
     const parsed = await parseBetMessage(message, player.id);
+
+    log(`AI parse done (provider=${process.env.AI_PROVIDER ?? "ollama"})`);
 
     if (!parsed.valid) {
       // parsed.error can contain provider/model/timeout/SDK detail — log it
@@ -111,6 +134,8 @@ export async function POST(request: NextRequest) {
             odds: parsed.odds,
           })
         : null;
+
+    log("odds verification done");
 
     // Stage 9 — oddsCheck.note can contain sport_key values, internal
     // tournament identifiers, or raw upstream API error text (see
@@ -142,7 +167,9 @@ export async function POST(request: NextRequest) {
       previewTokenSecret,
     );
 
-    return NextResponse.json({
+    log("token signed");
+
+    const response = NextResponse.json({
       preview: {
         type: "SINGLE" as const,
         sport: parsed.sport,
@@ -157,8 +184,12 @@ export async function POST(request: NextRequest) {
       oddsCheck: oddsCheck ? { ...oddsCheck, note: null } : null,
       previewToken,
     });
+
+    log("total");
+
+    return response;
   } catch (err) {
-    console.error("POST /api/miniapp/bets/text/preview failed:", err);
+    console.error(`POST /api/miniapp/bets/text/preview: [trace ${requestId}] failed at ${elapsed()}ms:`, err);
     return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
   }
 }
