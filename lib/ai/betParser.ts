@@ -140,7 +140,7 @@ Call "extract_bet" if the message is a bet request. If the player did not mentio
 
 Call "reject_bet" if the message does not look like a bet request.`;
 
-const extractBetTool: Anthropic.Beta.BetaTool = {
+export const extractBetTool: Anthropic.Beta.BetaTool = {
   name: "extract_bet",
   description: "Record the structured details of a sports bet extracted from the player's message.",
   strict: true,
@@ -161,7 +161,7 @@ const extractBetTool: Anthropic.Beta.BetaTool = {
   },
 };
 
-const rejectBetTool: Anthropic.Beta.BetaTool = {
+export const rejectBetTool: Anthropic.Beta.BetaTool = {
   name: "reject_bet",
   description: "Call this when the message does not look like a sports betting request.",
   strict: true,
@@ -311,7 +311,7 @@ Call "reject_bet" if the image is not a legible bookmaker bet slip, or if you ca
 
 Respond only by calling exactly one of these tools — no free text outside the tool call.`;
 
-const extractSingleBetFromImageTool: Anthropic.Beta.BetaTool = {
+export const extractSingleBetFromImageTool: Anthropic.Beta.BetaTool = {
   name: "extract_single_bet_from_image",
   description: "Record a single-selection bet read from a bookmaker slip screenshot.",
   strict: true,
@@ -332,7 +332,7 @@ const extractSingleBetFromImageTool: Anthropic.Beta.BetaTool = {
   },
 };
 
-const extractParlayBetFromImageTool: Anthropic.Beta.BetaTool = {
+export const extractParlayBetFromImageTool: Anthropic.Beta.BetaTool = {
   name: "extract_parlay_bet_from_image",
   description: "Record a multi-selection (accumulator/parlay) bet read from a bookmaker slip screenshot.",
   strict: true,
@@ -354,7 +354,15 @@ const extractParlayBetFromImageTool: Anthropic.Beta.BetaTool = {
           required: ["sport", "event", "selection", "odds"],
           additionalProperties: false,
         },
-        minItems: 2,
+        // No minItems here — Anthropic's strict tool schema only supports
+        // minItems 0 or 1 (a value >1 makes the entire messages.create()
+        // call fail with a 400 before any tool is even selected, confirmed
+        // against production logs — see the regression test in
+        // betParser.test.ts). The real "at least 2" rule lives at the
+        // application layer instead: parlayBetFieldsSchema's
+        // `.min(2)` below (applied to every tool_use.input this schema
+        // validates) and, one layer further downstream,
+        // lib/bets/betSlipRules.ts's validateBetSlipType().
       },
     },
     required: ["stake", "selections"],
@@ -489,7 +497,7 @@ Call "reject_bet" if the message does not look like a bet request.
 If odds for a leg are not mentioned, pass odds as null — it will be verified separately.`;
 
 // Deliberately the same shape as extract_bet's — reuses betFieldsSchema.
-const extractExpressBetTool: Anthropic.Beta.BetaTool = {
+export const extractExpressBetTool: Anthropic.Beta.BetaTool = {
   name: "extract_express_bet",
   description: "Record a multi-selection (accumulator/express) bet described in the player's message.",
   strict: true,
@@ -511,7 +519,8 @@ const extractExpressBetTool: Anthropic.Beta.BetaTool = {
           required: ["sport", "event", "selection", "odds"],
           additionalProperties: false,
         },
-        minItems: 2,
+        // No minItems here — see extractParlayBetFromImageTool's identical
+        // comment above; same Anthropic API constraint, same reasoning.
       },
     },
     required: ["stake", "selections"],
