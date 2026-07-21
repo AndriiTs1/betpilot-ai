@@ -153,7 +153,14 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
   }
 
   const canRecognize = phase === "selected" && file !== null;
-  const canConfirm = phase === "ready" && preview !== null;
+  // Stage 12, Phase 3 — EXPRESS confirm isn't implemented yet
+  // (createBetFromPreview.ts only models one selection, and
+  // buildBetSlipPreview.ts deliberately never signs a token for EXPRESS —
+  // see that file's own comment). previewToken !== null is the real
+  // technical guard; preview.type === "SINGLE" is checked too so this
+  // reads as the actual business rule, not just "a token happened to exist".
+  const canConfirm =
+    phase === "ready" && preview !== null && preview.preview.type === "SINGLE" && preview.previewToken !== null;
 
   async function handleRecognize() {
     if (!canRecognize || !file || inFlightRef.current) return;
@@ -186,7 +193,10 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
     setPreview(result.data);
     setPhase("ready");
 
-    if (result.data.oddsCheck && result.data.oddsCheck.matched && result.data.oddsCheck.withinTolerance === false) {
+    const hasOddsChanged = result.data.preview.selections.some(
+      (selection) => selection.oddsStatus === "ODDS_CHANGED",
+    );
+    if (hasOddsChanged) {
       triggerHaptic("warning-light");
     } else {
       triggerHaptic("success");
@@ -205,6 +215,12 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
   async function handleConfirm() {
     if (!canConfirm || !preview || inFlightRef.current) return;
 
+    // canConfirm already guards preview.previewToken !== null, but that's a
+    // separate boolean — TS can't infer it back onto `preview` here, so
+    // this re-checks explicitly rather than asserting with `!`.
+    const previewToken = preview.previewToken;
+    if (previewToken === null) return;
+
     const tg = window.Telegram?.WebApp;
     if (!tg) return;
 
@@ -217,7 +233,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
     setPhase("confirming");
     setError(null);
 
-    const result = await fetchBetConfirm(tg.initData, preview.previewToken, controller.signal);
+    const result = await fetchBetConfirm(tg.initData, previewToken, controller.signal);
 
     inFlightRef.current = false;
     confirmControllerRef.current = null;
@@ -394,7 +410,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
         {showPreviewBlock && preview && (
           <div className="mt-4 w-full">
             <PreviewCard preview={preview.preview} />
-            <OddsStatus oddsCheck={preview.oddsCheck} />
+            <OddsStatus preview={preview.preview} />
 
             {error && (
               <p role="alert" className="mt-3 whitespace-pre-line text-sm text-red-400">
@@ -415,6 +431,14 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
             >
               {phase === "confirming" ? "Confirming..." : "Confirm bet"}
             </button>
+
+            {/* Stage 12, Phase 3 — EXPRESS confirm isn't implemented yet;
+                see the canConfirm comment above for why. */}
+            {preview.preview.type === "EXPRESS" && (
+              <p className="mt-2 text-center text-xs text-slate-500">
+                Express confirmation will be enabled in the next phase.
+              </p>
+            )}
 
             <button
               type="button"

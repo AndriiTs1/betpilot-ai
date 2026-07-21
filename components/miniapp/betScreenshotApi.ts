@@ -17,18 +17,20 @@ export type BetScreenshotErrorCode =
   | "AI_UNAVAILABLE"
   | "IMAGE_NOT_RECOGNIZED"
   | "INCOMPLETE_BET_DATA"
+  | "INVALID_BET_SLIP"
   | "INTERNAL_ERROR";
 
-export interface ParlaySelectionPreview {
-  sport: string;
-  event: string;
-  selection: string;
-  odds: number | null;
-}
-
+// Stage 12, Phase 3 — a detected multi-selection slip used to be rejected
+// server-side with a dedicated 422 PARLAY_CONFIRM_NOT_SUPPORTED (parsed
+// here as a "parlay_not_supported" failure kind, shown as its own message).
+// The server now returns a normal 200 preview for it instead (via
+// buildBetSlipPreview()), so that error code — and the client-side parsing
+// for it (ParlaySelectionPreview/isParlaySelectionPreview/
+// parseParlayFailure) — no longer exists. Removed rather than left dormant:
+// leaving an error branch for a response the server can never send again
+// would be misleading, not just unused.
 export type BetScreenshotFailure =
   | { kind: "http"; code: BetScreenshotErrorCode | "UNKNOWN" }
-  | { kind: "parlay_not_supported"; stake: number; selections: ParlaySelectionPreview[] }
   | { kind: "network" }
   | { kind: "timeout" }
   | { kind: "invalid_response" };
@@ -36,33 +38,6 @@ export type BetScreenshotFailure =
 export type BetScreenshotResult =
   | { ok: true; data: BetPreviewSuccess }
   | { ok: false; failure: BetScreenshotFailure };
-
-function isParlaySelectionPreview(value: unknown): value is ParlaySelectionPreview {
-  if (typeof value !== "object" || value === null) return false;
-  const s = value as Record<string, unknown>;
-  return (
-    typeof s.sport === "string" &&
-    typeof s.event === "string" &&
-    typeof s.selection === "string" &&
-    (s.odds === null || typeof s.odds === "number")
-  );
-}
-
-function parseParlayFailure(body: unknown): BetScreenshotFailure | null {
-  if (typeof body !== "object" || body === null) return null;
-  const b = body as Record<string, unknown>;
-  if (b.error !== "PARLAY_CONFIRM_NOT_SUPPORTED") return null;
-
-  const parsed = b.parsed;
-  if (typeof parsed !== "object" || parsed === null) return null;
-  const p = parsed as Record<string, unknown>;
-
-  if (typeof p.stake !== "number" || !Array.isArray(p.selections) || !p.selections.every(isParlaySelectionPreview)) {
-    return null;
-  }
-
-  return { kind: "parlay_not_supported", stake: p.stake, selections: p.selections };
-}
 
 // Multipart upload — mirrors fetchBetPreview's/fetchBetConfirm's shape
 // (AbortController + timeout, Authorization: tma <initData>, same
@@ -100,9 +75,6 @@ export async function fetchBetScreenshotPreview(
   if (!response.ok) {
     const body: unknown = await response.json().catch(() => null);
 
-    const parlayFailure = parseParlayFailure(body);
-    if (parlayFailure) return { ok: false, failure: parlayFailure };
-
     const code =
       typeof body === "object" && body !== null && typeof (body as { error?: unknown }).error === "string"
         ? ((body as { error: string }).error as BetScreenshotErrorCode | "UNKNOWN")
@@ -124,9 +96,6 @@ export function getBetScreenshotErrorMessage(failure: BetScreenshotFailure): str
   if (failure.kind === "network") return "Unable to connect. Check your internet connection.";
   if (failure.kind === "timeout") return "The request took too long. Please try again.";
   if (failure.kind === "invalid_response") return "Something went wrong. Please try again.";
-  if (failure.kind === "parlay_not_supported") {
-    return "This looks like a multi-selection (parlay) bet. Parlay confirmation isn't supported yet — please describe it as text instead.";
-  }
 
   switch (failure.code) {
     case "malformed":
@@ -154,6 +123,8 @@ export function getBetScreenshotErrorMessage(failure: BetScreenshotFailure): str
       return "We couldn't recognize a bet slip in this image. Please try a clearer screenshot.";
     case "INCOMPLETE_BET_DATA":
       return "We could only partially read this bet slip. Please try a clearer screenshot.";
+    case "INVALID_BET_SLIP":
+      return "This bet doesn't have a valid number of selections. Please try again.";
     case "INTERNAL_ERROR":
     default:
       return "Something went wrong. Please try again.";

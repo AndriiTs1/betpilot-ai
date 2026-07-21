@@ -2,14 +2,20 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { verifyInitData } from "@/lib/telegram/verifyInitData";
 import { parseImageWithClaude } from "@/lib/ai/betParser";
-import { verifyOdds } from "@/lib/odds/oddsVerifier";
-import { signPreviewToken } from "@/lib/betPreview/previewToken";
+import { normalizeParsedImageBet } from "@/lib/bets/betSlip";
+import { buildBetSlipPreview, BetSlipValidationError } from "@/lib/bets/buildBetSlipPreview";
 
-// Stage 4.5B built server-side upload validation only. Stage 4.5C adds the
+// Stage 4.5B built server-side upload validation only. Stage 4.5C added the
 // real pipeline: magic-byte check -> base64 -> Claude multimodal -> the same
 // odds verification + signed previewToken the text preview route already
-// uses. Still no DB write beyond the existing read-only Player lookup, and
-// no Bet/BetSelection is created here (that's confirm's job, unchanged).
+// uses. Stage 12 Phase 3: a detected multi-selection (EXPRESS, formerly
+// "PARLAY" in the AI parser's own vocabulary) slip now goes through the
+// same buildBetSlipPreview() pipeline as text — no more hard 422 rejection,
+// the player gets a real preview with each leg's odds status. It still
+// can't be *confirmed* yet (buildBetSlipPreview only signs a previewToken
+// for SINGLE) — the Mini App blocks Confirm for EXPRESS client-side. Still
+// no DB write beyond the existing read-only Player lookup, and no
+// Bet/BetSelection is created here (that's confirm's job, unchanged).
 
 // Requires node:crypto (verifyInitData/previewToken signing), Buffer
 // (base64 conversion), and the Anthropic SDK — none of these run on the
@@ -62,10 +68,6 @@ function detectImageSignature(bytes: Uint8Array): AllowedMimeType | null {
   }
 
   return null;
-}
-
-function roundTo2(value: number): number {
-  return Math.round(value * 100) / 100;
 }
 
 // Same header-parsing shape as the text preview/confirm routes and
@@ -192,73 +194,20 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "IMAGE_NOT_RECOGNIZED" }, { status: 422 });
     }
 
-    if (parsed.type === "PARLAY") {
-      // Safe, explicit failure — no previewToken is signed for a shape the
-      // confirm endpoint (and PreviewTokenPayload) can't represent yet
-      // (type is a literal "SINGLE" there). `parsed` here only echoes back
-      // data Claude read off the player's own screenshot — nothing
-      // server-internal — so it's safe to return for a future UI to render.
-      return NextResponse.json(
-        {
-          error: "PARLAY_CONFIRM_NOT_SUPPORTED",
-          parsed: { type: "PARLAY", stake: parsed.stake, selections: parsed.selections },
-        },
-        { status: 422 },
-      );
+    const slip = normalizeParsedImageBet(parsed);
+
+    let result;
+    try {
+      result = await buildBetSlipPreview(slip, player.id, previewTokenSecret);
+    } catch (err) {
+      if (err instanceof BetSlipValidationError) {
+        console.error("POST /api/miniapp/bets/screenshot/preview: invalid bet slip:", err.code, err.message);
+        return NextResponse.json({ error: "INVALID_BET_SLIP", detail: err.code }, { status: 422 });
+      }
+      throw err;
     }
 
-    const bet = parsed.bet;
-
-    const oddsCheck =
-      bet.odds !== null
-        ? await verifyOdds({ sport: bet.sport, event: bet.event, selection: bet.selection, odds: bet.odds })
-        : null;
-
-    // Stage 9 — oddsCheck.note can contain sport_key values, internal
-    // tournament identifiers, or raw upstream API error text (see
-    // lib/odds/oddsVerifier.ts) — useful for debugging, never for a player.
-    // Logged here, then stripped before the response is built below; the
-    // Mini App shows one fixed, friendly message instead (BetPreviewCard.tsx).
-    if (oddsCheck && !oddsCheck.matched) {
-      console.log("POST /api/miniapp/bets/screenshot/preview: odds not matched:", oddsCheck.note);
-    }
-
-    const previewToken = signPreviewToken(
-      {
-        playerId: player.id,
-        sport: bet.sport,
-        event: bet.event,
-        outcome: bet.selection,
-        stake: bet.stake,
-        odds: bet.odds,
-        totalOdds: bet.odds,
-        oddsCheck: oddsCheck
-          ? {
-              matched: oddsCheck.matched,
-              withinTolerance: oddsCheck.withinTolerance,
-              sourceOdds: oddsCheck.sourceOdds,
-              bookmaker: oddsCheck.bookmaker,
-            }
-          : null,
-      },
-      previewTokenSecret,
-    );
-
-    return NextResponse.json({
-      preview: {
-        type: "SINGLE" as const,
-        sport: bet.sport,
-        event: bet.event,
-        outcome: bet.selection,
-        stake: bet.stake,
-        odds: bet.odds,
-        totalOdds: bet.odds,
-        potentialWin: bet.odds !== null ? roundTo2(bet.stake * bet.odds) : null,
-      },
-      // note is server-side only (logged above) — never forwarded to the client.
-      oddsCheck: oddsCheck ? { ...oddsCheck, note: null } : null,
-      previewToken,
-    });
+    return NextResponse.json(result);
   } catch (err) {
     console.error("POST /api/miniapp/bets/screenshot/preview failed:", err);
     return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });

@@ -88,7 +88,14 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
 
   const trimmedLength = message.trim().length;
   const canSubmitPreview = phase === "editing" && trimmedLength >= MESSAGE_MIN_LENGTH;
-  const canConfirm = phase === "ready" && preview !== null;
+  // Stage 12, Phase 3 — EXPRESS confirm isn't implemented yet
+  // (createBetFromPreview.ts only models one selection, and
+  // buildBetSlipPreview.ts deliberately never signs a token for EXPRESS —
+  // see that file's own comment). previewToken !== null is the real
+  // technical guard; preview.type === "SINGLE" is checked too so this
+  // reads as the actual business rule, not just "a token happened to exist".
+  const canConfirm =
+    phase === "ready" && preview !== null && preview.preview.type === "SINGLE" && preview.previewToken !== null;
 
   function handleMessageChange(value: string) {
     setMessage(value);
@@ -127,7 +134,10 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     setPreview(result.data);
     setPhase("ready");
 
-    if (result.data.oddsCheck && result.data.oddsCheck.matched && result.data.oddsCheck.withinTolerance === false) {
+    const hasOddsChanged = result.data.preview.selections.some(
+      (selection) => selection.oddsStatus === "ODDS_CHANGED",
+    );
+    if (hasOddsChanged) {
       triggerHaptic("warning-light");
     } else {
       triggerHaptic("success");
@@ -143,6 +153,12 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
 
   async function handleConfirm() {
     if (!canConfirm || !preview || inFlightRef.current) return;
+
+    // canConfirm already guards preview.previewToken !== null, but that's a
+    // separate boolean — TS can't infer it back onto `preview` here, so
+    // this re-checks explicitly rather than asserting with `!`.
+    const previewToken = preview.previewToken;
+    if (previewToken === null) return;
 
     // window.Telegram?.WebApp / .initData are property reads on an object
     // injected by Telegram's own script — wrapped so a broken WebView
@@ -170,7 +186,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
 
     let result;
     try {
-      result = await fetchBetConfirm(initDataValue, preview.previewToken, controller.signal);
+      result = await fetchBetConfirm(initDataValue, previewToken, controller.signal);
     } catch {
       // fetchBetConfirm always returns a BetConfirmResult and never throws
       // under normal operation — this is a defensive fallback only, so an
@@ -270,7 +286,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
       {showPreviewBlock && preview && (
         <div className="mt-4">
           <PreviewCard preview={preview.preview} />
-          <OddsStatus oddsCheck={preview.oddsCheck} />
+          <OddsStatus preview={preview.preview} />
 
           {error && (
             <p role="alert" className="mt-3 whitespace-pre-line text-sm text-red-400">
@@ -291,6 +307,14 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
           >
             {phase === "confirming" ? "Confirming..." : "Confirm bet"}
           </button>
+
+          {/* Stage 12, Phase 3 — EXPRESS confirm isn't implemented yet; see
+              the canConfirm comment above for why. */}
+          {preview.preview.type === "EXPRESS" && (
+            <p className="mt-2 text-center text-xs text-slate-500">
+              Express confirmation will be enabled in the next phase.
+            </p>
+          )}
 
           <button
             type="button"

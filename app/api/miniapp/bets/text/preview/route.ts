@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { verifyInitData } from "@/lib/telegram/verifyInitData";
-import { parseBetMessage } from "@/lib/ai/betParser";
-import { verifyOdds } from "@/lib/odds/oddsVerifier";
-import { signPreviewToken } from "@/lib/betPreview/previewToken";
+import { parseBetSlipMessage } from "@/lib/ai/betParser";
+import { buildBetSlipPreview, BetSlipValidationError } from "@/lib/bets/buildBetSlipPreview";
 
-// Preview-only: parses a free-text bet and (optionally) checks its odds
-// against the live market, but never touches Bet/BetSelection/OddsSnapshot.
-// No Prisma write anywhere in this route — the only DB access is a
-// read-only Player lookup, mirroring GET /api/miniapp/me.
+// Preview-only: parses a free-text bet (SINGLE or EXPRESS, Stage 12 Phase 3)
+// and checks each selection's odds against the live market, but never
+// touches Bet/BetSelection/OddsSnapshot. No Prisma write anywhere in this
+// route — the only DB access is a read-only Player lookup, mirroring
+// GET /api/miniapp/me.
 
 const MESSAGE_MIN_LENGTH = 3;
 const MESSAGE_MAX_LENGTH = 2000;
@@ -26,10 +26,6 @@ function extractInitData(request: NextRequest): string | null {
   if (scheme?.toLowerCase() !== "tma" || !value) return null;
 
   return value;
-}
-
-function roundTo2(value: number): number {
-  return Math.round(value * 100) / 100;
 }
 
 export async function POST(request: NextRequest) {
@@ -89,7 +85,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "PLAYER_NOT_FOUND" }, { status: 404 });
     }
 
-    const parsed = await parseBetMessage(message, player.id);
+    const parsed = await parseBetSlipMessage(message);
 
     if (!parsed.valid) {
       // parsed.error can contain provider/model/timeout/SDK detail — log it
@@ -102,61 +98,18 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const oddsCheck =
-      parsed.odds !== null
-        ? await verifyOdds({
-            sport: parsed.sport,
-            event: parsed.event,
-            selection: parsed.selection,
-            odds: parsed.odds,
-          })
-        : null;
-
-    // Stage 9 — oddsCheck.note can contain sport_key values, internal
-    // tournament identifiers, or raw upstream API error text (see
-    // lib/odds/oddsVerifier.ts) — useful for debugging, never for a player.
-    // Logged here, then stripped before the response is built below; the
-    // Mini App shows one fixed, friendly message instead (BetPreviewCard.tsx).
-    if (oddsCheck && !oddsCheck.matched) {
-      console.log("POST /api/miniapp/bets/text/preview: odds not matched:", oddsCheck.note);
+    let result;
+    try {
+      result = await buildBetSlipPreview(parsed, player.id, previewTokenSecret);
+    } catch (err) {
+      if (err instanceof BetSlipValidationError) {
+        console.error("POST /api/miniapp/bets/text/preview: invalid bet slip:", err.code, err.message);
+        return NextResponse.json({ error: "INVALID_BET_SLIP", detail: err.code }, { status: 422 });
+      }
+      throw err;
     }
 
-    const previewToken = signPreviewToken(
-      {
-        playerId: player.id,
-        sport: parsed.sport,
-        event: parsed.event,
-        outcome: parsed.selection,
-        stake: parsed.stake,
-        odds: parsed.odds,
-        totalOdds: parsed.odds,
-        oddsCheck: oddsCheck
-          ? {
-              matched: oddsCheck.matched,
-              withinTolerance: oddsCheck.withinTolerance,
-              sourceOdds: oddsCheck.sourceOdds,
-              bookmaker: oddsCheck.bookmaker,
-            }
-          : null,
-      },
-      previewTokenSecret,
-    );
-
-    return NextResponse.json({
-      preview: {
-        type: "SINGLE" as const,
-        sport: parsed.sport,
-        event: parsed.event,
-        outcome: parsed.selection,
-        stake: parsed.stake,
-        odds: parsed.odds,
-        totalOdds: parsed.odds,
-        potentialWin: parsed.odds !== null ? roundTo2(parsed.stake * parsed.odds) : null,
-      },
-      // note is server-side only (logged above) — never forwarded to the client.
-      oddsCheck: oddsCheck ? { ...oddsCheck, note: null } : null,
-      previewToken,
-    });
+    return NextResponse.json(result);
   } catch (err) {
     console.error("POST /api/miniapp/bets/text/preview failed:", err);
     return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });

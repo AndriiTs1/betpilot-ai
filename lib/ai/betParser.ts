@@ -1,5 +1,10 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+// betSlip.ts's own import of this file's types is `import type`-only (erased
+// at compile time), so this is not a real runtime circular dependency —
+// only this file ends up depending on betSlip.ts at runtime, not the
+// reverse.
+import { normalizeParsedBet, type ParsedBetSlip } from "@/lib/bets/betSlip";
 
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "llama3.2";
@@ -454,4 +459,159 @@ export async function parseImageWithClaude(input: {
   }
 
   return { valid: false, reason: "no_tool_call", detail: `Unexpected tool call: ${toolUse.name}` };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Text SINGLE/EXPRESS parsing — Stage 12, Phase 3                            */
+/* -------------------------------------------------------------------------- */
+//
+// Purely additive: parseBetMessage()/parseWithClaude()/parseWithOllama()
+// above are byte-for-byte unchanged, so every existing caller keeps working
+// exactly as before. This is a new, separate entry point.
+//
+// EXPRESS detection is Claude-only, same reasoning parseImageWithClaude
+// already documents for images — Ollama's default model has no tool-use
+// reliability proven for a 3-way (single/express/reject) branch, so on
+// Ollama this normalizes the existing SINGLE-only parseBetMessage() result
+// instead of attempting to detect EXPRESS at all. Production runs
+// AI_PROVIDER=claude, so this only affects local Ollama-provider dev.
+
+export type ParseBetSlipResult =
+  | ({ valid: true } & ParsedBetSlip)
+  | { valid: false; error: string };
+
+const TEXT_SLIP_SYSTEM_PROMPT = `You extract structured sports betting data from a message sent by a player to their bookmaker.
+
+Call "extract_bet" if the message describes exactly one selection.
+Call "extract_express_bet" if the message describes two or more selections (an accumulator/express bet) — list every leg you can identify, each with its own odds if mentioned.
+Call "reject_bet" if the message does not look like a bet request.
+
+If odds for a leg are not mentioned, pass odds as null — it will be verified separately.`;
+
+// Deliberately the same shape as extract_bet's — reuses betFieldsSchema.
+const extractExpressBetTool: Anthropic.Beta.BetaTool = {
+  name: "extract_express_bet",
+  description: "Record a multi-selection (accumulator/express) bet described in the player's message.",
+  strict: true,
+  input_schema: {
+    type: "object",
+    properties: {
+      stake: { type: "number", description: "The total stake amount for the express." },
+      selections: {
+        type: "array",
+        description: "Every leg of the express, in the order mentioned.",
+        items: {
+          type: "object",
+          properties: {
+            sport: { type: "string" },
+            event: { type: "string" },
+            selection: { type: "string" },
+            odds: { type: ["number", "null"] },
+          },
+          required: ["sport", "event", "selection", "odds"],
+          additionalProperties: false,
+        },
+        minItems: 2,
+      },
+    },
+    required: ["stake", "selections"],
+    additionalProperties: false,
+  },
+};
+
+async function parseTextSlipWithClaude(text: string): Promise<ParseBetSlipResult> {
+  const client = getAnthropicClient();
+
+  let response: Anthropic.Beta.BetaMessage;
+
+  try {
+    response = await client.beta.messages.create(
+      {
+        model: CLAUDE_MODEL,
+        max_tokens: 1024,
+        system: TEXT_SLIP_SYSTEM_PROMPT,
+        tools: [extractBetTool, extractExpressBetTool, rejectBetTool],
+        tool_choice: { type: "any" },
+        messages: [{ role: "user", content: text }],
+      },
+      { timeout: CLAUDE_TIMEOUT_MS },
+    );
+  } catch (err) {
+    const message =
+      err instanceof Anthropic.APIError
+        ? err.message
+        : err instanceof Error
+          ? err.message
+          : "Unknown error calling Claude";
+
+    return { valid: false, error: message };
+  }
+
+  const toolUse = response.content.find(
+    (block): block is Anthropic.Beta.BetaToolUseBlock => block.type === "tool_use",
+  );
+
+  if (!toolUse) {
+    return { valid: false, error: "Claude did not return a tool call" };
+  }
+
+  if (toolUse.name === "reject_bet") {
+    return { valid: false, error: "Message does not appear to be a bet request" };
+  }
+
+  if (toolUse.name === "extract_bet") {
+    const result = betFieldsSchema.safeParse(toolUse.input);
+    if (!result.success) {
+      return { valid: false, error: result.error.message };
+    }
+    return {
+      valid: true,
+      type: "SINGLE",
+      stake: result.data.stake,
+      selections: [
+        {
+          sport: result.data.sport,
+          event: result.data.event,
+          market: null,
+          selection: result.data.selection,
+          submittedOdds: result.data.odds,
+        },
+      ],
+    };
+  }
+
+  if (toolUse.name === "extract_express_bet") {
+    const result = parlayBetFieldsSchema.safeParse(toolUse.input);
+    if (!result.success) {
+      return { valid: false, error: result.error.message };
+    }
+    return {
+      valid: true,
+      type: "EXPRESS",
+      stake: result.data.stake,
+      selections: result.data.selections.map((selection) => ({
+        sport: selection.sport,
+        event: selection.event,
+        market: null,
+        selection: selection.selection,
+        submittedOdds: selection.odds,
+      })),
+    };
+  }
+
+  return { valid: false, error: `Unexpected tool call: ${toolUse.name}` };
+}
+
+export async function parseBetSlipMessage(text: string): Promise<ParseBetSlipResult> {
+  const provider = process.env.AI_PROVIDER ?? "ollama";
+
+  if (provider !== "claude") {
+    const legacy = await parseBetMessage(text, "");
+    if (!legacy.valid) {
+      return { valid: false, error: legacy.error };
+    }
+    return { valid: true, ...normalizeParsedBet(legacy) };
+  }
+
+  return parseTextSlipWithClaude(text);
 }
