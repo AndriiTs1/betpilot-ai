@@ -1,10 +1,16 @@
-import type { ParsedBet, ParseImageBetResult } from "@/lib/ai/betParser";
+import type { ParsedBet } from "@/lib/ai/betParser";
 
 // Stage 12, Phase 3 — the unified SINGLE/EXPRESS shape every parser output
 // converges on before Preview. Doesn't touch betParser.ts's own public
-// types (ParsedBet, ParseImageBetResult stay exactly as they are) — this
-// file only adds a normalization layer on top of them, so every existing
-// caller of those types is completely unaffected.
+// types (ParsedBet stays exactly as it is) — this file only adds a
+// normalization layer on top of it, so every existing caller of that type
+// is completely unaffected.
+//
+// Stage 14.3 — normalizeParsedImageBet() (the equivalent normalizer for the
+// old image-parser's ParseImageBetResult) was removed here: the new OCR ->
+// parseBetSlipMessage() pipeline already returns this exact ParsedBetSlip
+// shape directly (see lib/ai/betParser.ts's ParseBetSlipResult), so no
+// normalization step is needed for screenshots anymore.
 
 export interface BetSlipSelectionInput {
   sport: string;
@@ -43,30 +49,5 @@ export function normalizeParsedBet(bet: ParsedBet): ParsedBetSlip {
         submittedOdds: bet.odds,
       },
     ],
-  };
-}
-
-// Normalizes parseImageWithClaude()'s existing result (SINGLE or PARLAY —
-// that discriminant name is untouched in betParser.ts itself) into the
-// unified shape. PARLAY maps to "EXPRESS" here only — the rename from
-// Phase 1's Prisma enum never had to propagate back into the AI parser's
-// own vocabulary for this to work.
-export function normalizeParsedImageBet(
-  result: Extract<ParseImageBetResult, { valid: true }>,
-): ParsedBetSlip {
-  if (result.type === "SINGLE") {
-    return normalizeParsedBet(result.bet);
-  }
-
-  return {
-    type: "EXPRESS",
-    stake: result.stake,
-    selections: result.selections.map((selection) => ({
-      sport: selection.sport,
-      event: selection.event,
-      market: null,
-      selection: selection.selection,
-      submittedOdds: selection.odds,
-    })),
   };
 }
