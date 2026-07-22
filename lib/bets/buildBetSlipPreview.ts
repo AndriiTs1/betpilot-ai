@@ -7,6 +7,7 @@ import { mapOddsCheckToSelectionStatus } from "@/lib/odds/mapOddsStatus";
 import { verifyOdds, type OddsVerificationInput } from "@/lib/odds/oddsVerifier";
 import { signPreviewToken, signExpressPreviewToken } from "@/lib/betPreview/previewToken";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
+import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
 
 // Stage 12, Phase 3 — the one shared pipeline both the text and screenshot
 // preview routes run a parsed slip through: validate shape -> verify odds
@@ -96,17 +97,24 @@ export async function buildBetSlipPreview(
     const settledResult = settled[index];
     const oddsCheck: OddsCheckResult | null = settledResult.status === "fulfilled" ? settledResult.value : null;
 
-    // Stage 9's rule carried forward: oddsCheck.note can contain sport_key
-    // values, internal tournament identifiers, or raw upstream API error
-    // text (see lib/odds/oddsVerifier.ts) — useful for debugging, never for
-    // a player. It's never copied into BetSlipPreviewSelection below (so
-    // there's nothing to strip before the response goes out) — only logged
-    // here, server-side.
+    // Stage 14.4A security cleanup: this used to log selection.event
+    // directly (plus, on the rejected-check path, oddsCheck.note /
+    // settledResult.reason — per Stage 9's own comment, either of those
+    // can contain sport_key values, internal tournament identifiers, or
+    // raw upstream API error text). None of that is safe to log —
+    // selection.event/selection/market/odds/stake are never copied into
+    // BetSlipPreviewSelection either (so there was never anything to
+    // strip before the response goes out), and now there's nothing to
+    // strip from the logs either: only a status enum and a purely
+    // positional index are logged, never the selection's own content.
     if (oddsCheck && !oddsCheck.matched) {
-      console.log(`buildBetSlipPreview: odds not matched for "${selection.event}":`, oddsCheck.note);
+      logScreenshotPipelineEvent("odds_check_not_matched", {
+        selectionIndex: index,
+        oddsVerificationStatus: mapOddsCheckToSelectionStatus(oddsCheck),
+      });
     }
     if (settledResult.status === "rejected") {
-      console.error(`buildBetSlipPreview: odds check rejected for "${selection.event}":`, settledResult.reason);
+      logScreenshotPipelineEvent("odds_check_rejected", { selectionIndex: index });
     }
 
     return {

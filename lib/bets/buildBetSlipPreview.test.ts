@@ -364,3 +364,97 @@ test("buildBetSlipPreview: a selection with no submitted odds is skipped by veri
   assert.equal(result.preview.totalOdds, null);
   assert.equal(result.preview.potentialWin, null);
 });
+
+// ---------------------------------------------------------------------
+// Stage 14.4A security cleanup — a not-matched odds check and a rejected
+// odds check used to console.log/console.error selection.event directly
+// (plus, on the rejected path, the raw rejection reason, which can carry
+// upstream provider error text — see lib/odds/oddsVerifier.ts). Both are
+// now metadata-only structured events (lib/logging/structuredLog.ts).
+// This test proves the fix at the actual boundary that matters: every
+// console.log call made during a real buildBetSlipPreview() run, for both
+// failure paths at once, in a slip built with deliberately identifiable
+// event/selection names.
+// ---------------------------------------------------------------------
+
+test("buildBetSlipPreview: odds check failures never log selection.event, selection, market, or provider note/reason content", async () => {
+  const originalConsoleLog = console.log;
+  const originalConsoleError = console.error;
+  const loggedCalls: unknown[][] = [];
+  console.log = (...args: unknown[]) => loggedCalls.push(args);
+  console.error = (...args: unknown[]) => loggedCalls.push(args);
+
+  const secretEventNotMatched = "SECRET_EVENT_NOT_MATCHED_Barcelona_vs_RealMadrid";
+  const secretEventRejected = "SECRET_EVENT_REJECTED_Inter_vs_Juventus";
+  const secretProviderNote = "SECRET_PROVIDER_NOTE_sport_key_soccer_epl_12345";
+  const secretRejectReason = "SECRET_REJECT_REASON_upstream_500_detail";
+
+  try {
+    const slip: ParsedBetSlip = {
+      type: "EXPRESS",
+      stake: 25,
+      selections: [
+        {
+          sport: "Football",
+          event: secretEventNotMatched,
+          market: "SECRET_MARKET_Over_Under",
+          selection: "SECRET_SELECTION_Over_2_5",
+          submittedOdds: 1.8,
+        },
+        { sport: "Football", event: secretEventRejected, market: null, selection: "Inter Win", submittedOdds: 1.7 },
+      ],
+    };
+
+    const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+      verifyOddsFn: async (input) => {
+        if (input.event === secretEventNotMatched) {
+          return {
+            matched: false,
+            withinTolerance: null,
+            sourceOdds: null,
+            submittedOdds: input.odds,
+            discrepancyPercent: null,
+            bookmaker: null,
+            note: secretProviderNote,
+          };
+        }
+        throw new Error(secretRejectReason);
+      },
+    });
+
+    // Sanity: both failure paths actually ran (otherwise this test would
+    // trivially "pass" by never exercising the code under test).
+    assert.equal(result.preview.selections[0].oddsStatus, "NOT_FOUND");
+    assert.equal(result.preview.selections[1].oddsStatus, "UNAVAILABLE");
+    assert.ok(loggedCalls.length >= 2, "expected both odds_check_not_matched and odds_check_rejected to log");
+
+    const rawLoggedText = JSON.stringify(loggedCalls);
+    for (const forbidden of [
+      secretEventNotMatched,
+      secretEventRejected,
+      secretProviderNote,
+      secretRejectReason,
+      "SECRET_MARKET",
+      "SECRET_SELECTION",
+    ]) {
+      assert.equal(rawLoggedText.includes(forbidden), false, `logs must never contain: ${forbidden}`);
+    }
+
+    // Every logged line must be our own flat, metadata-only structured
+    // event — never a raw Error object or arbitrary nested content.
+    for (const call of loggedCalls) {
+      assert.equal(call.length, 1, "structured log calls pass exactly one JSON.stringify'd argument");
+      const parsed = JSON.parse(String(call[0]));
+      assert.equal(typeof parsed.event, "string");
+      for (const [key, value] of Object.entries(parsed)) {
+        assert.ok(
+          typeof value === "string" || typeof value === "number",
+          `log field "${key}" must be a string or number, got ${typeof value}`,
+        );
+      }
+    }
+  } finally {
+    console.log = originalConsoleLog;
+    console.error = originalConsoleError;
+  }
+});

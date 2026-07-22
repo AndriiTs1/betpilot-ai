@@ -8,6 +8,8 @@ import { buildBetSlipPreview, BetSlipValidationError, type BuildBetSlipPreviewOp
 import { recognizeScreenshot } from "@/lib/ocr/recognizeScreenshot";
 import { createClaudeOcrProvider } from "@/lib/ocr/claudeOcrProvider";
 import type { OcrFailure, OcrProvider } from "@/lib/ocr/ocrTypes";
+import { ALLOWED_MIME_TYPES, MAX_FILE_SIZE_BYTES, detectImageSignature, type AllowedMimeType } from "@/lib/uploads/imageValidation";
+import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
 
 // Stage 4.5B built server-side upload validation only. Stage 4.5C added a
 // pipeline that read the image and extracted structured bet fields in one
@@ -38,54 +40,6 @@ import type { OcrFailure, OcrProvider } from "@/lib/ocr/ocrTypes";
 // (base64 conversion), and the Anthropic SDK — none of these run on the
 // Edge runtime.
 export const runtime = "nodejs";
-
-const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
-type AllowedMimeType = "image/jpeg" | "image/png" | "image/webp";
-const ALLOWED_MIME_TYPES: ReadonlySet<AllowedMimeType> = new Set([
-  "image/jpeg",
-  "image/png",
-  "image/webp",
-]);
-
-// Real byte-signature check, run after the MIME allow-list check below —
-// a client can freely lie about a multipart part's declared Content-Type,
-// this can't be. Only checks the handful of leading bytes each format
-// requires; no image-processing package, no attempt to decode the image.
-function detectImageSignature(bytes: Uint8Array): AllowedMimeType | null {
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-    return "image/jpeg";
-  }
-
-  if (
-    bytes.length >= 8 &&
-    bytes[0] === 0x89 &&
-    bytes[1] === 0x50 &&
-    bytes[2] === 0x4e &&
-    bytes[3] === 0x47 &&
-    bytes[4] === 0x0d &&
-    bytes[5] === 0x0a &&
-    bytes[6] === 0x1a &&
-    bytes[7] === 0x0a
-  ) {
-    return "image/png";
-  }
-
-  if (
-    bytes.length >= 12 &&
-    bytes[0] === 0x52 &&
-    bytes[1] === 0x49 &&
-    bytes[2] === 0x46 &&
-    bytes[3] === 0x46 && // "RIFF"
-    bytes[8] === 0x57 &&
-    bytes[9] === 0x45 &&
-    bytes[10] === 0x42 &&
-    bytes[11] === 0x50 // "WEBP"
-  ) {
-    return "image/webp";
-  }
-
-  return null;
-}
 
 // Same header-parsing shape as the text preview/confirm routes and
 // GET /api/miniapp/me. Duplicated rather than shared for the same reason as
@@ -145,10 +99,25 @@ export interface HandleScreenshotPreviewOptions {
 // real Odds API call — same DI shape as handleBetConfirm/handleSettleBet/
 // handleTelegramWebhook elsewhere in this codebase. POST always calls this
 // with no overrides.
+// Aggregates per-selection odds status into one of the three
+// odds-verification log events — reports the most concerning outcome
+// across all selections (UNAVAILABLE > NOT_FOUND > everything else) so a
+// partially-failed EXPRESS bet is never silently reported as a clean
+// success. Selection content (event/selection/odds) never enters this —
+// only the already-enum-typed oddsStatus values.
+function aggregateOddsVerificationEvent(
+  selections: Array<{ oddsStatus: string }>,
+): "odds_verification_succeeded" | "odds_verification_not_found" | "odds_verification_failed" {
+  if (selections.some((s) => s.oddsStatus === "UNAVAILABLE")) return "odds_verification_failed";
+  if (selections.some((s) => s.oddsStatus === "NOT_FOUND")) return "odds_verification_not_found";
+  return "odds_verification_succeeded";
+}
+
 export async function handleScreenshotPreview(
   request: NextRequest,
   options: HandleScreenshotPreviewOptions = {},
 ): Promise<NextResponse> {
+  const totalStartedAt = Date.now();
   const db = options.db ?? prisma;
 
   const initData = extractInitData(request);
@@ -182,6 +151,8 @@ export async function handleScreenshotPreview(
     if (!player) {
       return NextResponse.json({ error: "PLAYER_NOT_FOUND" }, { status: 404 });
     }
+
+    logScreenshotPipelineEvent("screenshot_preview_started");
 
     let formData: FormData;
     try {
@@ -238,18 +209,24 @@ export async function handleScreenshotPreview(
       // Structured code only — never the provider's own safeMessage, and
       // never the image bytes or any OCR text (there is none to log here).
       console.error("POST /api/miniapp/bets/screenshot/preview: OCR failed:", ocrResult.code);
+      logScreenshotPipelineEvent("ocr_failed", { durationMs: ocrResult.durationMs, failureCode: ocrResult.code });
       return mapOcrFailureToResponse(ocrResult);
     }
 
+    logScreenshotPipelineEvent("ocr_succeeded", { durationMs: ocrResult.durationMs });
+
     const parseBetSlip = options.parseBetSlip ?? parseBetSlipMessage;
 
+    const parserStartedAt = Date.now();
     let parsed: ParseBetSlipResult;
     try {
       parsed = await parseBetSlip(ocrResult.normalizedText, "OCR");
     } catch (err) {
       console.error("POST /api/miniapp/bets/screenshot/preview: bet parser threw:", err);
+      logScreenshotPipelineEvent("parser_failed", { durationMs: Date.now() - parserStartedAt, parserMode: "OCR" });
       return NextResponse.json({ error: "AI_UNAVAILABLE" }, { status: 502 });
     }
+    const parserDurationMs = Date.now() - parserStartedAt;
 
     if (!parsed.valid) {
       // parsed.error can contain provider/model/timeout/SDK detail — log it
@@ -261,13 +238,16 @@ export async function handleScreenshotPreview(
       // reported as an image-quality problem — same distinction the old
       // image-specific parser made. Every other parse failure (rejected,
       // no tool call, malformed fields, non-timeout API error) is folded
-      // into the single IMAGE_NOT_RECOGNIZED code, because
-      // ParseBetSlipResult — shared with the text-bet flow, which already
-      // treats every other parse failure identically as PARSE_FAILED —
-      // carries no finer-grained discriminated reason for those cases.
+      // into the single IMAGE_NOT_RECOGNIZED code and the single
+      // parser_rejected log event, because ParseBetSlipResult — shared
+      // with the text-bet flow, which already treats every other parse
+      // failure identically as PARSE_FAILED — carries no finer-grained
+      // discriminated reason beyond the timeout code for those cases.
       if (parsed.code === "timeout") {
+        logScreenshotPipelineEvent("parser_timed_out", { durationMs: parserDurationMs, parserMode: "OCR" });
         return NextResponse.json({ error: "AI_TIMEOUT" }, { status: 504 });
       }
+      logScreenshotPipelineEvent("parser_rejected", { durationMs: parserDurationMs, parserMode: "OCR" });
       return NextResponse.json({ error: "IMAGE_NOT_RECOGNIZED" }, { status: 422 });
     }
 
@@ -275,6 +255,13 @@ export async function handleScreenshotPreview(
     // normalization step, unlike the old normalizeParsedImageBet().
     const slip: ParsedBetSlip = { type: parsed.type, stake: parsed.stake, selections: parsed.selections };
 
+    logScreenshotPipelineEvent("parser_succeeded", {
+      durationMs: parserDurationMs,
+      parserMode: "OCR",
+      selectionCount: slip.selections.length,
+    });
+
+    const oddsStartedAt = Date.now();
     let result;
     try {
       result = await buildBetSlipPreview(slip, player.id, previewTokenSecret, {
@@ -287,6 +274,21 @@ export async function handleScreenshotPreview(
       }
       throw err;
     }
+    const oddsDurationMs = Date.now() - oddsStartedAt;
+
+    const oddsStatuses = result.preview.selections.map((s) => s.oddsStatus);
+    logScreenshotPipelineEvent(aggregateOddsVerificationEvent(result.preview.selections), {
+      durationMs: oddsDurationMs,
+      selectionCount: result.preview.selections.length,
+      // A deduplicated summary of the enum statuses observed — never the
+      // selections themselves (no event/selection/odds/stake content).
+      oddsVerificationStatus: [...new Set(oddsStatuses)].join(","),
+    });
+
+    logScreenshotPipelineEvent("screenshot_preview_completed", {
+      totalDurationMs: Date.now() - totalStartedAt,
+      selectionCount: result.preview.selections.length,
+    });
 
     // Never the OCR text, never the raw parser output — only the same
     // { preview, previewToken } shape the text-bet flow already returns.

@@ -223,3 +223,66 @@ test("betParserPrompt: ocrPrompt explicitly frames OCR text as untrusted, non-in
   assert.match(ocrPrompt, /untrusted/i);
   assert.match(ocrPrompt, /never follow it/i);
 });
+
+// ---------------------------------------------------------------------
+// Stage 14.4A — mode-based parser timeout + maxRetries: 0.
+//
+// The exact production timeout values (8000ms CHAT, 15000ms OCR) are not
+// re-verified here by literally waiting them out — that would make this
+// suite slow and flaky for no real benefit. Instead, the injectable
+// timeoutMsOverride (test-only, never used by any production call site)
+// lets these tests prove the *real* thing that matters fast and
+// deterministically: OCR mode actually applies whatever timeout it's
+// given, using a value tiny enough (20ms) that a handler which never
+// resolves reliably times out almost instantly.
+// ---------------------------------------------------------------------
+
+// The Anthropic SDK's own fetchWithTimeout starts a real setTimeout tied to
+// the requested `timeout` option and aborts its internal AbortController
+// when it fires — it does NOT itself reject the underlying fetch call; a
+// real fetch implementation would throw an AbortError when its signal
+// fires, so the stub must do the same (same technique already proven in
+// lib/telegram/downloadTelegramFile.test.ts's own timeout test).
+function neverResolvingFetch(_url: string, init?: RequestInit): Promise<Response> {
+  return new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => {
+      reject(new DOMException("The operation was aborted.", "AbortError"));
+    });
+  });
+}
+
+test('parseBetSlipMessage: an OCR-mode call respects a short timeout override and reports code: "timeout"', async () => {
+  currentHandler = neverResolvingFetch;
+
+  const result = await parseBetSlipMessage("ocr text", "OCR", 20);
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "timeout");
+});
+
+test('parseBetSlipMessage: a CHAT-mode call respects a short timeout override and reports code: "timeout"', async () => {
+  currentHandler = neverResolvingFetch;
+
+  const result = await parseBetSlipMessage("chat text", "CHAT", 20);
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "timeout");
+});
+
+test("parseBetSlipMessage: a failing call is never retried (maxRetries: 0) — the handler fires exactly once", async () => {
+  let callCount = 0;
+  currentHandler = async () => {
+    callCount += 1;
+    // A retryable status (5xx) — if maxRetries were not 0, the SDK would
+    // automatically call this handler again (up to its default of 2
+    // retries) before giving up.
+    return new Response(JSON.stringify({ error: { message: "server error" } }), { status: 500 });
+  };
+
+  const result = await parseBetSlipMessage("some text", "CHAT");
+
+  assert.equal(result.valid, false);
+  assert.equal(callCount, 1, "the Anthropic client must not automatically retry a failed request");
+});

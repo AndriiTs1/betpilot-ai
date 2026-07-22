@@ -180,7 +180,15 @@ let anthropicClient: Anthropic | null = null;
 
 function getAnthropicClient(): Anthropic {
   if (!anthropicClient) {
-    anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    // maxRetries: 0 — matches lib/ocr/claudeOcrProvider.ts's existing
+    // client. Without this, the SDK's default (2 retries, each getting its
+    // own fresh `timeout` budget plus backoff) makes any `timeout` value
+    // meaningless: a transient 5xx could cost up to ~3x the configured
+    // timeout in real wall-clock time. Timeout behavior must be
+    // deterministic, so retries are handled by the caller (or not at all),
+    // never silently by the SDK underneath a timeout value that's
+    // supposed to be a hard ceiling.
+    anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0 });
   }
   return anthropicClient;
 }
@@ -299,6 +307,23 @@ export type ParseBetSlipResult =
 // ParsedBetSlip.
 export type BetSlipParseMode = "CHAT" | "OCR";
 
+// Stage 14.4A — OCR mode gets its own, larger timeout. ocrPrompt is ~5x
+// chatPrompt by size and OCR-mode input (transcribed screen text) is
+// typically both longer and noisier than a short chat message, so the
+// original single 8000ms budget (still used for CHAT below) was sized for
+// a case OCR-mode never actually is.
+//
+// 15000ms is an INITIAL OPERATIONAL VALUE, not a permanent architectural
+// constant. It's reasoned from confirmed prompt-size ratios and known
+// Claude tool-use latency characteristics (output-token-generation-bound,
+// not input-size-bound), not from real production measurements — this
+// codebase had no per-stage timing before this same stage added it (see
+// the screenshot preview route's new timing instrumentation). Once enough
+// production durationMs samples exist to compute real p50/p95/p99 for the
+// OCR-mode parser call, this value must be re-evaluated against that data
+// rather than left as a one-time guess.
+const CLAUDE_OCR_PARSER_TIMEOUT_MS = 15000;
+
 // Deliberately the same shape as extract_bet's — reuses betFieldsSchema.
 export const extractExpressBetTool: Anthropic.Beta.BetaTool = {
   name: "extract_express_bet",
@@ -337,8 +362,18 @@ export const extractExpressBetTool: Anthropic.Beta.BetaTool = {
   },
 };
 
-async function parseTextSlipWithClaude(text: string, mode: BetSlipParseMode): Promise<ParseBetSlipResult> {
+async function parseTextSlipWithClaude(
+  text: string,
+  mode: BetSlipParseMode,
+  // Test-only override — production always uses CLAUDE_TIMEOUT_MS (CHAT)
+  // or CLAUDE_OCR_PARSER_TIMEOUT_MS (OCR). Lets tests verify mode-based
+  // timeout selection deterministically (tiny values) instead of waiting
+  // out real timeouts — same convention as
+  // lib/ocr/claudeOcrProvider.ts's CreateClaudeOcrProviderOptions.timeoutMs.
+  timeoutMsOverride?: number,
+): Promise<ParseBetSlipResult> {
   const client = getAnthropicClient();
+  const timeoutMs = timeoutMsOverride ?? (mode === "OCR" ? CLAUDE_OCR_PARSER_TIMEOUT_MS : CLAUDE_TIMEOUT_MS);
 
   let response: Anthropic.Beta.BetaMessage;
 
@@ -355,7 +390,7 @@ async function parseTextSlipWithClaude(text: string, mode: BetSlipParseMode): Pr
         tool_choice: { type: "any" },
         messages: [{ role: "user", content: text }],
       },
-      { timeout: CLAUDE_TIMEOUT_MS },
+      { timeout: timeoutMs },
     );
   } catch (err) {
     // A timeout is reported with a discriminated `code` (rather than left
@@ -435,10 +470,13 @@ async function parseTextSlipWithClaude(text: string, mode: BetSlipParseMode): Pr
 }
 
 // mode defaults to "CHAT" — every existing caller (the text-bet preview
-// route) keeps calling this with just a string, unchanged.
+// route) keeps calling this with just a string, unchanged. timeoutMsOverride
+// is test-only (see parseTextSlipWithClaude's own comment) and never passed
+// by any production call site.
 export async function parseBetSlipMessage(
   text: string,
   mode: BetSlipParseMode = "CHAT",
+  timeoutMsOverride?: number,
 ): Promise<ParseBetSlipResult> {
   const provider = process.env.AI_PROVIDER ?? "ollama";
 
@@ -455,5 +493,5 @@ export async function parseBetSlipMessage(
     return { valid: true, ...normalizeParsedBet(legacy) };
   }
 
-  return parseTextSlipWithClaude(text, mode);
+  return parseTextSlipWithClaude(text, mode, timeoutMsOverride);
 }

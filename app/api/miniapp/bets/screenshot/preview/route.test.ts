@@ -133,6 +133,44 @@ function baseOptions(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// Stage 14.4A — captures every console.log call (the structured pipeline
+// events logScreenshotPipelineEvent emits) so tests can assert on exactly
+// what was logged, and — just as importantly — what was never logged.
+const originalConsoleLog = console.log;
+let loggedLines: unknown[][] = [];
+
+test.beforeEach(() => {
+  loggedLines = [];
+  console.log = (...args: unknown[]) => {
+    loggedLines.push(args);
+  };
+});
+
+test.afterEach(() => {
+  console.log = originalConsoleLog;
+});
+
+// Filters out any console.log line that isn't one of our own structured
+// events — lib/bets/buildBetSlipPreview.ts (unrelated, unchanged, and
+// explicitly out of scope for this stage) has its own pre-existing
+// diagnostic console.log for an odds mismatch, which this route's tests
+// also happen to capture. Only lines that are valid JSON with an `event`
+// field are ours.
+function parsedLogEvents(): Array<{ event: string; [key: string]: unknown }> {
+  const events: Array<{ event: string; [key: string]: unknown }> = [];
+  for (const args of loggedLines) {
+    try {
+      const parsed = JSON.parse(String(args[0]));
+      if (parsed && typeof parsed === "object" && typeof parsed.event === "string") {
+        events.push(parsed);
+      }
+    } catch {
+      // Not one of ours — ignore.
+    }
+  }
+  return events;
+}
+
 // ---------------------------------------------------------------------
 // Happy path
 // ---------------------------------------------------------------------
@@ -495,4 +533,200 @@ test("screenshot preview: never creates a Bet, BetSelection, or Transaction (fak
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(typeof body.previewToken, "string");
+});
+
+// ---------------------------------------------------------------------
+// Stage 14.4A — timing + structured logging
+// ---------------------------------------------------------------------
+
+test("screenshot preview: a successful request logs the full expected event sequence with numeric timings", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  const response = await handleScreenshotPreview(request, baseOptions());
+  assert.equal(response.status, 200);
+
+  const events = parsedLogEvents();
+  const eventNames = events.map((e) => e.event);
+
+  assert.deepEqual(eventNames, [
+    "screenshot_preview_started",
+    "ocr_succeeded",
+    "parser_succeeded",
+    "odds_verification_succeeded",
+    "screenshot_preview_completed",
+  ]);
+
+  const ocrEvent = events.find((e) => e.event === "ocr_succeeded")!;
+  assert.equal(typeof ocrEvent.durationMs, "number");
+
+  const parserEvent = events.find((e) => e.event === "parser_succeeded")!;
+  assert.equal(typeof parserEvent.durationMs, "number");
+  assert.equal(parserEvent.parserMode, "OCR");
+  assert.equal(parserEvent.selectionCount, 1);
+
+  const oddsEvent = events.find((e) => e.event === "odds_verification_succeeded")!;
+  assert.equal(typeof oddsEvent.durationMs, "number");
+  assert.equal(oddsEvent.selectionCount, 1);
+
+  const completedEvent = events.find((e) => e.event === "screenshot_preview_completed")!;
+  assert.equal(typeof completedEvent.totalDurationMs, "number");
+  assert.ok(completedEvent.totalDurationMs as number >= 0);
+});
+
+test("screenshot preview: OCR failure logs ocr_failed with the failure code and duration, nothing further", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  const ocrProvider = fakeOcrProvider(() => ({
+    kind: "FAILURE",
+    code: "NO_TEXT_FOUND",
+    provider: "fake-ocr-provider",
+    durationMs: 42, // recognizeScreenshot() re-measures/re-stamps this itself (Stage 14.2 behavior) — not asserted verbatim below.
+    safeMessage: "no text",
+  }));
+
+  await handleScreenshotPreview(request, baseOptions({ ocrProvider }));
+
+  const events = parsedLogEvents();
+  assert.deepEqual(
+    events.map((e) => e.event),
+    ["screenshot_preview_started", "ocr_failed"],
+  );
+  const ocrFailed = events[1];
+  assert.equal(ocrFailed.failureCode, "NO_TEXT_FOUND");
+  assert.equal(typeof ocrFailed.durationMs, "number");
+});
+
+test("screenshot preview: a parser rejection logs parser_rejected; a parser timeout logs parser_timed_out", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+
+  const rejectedRequest = buildRequest(initData, jpegBytes(), "image/jpeg");
+  await handleScreenshotPreview(
+    rejectedRequest,
+    baseOptions({ parseBetSlip: fakeParseBetSlip({ valid: false, error: "not a bet" }) }),
+  );
+  assert.deepEqual(
+    parsedLogEvents().map((e) => e.event),
+    ["screenshot_preview_started", "ocr_succeeded", "parser_rejected"],
+  );
+
+  loggedLines = [];
+
+  const timeoutRequest = buildRequest(initData, jpegBytes(), "image/jpeg");
+  await handleScreenshotPreview(
+    timeoutRequest,
+    baseOptions({ parseBetSlip: fakeParseBetSlip({ valid: false, error: "timed out", code: "timeout" }) }),
+  );
+  assert.deepEqual(
+    parsedLogEvents().map((e) => e.event),
+    ["screenshot_preview_started", "ocr_succeeded", "parser_timed_out"],
+  );
+});
+
+test("screenshot preview: the bet parser throwing logs parser_failed", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  const throwingParser = (async () => {
+    throw new Error("unexpected parser crash");
+  }) as typeof import("@/lib/ai/betParser").parseBetSlipMessage;
+
+  await handleScreenshotPreview(request, baseOptions({ parseBetSlip: throwingParser }));
+
+  assert.deepEqual(
+    parsedLogEvents().map((e) => e.event),
+    ["screenshot_preview_started", "ocr_succeeded", "parser_failed"],
+  );
+});
+
+test("screenshot preview: odds NOT_FOUND logs odds_verification_not_found with the status summary, never selection content", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  const notFoundOdds = async (): Promise<OddsCheckResult> => ({
+    matched: false,
+    withinTolerance: null,
+    sourceOdds: null,
+    submittedOdds: 1.9,
+    discrepancyPercent: null,
+    bookmaker: null,
+    note: "no matching event",
+  });
+
+  await handleScreenshotPreview(request, baseOptions({ verifyOddsFn: notFoundOdds }));
+
+  const events = parsedLogEvents();
+  const oddsEvent = events.find((e) => e.event === "odds_verification_not_found");
+  assert.ok(oddsEvent, "expected an odds_verification_not_found event");
+  assert.equal(oddsEvent!.oddsVerificationStatus, "NOT_FOUND");
+});
+
+test("screenshot preview: a rejected verifyOddsFn logs odds_verification_failed (UNAVAILABLE), not a success", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  const failingVerifyOddsFn = async (): Promise<OddsCheckResult> => {
+    throw new Error("odds provider unavailable");
+  };
+
+  await handleScreenshotPreview(request, baseOptions({ verifyOddsFn: failingVerifyOddsFn }));
+
+  const events = parsedLogEvents();
+  const oddsEvent = events.find((e) => e.event === "odds_verification_failed");
+  assert.ok(oddsEvent, "expected an odds_verification_failed event");
+  assert.equal(oddsEvent!.oddsVerificationStatus, "UNAVAILABLE");
+});
+
+test("screenshot preview: no logged event ever contains OCR text, event/selection/stake/odds content, initData, tokens, or headers", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  const secretOcrMarker = "SUPER_SECRET_OCR_MARKER_5561";
+  const secretSlip = singleSlip({
+    selections: [
+      {
+        sport: "Football",
+        event: "SECRET_EVENT_NAME_Barcelona_vs_RealMadrid",
+        market: null,
+        selection: "SECRET_SELECTION_Over_2_5",
+        submittedOdds: 1.9,
+      },
+    ],
+  });
+
+  await handleScreenshotPreview(
+    request,
+    baseOptions({
+      ocrProvider: fakeOcrProvider(() => ocrSuccess(secretOcrMarker)),
+      parseBetSlip: fakeParseBetSlip(secretSlip),
+    }),
+  );
+
+  const forbidden = [
+    secretOcrMarker,
+    "SECRET_EVENT_NAME",
+    "SECRET_SELECTION",
+    initData,
+    BOT_TOKEN,
+    PREVIEW_TOKEN_SECRET,
+    "authorization",
+    "Bearer",
+  ];
+
+  const rawLoggedText = JSON.stringify(loggedLines);
+  for (const value of forbidden) {
+    assert.equal(rawLoggedText.includes(value), false, `logged output must never contain: ${value}`);
+  }
+
+  // Every logged line must be valid, flat JSON metadata — never a raw
+  // Error object, stack trace, or arbitrary nested content.
+  for (const event of parsedLogEvents()) {
+    for (const [key, value] of Object.entries(event)) {
+      assert.ok(
+        typeof value === "string" || typeof value === "number",
+        `log field "${key}" must be a string or number, got ${typeof value}`,
+      );
+    }
+  }
 });
