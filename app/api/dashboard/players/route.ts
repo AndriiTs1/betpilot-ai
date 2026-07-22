@@ -84,7 +84,9 @@ export async function GET(request: NextRequest) {
             status: true,
             createdAt: true,
             updatedAt: true,
-            selections: true,
+            // Stage 12.2 — deterministic leg order, oldest first
+            // (submission order), same as GET /api/miniapp/me.
+            selections: { orderBy: { createdAt: "asc" } },
           },
         },
       },

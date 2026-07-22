@@ -4,6 +4,7 @@ import BetSelectionsList from "./BetSelectionsList";
 import { formatBetDate } from "./formatBetDate";
 import { SportIcon } from "./sportIcons";
 import type { RecentBet } from "./types";
+import { mapBetForDisplay } from "@/lib/bets/mapBetForDisplay";
 
 interface ActiveBetsScreenProps {
   recentBets: RecentBet[];
@@ -60,6 +61,11 @@ export default function ActiveBetsScreen({ recentBets }: ActiveBetsScreenProps) 
           {activeBets.map((bet) => {
             const isExpress = Boolean(bet.selections && bet.selections.length > 1);
             const oddsValue = (isExpress ? bet.totalOdds : bet.odds) ?? "—";
+            // Stage 12.2 — displayTitle/displaySubtitle replace direct
+            // bet.event/bet.outcome reads, which are null for a real
+            // EXPRESS bet (or a legacy zero-selection row) — see
+            // lib/bets/mapBetForDisplay.ts.
+            const display = mapBetForDisplay(bet);
 
             return (
               // Fixed two-column grid (sport image | content), not flex —
@@ -88,13 +94,13 @@ export default function ActiveBetsScreen({ recentBets }: ActiveBetsScreenProps) 
                 <div className="grid content-between gap-y-1.5 px-3 py-3">
                   {/* Row 1: event title — one line, ellipsis, never pushes
                       the rows below. */}
-                  <p className="truncate text-[15px] font-semibold text-white">{bet.event}</p>
+                  <p className="truncate text-[15px] font-semibold text-white">{display.displayTitle}</p>
 
                   {/* Row 2: outcome / odds / stake, each its own fixed
                       column so every card's odds and stake land at the same
                       x-position no matter how long the outcome text is. */}
                   <div className="grid grid-cols-[minmax(0,1fr)_56px_48px] items-center gap-2 text-sm">
-                    <span className="min-w-0 truncate text-slate-500">{bet.outcome}</span>
+                    <span className="min-w-0 truncate text-slate-500">{display.displaySubtitle}</span>
                     <span className="text-center font-medium tabular-nums text-blue-300">{oddsValue}</span>
                     <span className="text-right tabular-nums text-slate-200">{bet.stake}</span>
                   </div>

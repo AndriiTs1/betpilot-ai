@@ -13,9 +13,17 @@ export interface MiniAppBetSelection {
 
 export interface RecentBet {
   id: string;
+  // Already present on every real API response (serializeBet spreads the
+  // raw Bet row, which includes `type`) — just not previously declared here.
+  type: string;
   sport: string;
-  event: string;
-  outcome: string;
+  // Stage 12.2 — nullable to match the real Prisma contract: Bet.event/
+  // outcome are `String?`, and are genuinely null for every EXPRESS bet
+  // (event/outcome live per-leg on selections[] instead). Never read
+  // directly by UI — see lib/bets/mapBetForDisplay.ts, the one place this
+  // nullability is actually handled.
+  event: string | null;
+  outcome: string | null;
   stake: string;
   odds: string | null;
   status: string;

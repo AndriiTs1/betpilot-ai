@@ -57,7 +57,11 @@ export async function GET(request: NextRequest) {
         where: { playerId: player.id },
         orderBy: { createdAt: "desc" },
         take: RECENT_BETS_LIMIT,
-        include: { selections: true },
+        // Stage 12.2 — deterministic leg order (no orderBy previously meant
+        // Postgres's return order was never actually guaranteed): legs
+        // display in the order they were submitted, oldest first, matching
+        // how createBetFromPreview.ts's nested create wrote them.
+        include: { selections: { orderBy: { createdAt: "asc" } } },
       }),
     ]);
 

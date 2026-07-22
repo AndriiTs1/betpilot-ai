@@ -10,6 +10,7 @@ import BetTicket, { type BetTicketData } from "./BetTicket";
 import type { AnyConfirmedBet } from "./betConfirmApi";
 import type { RecentBet } from "./types";
 import { SportIcon } from "./sportIcons";
+import { mapBetForDisplay } from "@/lib/bets/mapBetForDisplay";
 
 interface BetScreenProps {
   playerName: string;
@@ -201,6 +202,11 @@ export default function BetScreen({
         ) : (
           <div className="mt-2 space-y-2">
             {recentActivity.map((bet) => {
+              // Stage 12.2 — displayTitle replaces the old direct bet.event
+              // read, which was literally null for a real EXPRESS bet (or a
+              // legacy zero-selection row) — see lib/bets/mapBetForDisplay.ts.
+              const display = mapBetForDisplay(bet);
+
               return (
                 <div
                   key={bet.id}
@@ -214,11 +220,7 @@ export default function BetScreen({
                     >
                       <SportIcon sport={bet.sport} size={28} className="text-slate-200" />
                     </span>
-                    <p className="min-w-0 truncate text-sm font-medium text-white">
-                      {bet.selections && bet.selections.length > 1
-                        ? `Экспресс ×${bet.selections.length} · ${bet.event}`
-                        : bet.event}
-                    </p>
+                    <p className="min-w-0 truncate text-sm font-medium text-white">{display.displayTitle}</p>
                   </div>
                   <span className="shrink-0 text-xs text-slate-400">
                     {(bet.selections && bet.selections.length > 1 ? bet.totalOdds : bet.odds) ?? "—"}
