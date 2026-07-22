@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
-import type { PrismaClient } from "@/lib/generated/prisma/client";
+import type { Prisma, PrismaClient } from "@/lib/generated/prisma/client";
 import { isOperatorAuthorized } from "@/lib/auth/operatorAuth";
 import { settleBet, BetNotFoundForSettlementError, MissingSettlementOddsError, type SettleBetResult } from "@/lib/bets/settleBet";
 import {
@@ -10,6 +10,8 @@ import {
   BetAlreadyRejectedError,
   SettlementConflictError,
 } from "@/lib/bets/settlementRules";
+import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
+import { escapeHtml } from "@/lib/telegram/escapeHtml";
 
 // Stage 13.4 — the operator-only HTTP layer over settleBet() (Stage 13.3).
 // This route does exactly three things: authorize, validate the request's
@@ -99,6 +101,96 @@ function mapSettlementError(err: unknown, betId: string): NextResponse<SettleErr
   return errorResponse(500, { code: "INTERNAL_ERROR", message: "Internal server error" });
 }
 
+type AppliedSettleResult = Extract<SettleBetResult, { kind: "APPLIED" }>;
+
+interface SettledBetDisplayFields {
+  event: string | null;
+  outcome: string | null;
+  odds: Prisma.Decimal | null;
+  totalOdds: Prisma.Decimal | null;
+  stake: Prisma.Decimal;
+}
+
+// Stage 13.6 — same message shape/tone/emoji convention as confirm/reject's
+// existing notifications (app/api/bets/[id]/confirm/route.ts,
+// app/api/bets/[id]/reject/route.ts): 🟢/🔴/⚪ heading, ⚽ event, 🎯
+// selection, escapeHtml() on every dynamic field, Decimal.toString() (never
+// a raw Decimal object, never a plain-number reformat). Only player-facing
+// figures appear here — no bet id, transaction id, error code, or any other
+// internal/technical field.
+function buildSettlementMessage(result: AppliedSettleResult, bet: SettledBetDisplayFields): string {
+  const event = escapeHtml(bet.event ?? "—");
+  const outcome = escapeHtml(bet.outcome ?? "—");
+  const stake = bet.stake.toString();
+  const effectiveOdds = bet.totalOdds ?? bet.odds;
+  const oddsLine = effectiveOdds !== null ? `📈 Коэффициент: ${effectiveOdds.toString()}\n` : "";
+
+  if (result.status === "SETTLED_WIN") {
+    return (
+      `🟢 <b>Ставка выиграла!</b>\n` +
+      `⚽ ${event}\n` +
+      `🎯 ${outcome}\n` +
+      `💰 Ставка: ${stake}\n` +
+      oddsLine +
+      `💵 Выплата: ${result.grossPayout?.toString() ?? "—"}\n` +
+      `📊 Чистая прибыль: ${result.netProfit?.toString() ?? "—"}\n` +
+      `💳 Баланс: ${result.balanceAfter.toString()}`
+    );
+  }
+
+  if (result.status === "SETTLED_LOSS") {
+    return (
+      `🔴 <b>Ставка не зашла</b>\n` +
+      `⚽ ${event}\n` +
+      `🎯 ${outcome}\n` +
+      `💰 Ставка: ${stake}\n` +
+      oddsLine +
+      `📉 Проигрыш: ${stake}\n` +
+      `💳 Баланс: ${result.balanceAfter.toString()}`
+    );
+  }
+
+  // VOID
+  return (
+    `⚪ <b>Ставка аннулирована</b>\n` +
+    `⚽ ${event}\n` +
+    `🎯 ${outcome}\n` +
+    `💰 Ставка: ${stake}\n` +
+    `↩️ Возврат: ${stake}\n` +
+    `💳 Баланс: ${result.balanceAfter.toString()}`
+  );
+}
+
+// Best-effort, non-blocking — mirrors confirm/reject's exact
+// try/catch-and-log-only shape. Only ever called after settleBet() has
+// already returned APPLIED (i.e., after the transaction committed), so a
+// failure here can never roll back or affect the settlement itself, and
+// this function itself never throws — the caller doesn't need its own
+// try/catch around it. A missing telegramId is skipped silently (no log),
+// matching confirm/reject's existing `if (player.telegramId) { ... }`
+// behavior exactly — there is no else/log branch there either.
+async function notifySettlementResult(db: PrismaClient, result: AppliedSettleResult): Promise<void> {
+  try {
+    const bet = await db.bet.findUnique({
+      where: { id: result.betId },
+      select: {
+        event: true,
+        outcome: true,
+        odds: true,
+        totalOdds: true,
+        stake: true,
+        player: { select: { telegramId: true } },
+      },
+    });
+
+    if (!bet?.player.telegramId) return;
+
+    await sendTelegramMessage(bet.player.telegramId, buildSettlementMessage(result, bet));
+  } catch (err) {
+    console.error(`POST /api/bets/${result.betId}/settle: failed to notify player via Telegram`, err);
+  }
+}
+
 // Exported and DI-friendly (same shape as
 // app/api/miniapp/bets/text/confirm/route.ts's handleBetConfirm) so route
 // tests can inject a fake db instead of hitting a real database — POST
@@ -143,6 +235,14 @@ export async function handleSettleBet(
 
   try {
     const result = await settleBet(db, { betId, requestedStatus: status });
+
+    // Only ever fires for a real APPLY (never IDEMPOTENT, never on a
+    // thrown error — this line is unreached in both those cases) — exactly
+    // one notification per successfully applied settlement.
+    if (result.kind === "APPLIED") {
+      await notifySettlementResult(db, result);
+    }
+
     return NextResponse.json({ success: true, result: serializeSettleResult(result) }, { status: 200 });
   } catch (err) {
     return mapSettlementError(err, betId);
