@@ -210,6 +210,21 @@ export function getSportIconComponent(sport: string | null | undefined): SportIc
   return SPORT_ICON_COMPONENTS[normalizeSportKey(sport)] ?? FALLBACK_SPORT_ICON;
 }
 
+// Dashboard bet-row icons (Active Bets/History tables) — deliberately
+// restricted to the sports this project currently supports end to end
+// (Football, Tennis, Basketball, Ice Hockey). Unlike getSportIconComponent's
+// Trophy fallback (fine for a casual Mini App glance), an unresolvable sport
+// here returns null so the caller renders no icon at all rather than a
+// guess that could misrepresent the bet — see PlayerCard.tsx.
+const DASHBOARD_SPORT_KEYS = new Set(["football", "soccer", "tennis", "basketball", "hockey", "icehockey"]);
+
+export function getDashboardSportIcon(sport: string | null | undefined): SportIconComponent | null {
+  if (!sport) return null;
+  const key = normalizeSportKey(sport);
+  if (!DASHBOARD_SPORT_KEYS.has(key)) return null;
+  return SPORT_ICON_COMPONENTS[key] ?? null;
+}
+
 export interface SportIconProps {
   sport: string | null | undefined;
   size?: number;

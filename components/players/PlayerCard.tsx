@@ -4,8 +4,26 @@ import { useId, useState } from "react";
 import StatusBadge from "@/components/bets/StatusBadge";
 import EmptyState from "@/components/dashboard/EmptyState";
 import SelectionList from "@/components/bets/SelectionList";
+import { ExpressIcon, getDashboardSportIcon } from "@/components/miniapp/sportIcons";
 import { formatDisplayNumber } from "@/lib/format/number";
 import { mapBetForDisplay } from "@/lib/bets/mapBetForDisplay";
+
+// 20px matches text-sm's default line-height (1.25rem) exactly, so adding
+// this icon never changes row height. EXPRESS always gets the dedicated
+// Express icon (a multi-selection bet isn't any one sport); SINGLE gets its
+// real sport icon, or nothing at all for a sport this table doesn't have
+// icon coverage for yet — never a misleading guess.
+function BetRowIcon({ isExpress, sport }: { isExpress: boolean; sport: string }) {
+  if (isExpress) {
+    return <ExpressIcon size={20} className="shrink-0 text-slate-300" />;
+  }
+
+  const Icon = getDashboardSportIcon(sport);
+  if (!Icon) return null;
+
+  // eslint-disable-next-line react-hooks/static-components -- Icon is picked from a fixed, module-level map of never-redefined component references, not created during render.
+  return <Icon size={20} className="shrink-0 text-slate-300" />;
+}
 
 export interface PlayerBetSelection {
   id: string;
@@ -160,10 +178,14 @@ function DesktopBetRow({ bet, tab }: { bet: PlayerBet; tab: Tab }) {
               className="inline-flex items-center gap-1.5 hover:text-blue-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-400"
             >
               <i className={`ti ti-chevron-${isOpen ? "down" : "right"} text-sm`} aria-hidden="true" />
+              <BetRowIcon isExpress sport={bet.sport} />
               {eventLabel}
             </button>
           ) : (
-            eventLabel
+            <span className="inline-flex items-center gap-1.5">
+              <BetRowIcon isExpress={false} sport={bet.sport} />
+              {eventLabel}
+            </span>
           )}
         </td>
         <td className="max-w-[240px] truncate py-2 pr-4 text-slate-200">{selectionSummary}</td>
@@ -231,8 +253,9 @@ function BetsTable({ bets, tab }: { bets: PlayerBet[]; tab: Tab }) {
             <div key={bet.id} className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="font-semibold text-white">
-                    {isExpress ? `Express ×${display.selectionCount}` : display.displayTitle}
+                  <p className="flex items-start gap-1.5 font-semibold text-white">
+                    <BetRowIcon isExpress={isExpress} sport={bet.sport} />
+                    <span>{isExpress ? `Express ×${display.selectionCount}` : display.displayTitle}</span>
                   </p>
                   {!isExpress && <p className="text-sm text-slate-400">{display.displaySubtitle}</p>}
                 </div>
