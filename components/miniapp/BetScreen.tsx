@@ -9,7 +9,7 @@ import BetScreenshotForm from "./BetScreenshotForm";
 import BetTicket, { type BetTicketData } from "./BetTicket";
 import type { AnyConfirmedBet } from "./betConfirmApi";
 import type { RecentBet } from "./types";
-import { getSportIcon } from "./sportIcons";
+import { SportIcon } from "./sportIcons";
 
 interface BetScreenProps {
   playerName: string;
@@ -201,7 +201,6 @@ export default function BetScreen({
         ) : (
           <div className="mt-2 space-y-2">
             {recentActivity.map((bet) => {
-              const SportIcon = getSportIcon(bet.sport);
               return (
                 <div
                   key={bet.id}
@@ -209,7 +208,7 @@ export default function BetScreen({
                   style={{ background: "rgba(255,255,255,0.03)" }}
                 >
                   <div className="flex min-w-0 flex-1 items-center gap-1.5">
-                    <SportIcon size={16} className="shrink-0 text-slate-500" aria-hidden="true" />
+                    <SportIcon sport={bet.sport} size={16} stroke={2} className="shrink-0 text-slate-500" />
                     <p className="min-w-0 truncate text-sm font-medium text-white">
                       {bet.selections && bet.selections.length > 1
                         ? `Экспресс ×${bet.selections.length} · ${bet.event}`

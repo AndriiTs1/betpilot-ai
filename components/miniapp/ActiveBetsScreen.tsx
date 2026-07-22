@@ -2,6 +2,7 @@ import { Check } from "lucide-react";
 import StatusBadge from "@/components/bets/StatusBadge";
 import BetSelectionsList from "./BetSelectionsList";
 import { formatCompactDate } from "./formatCompactDate";
+import { SportIcon } from "./sportIcons";
 import type { RecentBet } from "./types";
 
 interface ActiveBetsScreenProps {
@@ -10,8 +11,10 @@ interface ActiveBetsScreenProps {
 
 // Classified purely from the existing Bet.status values already returned by
 // /api/miniapp/me — PENDING/CONFIRMED means "not yet settled". No API,
-// Prisma, or status-model changes involved.
-const ACTIVE_STATUSES = new Set(["PENDING", "CONFIRMED"]);
+// Prisma, or status-model changes involved. Exported so
+// ActiveBetsScreen.test.ts can filter fixtures through the exact same set
+// this component uses, instead of duplicating the literal.
+export const ACTIVE_STATUSES = new Set(["PENDING", "CONFIRMED"]);
 
 // UI-polish, this screen only — a calmer, capsule-shaped treatment for
 // CONFIRMED specifically. Every other status still renders through the
@@ -29,7 +32,7 @@ function ActiveStatus({ status }: { status: string }) {
 
   return (
     <span
-      className="inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium"
+      className="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-xs font-medium"
       style={{ background: "rgba(96,165,250,0.14)", color: "#93c5fd" }}
     >
       <Check size={11} strokeWidth={2.5} aria-hidden="true" />
@@ -56,24 +59,41 @@ export default function ActiveBetsScreen({ recentBets }: ActiveBetsScreenProps) 
         <div className="mt-4 space-y-3.5">
           {activeBets.map((bet) => (
             <div key={bet.id} className="rounded-xl border border-slate-800 p-3">
-              <p className="break-words font-semibold">{bet.event}</p>
-              {/* text-slate-400 -> text-slate-500: one step further into
-                  this app's existing muted-gray scale (already used this
-                  way for de-emphasized labels elsewhere, e.g.
-                  BetTicket.tsx's TicketMeta), so the outcome reads as
-                  secondary to the event title above it without losing
-                  legibility. */}
-              <p className="text-sm text-slate-500">{bet.outcome}</p>
-
-              <BetSelectionsList selections={bet.selections} />
-
-              <div className="mt-2 flex items-center justify-between gap-2 text-sm">
-                <span className="min-w-0 truncate">
-                  {bet.stake} @{" "}
-                  {(bet.selections && bet.selections.length > 1 ? bet.totalOdds : bet.odds) ?? "—"}
+              {/* items-start (not items-center): the icon anchors to the
+                  top of the row, level with the title's first line,
+                  instead of centering against the whole card once the
+                  outcome/selections/stake rows below make it taller. The
+                  icon column is a fixed 32px, so every card's title starts
+                  at the same x position regardless of event/outcome length. */}
+              <div className="flex items-start gap-2">
+                <span
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
+                  style={{ background: "rgba(59,130,246,0.10)" }}
+                >
+                  <SportIcon sport={bet.sport} size={18} stroke={2} className="text-slate-400" />
                 </span>
-                <ActiveStatus status={bet.status} />
-                <span className="shrink-0 text-slate-400">{formatCompactDate(bet.createdAt)}</span>
+
+                <div className="min-w-0 flex-1">
+                  <p className="break-words font-semibold">{bet.event}</p>
+                  {/* text-slate-400 -> text-slate-500: one step further
+                      into this app's existing muted-gray scale (already
+                      used this way for de-emphasized labels elsewhere,
+                      e.g. BetTicket.tsx's TicketMeta), so the outcome
+                      reads as secondary to the event title above it
+                      without losing legibility. */}
+                  <p className="text-sm text-slate-500">{bet.outcome}</p>
+
+                  <BetSelectionsList selections={bet.selections} />
+
+                  <div className="mt-2 flex items-center justify-between gap-1.5 text-sm">
+                    <span className="min-w-0 truncate">
+                      {bet.stake} @{" "}
+                      {(bet.selections && bet.selections.length > 1 ? bet.totalOdds : bet.odds) ?? "—"}
+                    </span>
+                    <ActiveStatus status={bet.status} />
+                    <span className="shrink-0 text-slate-400">{formatCompactDate(bet.createdAt)}</span>
+                  </div>
+                </div>
               </div>
             </div>
           ))}

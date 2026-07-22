@@ -1,7 +1,7 @@
 import { forwardRef } from "react";
 import type { LucideIcon } from "lucide-react";
 import { Ban, Barcode, Calendar, CircleCheckBig, CircleX, Clock, Hash, Trophy, User, Zap } from "lucide-react";
-import { getSportIcon } from "./sportIcons";
+import { SportIcon } from "./sportIcons";
 
 // The signature post-submission screen (Stage 4.5G) — replaces the plain
 // BetConfirmedCard that used to live inline in BetScreen.tsx. Deliberately
@@ -226,7 +226,6 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
         {/* Event */}
         <div className="px-5 py-5">
           {ticket.selections.map((selection, index) => {
-            const SportIcon = getSportIcon(selection.sport);
             // Both undefined for SINGLE (toBetTicketData never sets them) —
             // this row renders nothing extra, identical to before Step 5.
             const showStatusRow = selection.currentOdds != null || selection.oddsStatus != null;
@@ -243,7 +242,7 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
                   </p>
                 )}
                 <div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-slate-500">
-                  <SportIcon size={13} strokeWidth={2} aria-hidden="true" />
+                  <SportIcon sport={selection.sport} size={13} stroke={2} />
                   {selection.sport}
                   {selection.league ? ` · ${selection.league}` : ""}
                 </div>
