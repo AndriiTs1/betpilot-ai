@@ -8,21 +8,37 @@ import { ExpressIcon, getDashboardSportIcon } from "@/components/miniapp/sportIc
 import { formatDisplayNumber } from "@/lib/format/number";
 import { mapBetForDisplay } from "@/lib/bets/mapBetForDisplay";
 
-// 20px matches text-sm's default line-height (1.25rem) exactly, so adding
-// this icon never changes row height. EXPRESS always gets the dedicated
-// Express icon (a multi-selection bet isn't any one sport); SINGLE gets its
-// real sport icon, or nothing at all for a sport this table doesn't have
-// icon coverage for yet — never a misleading guess.
-function BetRowIcon({ isExpress, sport }: { isExpress: boolean; sport: string }) {
-  if (isExpress) {
-    return <ExpressIcon size={20} className="shrink-0 text-slate-300" />;
-  }
+// The icon box stays a fixed 20x20 (matches text-sm's default line-height
+// of 1.25rem exactly, so adding it never changes row height) — but the
+// source PNG artwork (football/tennis/basketball/hockey/express) each bake
+// in a padded rounded-square backdrop, with the actual ball/puck/ticket
+// only occupying roughly 65-72% of the frame (measured directly from the
+// source files, consistently across all five). Rendered at ICON_RENDER_PX
+// and clipped by this fixed-size, overflow-hidden wrapper instead of at
+// ICON_BOX_PX directly, so the visible artwork fills the box rather than
+// floating in the middle of it — the box itself, and therefore row height/
+// alignment, is unaffected.
+const ICON_BOX_PX = 20;
+const ICON_RENDER_PX = 28;
 
-  const Icon = getDashboardSportIcon(sport);
+function BetRowIcon({ isExpress, sport }: { isExpress: boolean; sport: string }) {
+  const Icon = isExpress ? ExpressIcon : getDashboardSportIcon(sport);
   if (!Icon) return null;
 
-  // eslint-disable-next-line react-hooks/static-components -- Icon is picked from a fixed, module-level map of never-redefined component references, not created during render.
-  return <Icon size={20} className="shrink-0 text-slate-300" />;
+  return (
+    <span
+      className="inline-flex shrink-0 items-center justify-center overflow-hidden"
+      style={{ width: ICON_BOX_PX, height: ICON_BOX_PX }}
+      aria-hidden="true"
+    >
+      {/* max-w-none cancels Tailwind's preflight `img { max-width: 100% }` —
+          without it, the browser clamps the image's rendered width to its
+          20px-wide parent while the explicit inline height stays at
+          ICON_RENDER_PX, squashing a 28x28 icon into a distorted 20x28. */}
+      {/* eslint-disable-next-line react-hooks/static-components -- Icon is picked from a fixed, module-level map of never-redefined component references, not created during render. */}
+      <Icon size={ICON_RENDER_PX} className="max-w-none text-slate-300" />
+    </span>
+  );
 }
 
 export interface PlayerBetSelection {
