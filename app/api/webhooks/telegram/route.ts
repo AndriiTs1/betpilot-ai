@@ -1,14 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { prisma } from "@/lib/db/client";
 import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
 import { isTelegramWebhookAuthorized } from "@/lib/auth/telegramWebhookAuth";
+import { bindInvitedPlayerByTelegramUsername } from "@/lib/telegram/bindInvitedPlayer";
 
 interface TelegramUpdate {
   message?: {
     date: number;
     text?: string;
     chat: { id: number };
-    from: { id: number };
+    // username is genuinely optional in the Bot API (not every Telegram
+    // account has one set) — closed-demo onboarding (see
+    // lib/telegram/bindInvitedPlayer.ts) is the only thing that reads it;
+    // everything else in this route is unaffected by its presence/absence.
+    from: { id: number; username?: string };
   };
 }
 
@@ -78,6 +84,16 @@ export async function POST(request: NextRequest) {
     const command = extractCommand(tgMessage.text);
 
     if (command === "start") {
+      // Closed-demo onboarding: silent bind attempt — the welcome message
+      // below is identical regardless of outcome (bound just now, already
+      // bound, or no invited match at all), so this never leaks to the
+      // sender whether a given username exists in the system. An
+      // unexpected error here (e.g. a transient DB error) propagates to
+      // this route's existing outer catch, same as any other failure —
+      // Telegram still gets an ok:true ack either way, just without the
+      // welcome text on that one delivery.
+      await bindInvitedPlayerByTelegramUsername(prisma, String(tgMessage.from.id), tgMessage.from.username);
+
       await sendTelegramMessage(chatId, WELCOME_TEXT, openAppKeyboard(origin));
       return NextResponse.json({ ok: true });
     }

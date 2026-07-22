@@ -104,6 +104,20 @@ Operator workflow (queue, confirm/reject against credit limit, player notificati
 - Diagnosed and fixed a 3-part production incident: missing `OPERATOR_SECRET`, internal fetches hitting Vercel's SSO-gated raw deployment URL instead of the stable production alias, and a corrupted (triple-pasted) secret value.
 - `VERCEL_PROJECT_PRODUCTION_URL` used (not `request.url`) so internal dashboard→API fetches don't get redirected to a login page by Vercel Deployment Protection.
 
+## Closed-demo player onboarding
+
+A closed demo has no public sign-up: every player is invited by an operator before they ever open the bot, using only virtual/demo credit — no deposit, withdrawal, payment, or payout logic exists or is implied by this flow.
+
+- `Player.telegramUsername` (`String? @unique`, normalized: no leading `@`, lowercase) is a **one-time onboarding aid only** — never an authentication credential. Mini App access (`GET /api/miniapp/me`) continues to authenticate exclusively by matching signed `initData`'s `user.id` against `Player.telegramId`, exactly as before this feature.
+- **Invite**: an operator runs `npm run player:invite` (`scripts/invite-player.ts`, same manual/local-DB-access pattern as `npm run operator:create`) to create a Player row with a known `telegramUsername` and `telegramId: null` — "invited, not yet bound." Idempotent: safe to re-run (e.g. to update `name`/`phoneNumber`/credit fields), never touches `telegramId` on an existing row.
+  ```bash
+  PLAYER_NAME="Denis" PLAYER_TELEGRAM_USERNAME="kda0508" \
+  PLAYER_PHONE="+380676210203" OPERATOR_PHONE="+10000000000" \
+  npm run player:invite
+  ```
+- **Bind**: the first time that real Telegram account sends `/start`, `lib/telegram/bindInvitedPlayer.ts`'s `bindInvitedPlayerByTelegramUsername()` runs inside the existing webhook handler (`app/api/webhooks/telegram/route.ts`) and atomically sets `telegramId` on the matching invited row via a single `UPDATE ... WHERE telegramUsername = ? AND telegramId IS NULL` — race-safe under concurrent duplicate `/start`s (only one can ever match), idempotent on repeat (`telegramId` already set means the row no longer matches), and never reassigns an already-bound row to a different Telegram account. A username with no invited match is a silent no-op — the bot's welcome message is identical either way, so it never leaks which usernames are registered. This never auto-creates a Player.
+- Once bound, the player is indistinguishable from any other — `telegramUsername` is never consulted again.
+
 ## What's not done yet
 
 - **Parlay/express bets can't be confirmed.** The screenshot parser detects a multi-selection slip and returns its legs to the client (`422 PARLAY_CONFIRM_NOT_SUPPORTED`), and the text parser could in principle be extended the same way, but `previewToken`'s payload and `createBetFromPreview.ts` only model a single selection — `Bet.type` is hardcoded to `SINGLE` on every confirm-created row. `BetSelection`/`Bet.totalOdds` exist in the schema and are already backfilled/displayed for existing accumulators (see "Data layer"), but nothing **creates** a `BetSelection` for a newly confirmed bet, and the **operator dashboard** (`BetQueueItem.tsx`/`BetHistory.tsx`/`PlayerCard.tsx`) still renders only the old flat fields. There's also still no `BetSelectionStatus` (a single leg can't be voided/settled independently), and `OddsSnapshot` is still tied to `Bet` rather than per-selection. Single-selection bets — text or screenshot — are unaffected by any of this and work today.

@@ -7,11 +7,12 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --import tsx --test lib/auth/*.test.ts lib/ai/*.test.ts lib/betPreview/*.test.ts lib/bets/*.test.ts lib/odds/*.test.ts app/api/miniapp/bets/text/confirm/*.test.ts components/miniapp/*.test.ts",
+    "test": "node --import tsx --test lib/auth/*.test.ts lib/ai/*.test.ts lib/betPreview/*.test.ts lib/bets/*.test.ts lib/odds/*.test.ts lib/telegram/*.test.ts app/api/miniapp/bets/text/confirm/*.test.ts components/miniapp/*.test.ts",
     "postinstall": "prisma generate",
     "db:seed": "tsx prisma/seed.ts",
     "db:backfill-bet-selections": "tsx scripts/backfill-bet-selections.ts",
-    "operator:create": "tsx scripts/create-operator.ts"
+    "operator:create": "tsx scripts/create-operator.ts",
+    "player:invite": "tsx scripts/invite-player.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.70.0",

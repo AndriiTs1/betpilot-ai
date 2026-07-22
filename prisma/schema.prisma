@@ -94,10 +94,18 @@ model Player {
   operatorId String
   operator   Operator @relation(fields: [operatorId], references: [id])
 
-  name        String
-  telegramId  String?  @unique
-  phoneNumber String?
-  createdAt   DateTime @default(now())
+  name             String
+  telegramId       String?  @unique
+  // Closed-demo onboarding — set once when a player is invited (before they
+  // ever open the bot), matched against Telegram's own from.username on
+  // their first /start, then never consulted again for authentication.
+  // Always stored normalized (no leading "@", lowercase) — see
+  // lib/telegram/bindInvitedPlayer.ts. NOT an auth credential: Mini App
+  // access (GET /api/miniapp/me) continues to check signed initData's
+  // user.id against telegramId exclusively, never this field.
+  telegramUsername String?  @unique
+  phoneNumber      String?
+  createdAt        DateTime @default(now())
 
   creditLimit   Decimal @default(10000) @db.Decimal(18, 6)
   currentCredit Decimal @default(0) @db.Decimal(18, 6) // + player is up, - player owes
