@@ -25,40 +25,58 @@ export default function HistoryScreen({ recentBets }: HistoryScreenProps) {
           Здесь будут отображаться завершённые ставки.
         </p>
       ) : (
-        <div className="mt-4 space-y-3">
-          {finishedBets.map((bet) => (
-            <div key={bet.id} className="rounded-xl border border-slate-800 p-3">
-              {/* items-start: icon anchors to the first line of the
-                  title, not centered against the whole card. */}
-              <div className="flex items-start gap-2">
-                <span
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
+        <div className="mt-4 space-y-3.5">
+          {finishedBets.map((bet) => {
+            const isExpress = Boolean(bet.selections && bet.selections.length > 1);
+            const oddsValue = (isExpress ? bet.totalOdds : bet.odds) ?? "—";
+
+            return (
+              // Same fixed two-column grid as ActiveBetsScreen.tsx (sport
+              // image | content), same min-height, same left-column width,
+              // same SportIcon size — one shared layout system so a card
+              // looks identical between the two screens regardless of
+              // event/outcome length or status label.
+              <div
+                key={bet.id}
+                className="grid min-h-[124px] grid-cols-[76px_minmax(0,1fr)] overflow-hidden rounded-xl border border-slate-800"
+              >
+                <div
+                  className="flex items-center justify-center border-r border-white/5"
                   style={{ background: "rgba(59,130,246,0.14)" }}
                 >
-                  <SportIcon sport={bet.sport} size={28} className="text-slate-200" />
-                </span>
+                  <SportIcon sport={bet.sport} size={56} className="text-slate-200" />
+                </div>
 
-                <div className="min-w-0 flex-1">
-                  <p className="break-words font-semibold">{bet.event}</p>
-                  <p className="text-sm text-slate-400">{bet.outcome}</p>
+                {/* content-between pins row 1 to the top and row 3 to the
+                    bottom, row 2 centered between them — same as
+                    ActiveBetsScreen.tsx's right column. */}
+                <div className="grid content-between gap-y-1.5 px-3 py-3">
+                  {/* Row 1: event title — one line, ellipsis. */}
+                  <p className="truncate text-[15px] font-semibold text-white">{bet.event}</p>
+
+                  {/* Row 2: outcome / odds / stake, same fixed columns as
+                      Active Bets so both screens' figures line up. */}
+                  <div className="grid grid-cols-[minmax(0,1fr)_56px_48px] items-center gap-2 text-sm">
+                    <span className="min-w-0 truncate text-slate-500">{bet.outcome}</span>
+                    <span className="text-center font-medium tabular-nums text-blue-300">{oddsValue}</span>
+                    <span className="text-right tabular-nums text-slate-200">{bet.stake}</span>
+                  </div>
 
                   <BetSelectionsList selections={bet.selections} />
 
-                  <div className="mt-2 flex items-center justify-between gap-1.5 text-sm">
-                    <span className="min-w-0 truncate">
-                      {bet.stake} @{" "}
-                      {(bet.selections && bet.selections.length > 1 ? bet.totalOdds : bet.odds) ?? "—"}
-                    </span>
+                  {/* Row 3: status centered across the whole content width,
+                      date pinned to the right — StatusBadge unchanged, still
+                      shows Won/Lost/Void/Rejected exactly as before, only
+                      its position changed. */}
+                  <div className="grid grid-cols-[1fr_auto_1fr] items-center text-sm">
+                    <span />
                     <StatusBadge status={bet.status} />
-                    {/* Fixed-width DD.MM.YY — same helper ActiveBetsScreen.tsx
-                        uses, for a consistent date format across both card
-                        lists. Never wraps to a second line at 320px. */}
-                    <span className="shrink-0 text-slate-400">{formatBetDate(bet.createdAt)}</span>
+                    <span className="justify-self-end text-slate-400">{formatBetDate(bet.createdAt)}</span>
                   </div>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

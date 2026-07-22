@@ -57,46 +57,62 @@ export default function ActiveBetsScreen({ recentBets }: ActiveBetsScreenProps) 
         // requested 2-4px range, deliberately conservative so the list
         // doesn't read as sparse.
         <div className="mt-4 space-y-3.5">
-          {activeBets.map((bet) => (
-            <div key={bet.id} className="rounded-xl border border-slate-800 p-3">
-              {/* items-start (not items-center): the icon anchors to the
-                  top of the row, level with the title's first line,
-                  instead of centering against the whole card once the
-                  outcome/selections/stake rows below make it taller. The
-                  icon column is a fixed 32px, so every card's title starts
-                  at the same x position regardless of event/outcome length. */}
-              <div className="flex items-start gap-2">
-                <span
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
+          {activeBets.map((bet) => {
+            const isExpress = Boolean(bet.selections && bet.selections.length > 1);
+            const oddsValue = (isExpress ? bet.totalOdds : bet.odds) ?? "—";
+
+            return (
+              // Fixed two-column grid (sport image | content), not flex —
+              // the left column's width never varies by card, and (with
+              // grid's default align-items: stretch) it always spans the
+              // card's full height regardless of how tall the right side's
+              // content makes it. min-h locks every card to the same
+              // baseline height so odds/stake/Confirmed/date land on
+              // identical y-positions across the whole list.
+              <div
+                key={bet.id}
+                className="grid min-h-[124px] grid-cols-[76px_minmax(0,1fr)] overflow-hidden rounded-xl border border-slate-800"
+              >
+                <div
+                  className="flex items-center justify-center border-r border-white/5"
                   style={{ background: "rgba(59,130,246,0.14)" }}
                 >
-                  <SportIcon sport={bet.sport} size={28} className="text-slate-200" />
-                </span>
+                  <SportIcon sport={bet.sport} size={56} className="text-slate-200" />
+                </div>
 
-                <div className="min-w-0 flex-1">
-                  <p className="break-words font-semibold">{bet.event}</p>
-                  {/* text-slate-400 -> text-slate-500: one step further
-                      into this app's existing muted-gray scale (already
-                      used this way for de-emphasized labels elsewhere,
-                      e.g. BetTicket.tsx's TicketMeta), so the outcome
-                      reads as secondary to the event title above it
-                      without losing legibility. */}
-                  <p className="text-sm text-slate-500">{bet.outcome}</p>
+                {/* content-between (align-content: space-between) pins row 1
+                    to the top and row 3 to the bottom, with row 2 centered
+                    between them — a CSS Grid stand-in for the old flex
+                    justify-between, which let element position drift with
+                    content length instead of guaranteeing it. */}
+                <div className="grid content-between gap-y-1.5 px-3 py-3">
+                  {/* Row 1: event title — one line, ellipsis, never pushes
+                      the rows below. */}
+                  <p className="truncate text-[15px] font-semibold text-white">{bet.event}</p>
+
+                  {/* Row 2: outcome / odds / stake, each its own fixed
+                      column so every card's odds and stake land at the same
+                      x-position no matter how long the outcome text is. */}
+                  <div className="grid grid-cols-[minmax(0,1fr)_56px_48px] items-center gap-2 text-sm">
+                    <span className="min-w-0 truncate text-slate-500">{bet.outcome}</span>
+                    <span className="text-center font-medium tabular-nums text-blue-300">{oddsValue}</span>
+                    <span className="text-right tabular-nums text-slate-200">{bet.stake}</span>
+                  </div>
 
                   <BetSelectionsList selections={bet.selections} />
 
-                  <div className="mt-2 flex items-center justify-between gap-1.5 text-sm">
-                    <span className="min-w-0 truncate">
-                      {bet.stake} @{" "}
-                      {(bet.selections && bet.selections.length > 1 ? bet.totalOdds : bet.odds) ?? "—"}
-                    </span>
+                  {/* Row 3: Confirmed centered across the whole content
+                      width (1fr/auto/1fr — not just "between its
+                      neighbors"), date pinned to the right edge. */}
+                  <div className="grid grid-cols-[1fr_auto_1fr] items-center text-sm">
+                    <span />
                     <ActiveStatus status={bet.status} />
-                    <span className="shrink-0 text-slate-400">{formatBetDate(bet.createdAt)}</span>
+                    <span className="justify-self-end text-slate-400">{formatBetDate(bet.createdAt)}</span>
                   </div>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
