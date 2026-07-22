@@ -1,6 +1,6 @@
 import StatusBadge from "@/components/bets/StatusBadge";
 import BetSelectionsList from "./BetSelectionsList";
-import { SportIcon } from "./sportIcons";
+import { SportIcon, ExpressIcon } from "./sportIcons";
 import { formatBetDate } from "./formatBetDate";
 import type { RecentBet } from "./types";
 import { mapBetForDisplay } from "@/lib/bets/mapBetForDisplay";
@@ -47,7 +47,14 @@ export default function HistoryScreen({ recentBets }: HistoryScreenProps) {
                   className="flex items-center justify-center border-r border-white/5"
                   style={{ background: "rgba(59,130,246,0.14)" }}
                 >
-                  <SportIcon sport={bet.sport} size={56} className="text-slate-200" />
+                  {/* EXPRESS can span multiple sports — a single sport icon
+                      would misrepresent it, so it gets its own dedicated
+                      icon instead of e.g. always showing football. */}
+                  {isExpress ? (
+                    <ExpressIcon size={56} className="text-slate-200" />
+                  ) : (
+                    <SportIcon sport={bet.sport} size={56} className="text-slate-200" />
+                  )}
                 </div>
 
                 {/* content-between pins row 1 to the top and row 3 to the

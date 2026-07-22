@@ -81,6 +81,17 @@ export function HockeyIcon({ size, className }: SportSvgProps) {
   return <ImageSportIcon src="/icons/sports/hockey.png" size={size} className={className} />;
 }
 
+// Not a sport glyph — the card-level icon for an EXPRESS bet (multiple
+// selections, possibly across different sports, so no single sport icon
+// can represent it honestly). Same prepared-artwork style/size convention
+// as the sport PNGs above, just not keyed by sport. Used wherever a card
+// shows one icon for the whole bet (ActiveBetsScreen/HistoryScreen's list
+// cards, BetScreen's Recent Activity row) — never inside a per-selection
+// SelectionRow, where each leg's own real sport icon is still correct.
+export function ExpressIcon({ size, className }: SportSvgProps) {
+  return <ImageSportIcon src="/icons/express.png" size={size} className={className} />;
+}
+
 // Baseball: circle + two curved seams, each crossed by small stitch ticks —
 // the ticks are what read as "baseball" rather than a plain tennis-style curve.
 export function BaseballIcon({ size, className }: SportSvgProps) {

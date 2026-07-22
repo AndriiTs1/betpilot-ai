@@ -9,7 +9,7 @@ import BetScreenshotForm from "./BetScreenshotForm";
 import BetTicket, { type BetTicketData } from "./BetTicket";
 import type { AnyConfirmedBet } from "./betConfirmApi";
 import type { RecentBet } from "./types";
-import { SportIcon } from "./sportIcons";
+import { SportIcon, ExpressIcon } from "./sportIcons";
 import { mapBetForDisplay } from "@/lib/bets/mapBetForDisplay";
 
 interface BetScreenProps {
@@ -224,6 +224,7 @@ export default function BetScreen({
               // read, which was literally null for a real EXPRESS bet (or a
               // legacy zero-selection row) — see lib/bets/mapBetForDisplay.ts.
               const display = mapBetForDisplay(bet);
+              const isExpress = display.selectionCount > 1;
 
               return (
                 <div
@@ -236,7 +237,13 @@ export default function BetScreen({
                       className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
                       style={{ background: "rgba(59,130,246,0.14)" }}
                     >
-                      <SportIcon sport={bet.sport} size={28} className="text-slate-200" />
+                      {/* EXPRESS can span multiple sports — a single sport
+                          icon would misrepresent it. */}
+                      {isExpress ? (
+                        <ExpressIcon size={28} className="text-slate-200" />
+                      ) : (
+                        <SportIcon sport={bet.sport} size={28} className="text-slate-200" />
+                      )}
                     </span>
                     <p className="min-w-0 truncate text-sm font-medium text-white">{display.displayTitle}</p>
                   </div>
