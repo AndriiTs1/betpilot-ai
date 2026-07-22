@@ -21,6 +21,13 @@ export interface DisplaySelection {
   event: string;
   outcome: string;
   odds: string | null;
+  // Optional — present on a real EXPRESS leg (BetSelection.market/
+  // currentOdds/oddsStatus), absent on a legacy-fallback-synthesized
+  // selection. Only ever read by a decision-context SelectionRow (Preview,
+  // Confirmation Ticket, Pending Queue); never required.
+  market?: string | null;
+  currentOdds?: string | null;
+  oddsStatus?: string | null;
 }
 
 // Only the fields the mapper actually needs — a structural subset every

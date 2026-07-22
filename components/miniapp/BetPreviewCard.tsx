@@ -1,5 +1,8 @@
 import type { ReactNode } from "react";
-import type { BetPreview, BetPreviewSelection, BetSelectionOddsStatus } from "./betPreviewApi";
+import type { BetPreview } from "./betPreviewApi";
+import SelectionList from "@/components/bets/SelectionList";
+import type { DisplaySelection } from "@/lib/bets/mapBetForDisplay";
+import { formatAmount } from "@/lib/bets/formatAmount";
 
 // Shared preview display — used by both BetTextForm (text flow) and
 // BetScreenshotForm (screenshot flow, Stage 4.5D). Extracted out of
@@ -10,10 +13,15 @@ import type { BetPreview, BetPreviewSelection, BetSelectionOddsStatus } from "./
 // as it always did, reading from selections[0] instead of top-level
 // fields, and adds an EXPRESS rendering path (a list of selections plus a
 // stake/total-odds/potential-win summary). No visual change for SINGLE.
-
-function formatAmount(value: number): string {
-  return value.toFixed(2);
-}
+//
+// Bet UI Design System, Phase 2/4 — the EXPRESS branch's per-selection row
+// now renders through the shared components/bets/SelectionRow (via
+// SelectionList in "full" mode — a decision context, so every selection
+// stays visible unconditionally, exactly as before, just no longer a local
+// one-off implementation). Financial figures are grouped into their own
+// bordered block for a clearer summary, and the whole card uses a
+// consistent gap rhythm instead of ad hoc mt-3 chaining, so the content
+// balances across the card's width instead of reading as top/left-heavy.
 
 export function PreviewCard({ preview }: { preview: BetPreview }) {
   if (preview.type === "SINGLE") {
@@ -41,6 +49,22 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
     );
   }
 
+  // BetPreviewSelection's own field names (selection/submittedOdds) map
+  // onto the shared DisplaySelection shape (outcome/odds) the promoted
+  // SelectionRow/SelectionList expect — no id exists yet pre-confirmation,
+  // so the selection's own index stands in for it (stable for this
+  // render's lifetime, never re-sorted).
+  const selections: DisplaySelection[] = preview.selections.map((selection, index) => ({
+    id: String(index),
+    sport: selection.sport,
+    event: selection.event,
+    outcome: selection.selection,
+    market: selection.market,
+    odds: selection.submittedOdds !== null ? String(selection.submittedOdds) : null,
+    currentOdds: selection.currentOdds !== null ? String(selection.currentOdds) : null,
+    oddsStatus: selection.oddsStatus,
+  }));
+
   return (
     <div
       className="rounded-2xl p-4"
@@ -48,13 +72,16 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
     >
       <PreviewRow label="Bet type" value={`Express ×${preview.selections.length}`} />
 
-      <div className="mt-3 space-y-3">
-        {preview.selections.map((selection, index) => (
-          <SelectionRow key={index} selection={selection} />
-        ))}
+      {/* Decision context (the player is about to confirm) — every
+          selection is always shown, never truncated, regardless of count. */}
+      <div className="mt-4">
+        <SelectionList selections={selections} mode="full" showStatus />
       </div>
 
-      <div className="mt-3 border-t border-white/5 pt-3">
+      <div
+        className="mt-4 rounded-xl p-3"
+        style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
+      >
         <PreviewRow label="Stake" value={formatAmount(preview.stake)} />
         <PreviewRow
           label="Total odds"
@@ -67,50 +94,6 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
         />
       </div>
     </div>
-  );
-}
-
-function SelectionRow({ selection }: { selection: BetPreviewSelection }) {
-  return (
-    <div className="rounded-xl p-3" style={{ background: "rgba(255,255,255,0.03)" }}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-white">{selection.event}</p>
-          <p className="truncate text-xs text-slate-400">
-            {selection.selection}
-            {selection.market ? ` · ${selection.market}` : ""}
-          </p>
-        </div>
-        <SelectionStatusBadge status={selection.oddsStatus} />
-      </div>
-      <div className="mt-1.5 flex items-center gap-3 text-xs text-slate-500">
-        <span>Submitted: {selection.submittedOdds !== null ? formatAmount(selection.submittedOdds) : "—"}</span>
-        {selection.currentOdds !== null && <span>Current: {formatAmount(selection.currentOdds)}</span>}
-      </div>
-    </div>
-  );
-}
-
-const STATUS_BADGE: Record<BetSelectionOddsStatus, { label: string; color: string }> = {
-  VERIFIED: { label: "Verified", color: "#60E84A" },
-  ODDS_CHANGED: { label: "Odds changed", color: "#E8B84A" },
-  NOT_FOUND: { label: "Not found", color: "#94a3b8" },
-  UNAVAILABLE: { label: "Unavailable", color: "#94a3b8" },
-  // Reserved default, not actually reachable today — see
-  // lib/generated/prisma/enums.ts's BetSelectionOddsStatus and
-  // lib/odds/mapOddsStatus.ts's doc comment.
-  PENDING: { label: "Pending", color: "#94a3b8" },
-};
-
-function SelectionStatusBadge({ status }: { status: BetSelectionOddsStatus }) {
-  const { label, color } = STATUS_BADGE[status];
-  return (
-    <span
-      className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium"
-      style={{ background: `${color}1A`, color }}
-    >
-      {label}
-    </span>
   );
 }
 

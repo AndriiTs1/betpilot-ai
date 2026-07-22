@@ -2,6 +2,8 @@ import { forwardRef } from "react";
 import type { LucideIcon } from "lucide-react";
 import { Ban, Barcode, Calendar, CircleCheckBig, CircleX, Clock, Hash, Trophy, User, Zap } from "lucide-react";
 import { SportIcon } from "./sportIcons";
+import { getOddsStatusBadge } from "@/lib/bets/oddsStatusBadge";
+import { formatAmount } from "@/lib/bets/formatAmount";
 
 // The signature post-submission screen (Stage 4.5G) — replaces the plain
 // BetConfirmedCard that used to live inline in BetScreen.tsx. Deliberately
@@ -120,10 +122,6 @@ const TICKET_META_ROW_COUNT = 4; // Ticket ID, Player, Date, Time
 
 function ticketRowDelay(index: number): string {
   return `${Math.min(index, STAGGER_MAX_STEPS) * STAGGER_STEP_MS}ms`;
-}
-
-function formatAmount(value: number): string {
-  return value.toFixed(2);
 }
 
 // Locale is pinned to "en-US" rather than left to the runtime default —
@@ -420,23 +418,12 @@ function FinancialRow({
   );
 }
 
-// EXPRESS-only, per-selection status badge (Step 5) — same palette
-// BetPreviewCard.tsx's SelectionStatusBadge already established for the
-// same five statuses, kept as its own small local copy rather than an
-// import (BetPreviewCard.tsx is out of this step's scope) so this
-// component's known set stays self-contained. An unrecognized string
-// (oddsStatus is typed loosely as `string` on the wire) falls back to a
-// neutral label instead of silently rendering nothing.
-const ODDS_STATUS_LABELS: Record<string, { label: string; color: string }> = {
-  VERIFIED: { label: "Verified", color: "#60E84A" },
-  ODDS_CHANGED: { label: "Odds changed", color: "#E8B84A" },
-  NOT_FOUND: { label: "Not found", color: "#94a3b8" },
-  UNAVAILABLE: { label: "Unavailable", color: "#94a3b8" },
-  PENDING: { label: "Pending", color: "#94a3b8" },
-};
-
+// EXPRESS-only, per-selection status badge (Step 5) — the canonical
+// odds-verification palette (lib/bets/oddsStatusBadge.ts), previously a
+// local copy duplicating BetPreviewCard.tsx's own STATUS_BADGE
+// byte-for-byte. Wording/colors are unchanged, only the definition moved.
 function OddsStatusPill({ status }: { status: string }) {
-  const { label, color } = ODDS_STATUS_LABELS[status] ?? { label: status, color: "#94a3b8" };
+  const { label, color } = getOddsStatusBadge(status);
   return (
     <span
       className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium"

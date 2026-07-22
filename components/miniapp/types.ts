@@ -9,6 +9,13 @@ export interface MiniAppBetSelection {
   odds: string | null;
   createdAt: string;
   updatedAt: string;
+  // Already present on every real API response (serializeBet spreads the
+  // raw BetSelection row) — just not previously declared here. Optional so
+  // the mergeConfirmedBet.ts optimistic-merge path (which doesn't set
+  // these) stays valid without change.
+  market?: string | null;
+  currentOdds?: string | null;
+  oddsStatus?: string | null;
 }
 
 export interface RecentBet {

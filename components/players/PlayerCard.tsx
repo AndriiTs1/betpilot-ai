@@ -3,20 +3,40 @@
 import { useId, useState } from "react";
 import StatusBadge from "@/components/bets/StatusBadge";
 import EmptyState from "@/components/dashboard/EmptyState";
+import SelectionList from "@/components/bets/SelectionList";
 import { formatDisplayNumber } from "@/lib/format/number";
-import { dispatchDashboardRefresh } from "@/lib/dashboard/refreshEvent";
+import { mapBetForDisplay } from "@/lib/bets/mapBetForDisplay";
 
-export interface PlayerBet {
+export interface PlayerBetSelection {
   id: string;
   sport: string;
   event: string;
   outcome: string;
+  market: string | null;
+  odds: string | null;
+  currentOdds: string | null;
+  oddsStatus: string;
+}
+
+export interface PlayerBet {
+  id: string;
+  sport: string;
+  // Nullable to match the real Prisma contract — both are genuinely null
+  // for an EXPRESS bet (event/outcome live per-leg on selections instead).
+  // Already true on the wire; this type was simply never honest about it,
+  // which is the root cause of an EXPRESS row rendering with a blank
+  // Event/Selection before this fix.
+  event: string | null;
+  outcome: string | null;
   stake: string;
   odds: string | null;
   totalOdds: string | null;
   status: string;
   createdAt: string;
   updatedAt: string;
+  // Already present on every real API response (GET /api/dashboard/players
+  // already selects selections) — just not previously declared here.
+  selections: PlayerBetSelection[];
 }
 
 interface PlayerCardProps {
@@ -68,99 +88,17 @@ function computePotentialPayout(bet: PlayerBet): string | null {
   return payout.toFixed(2);
 }
 
-// Stage 13.5 — settlement actions for a CONFIRMED bet. Only ever rendered
-// in the Active Bets tab, whose `bets` array GET /api/dashboard/players
-// already filters to `status === "CONFIRMED"` server-side (see
-// app/api/dashboard/players/route.ts) — so there's no separate per-row
-// status check needed here; every bet this component is ever given is
-// already eligible.
-type SettlementStatus = "SETTLED_WIN" | "SETTLED_LOSS" | "VOID";
-
-interface SettleErrorBody {
-  success: false;
-  error: { code: string; message: string };
-}
-
-// Same local-state, disable-while-pending, inline-error shape as
-// BetQueueItem.tsx's handleAction/pendingAction/error — this is that exact
-// convention's settlement counterpart, one level down (per-row inside
-// PlayerCard's Active Bets table instead of the separate Pending queue).
-function SettleBetActions({ betId }: { betId: string }) {
-  const [pendingAction, setPendingAction] = useState<SettlementStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  async function handleSettle(status: SettlementStatus) {
-    // Only VOID is a decision worth a confirmation prompt — Won/Lost are
-    // the expected, routine outcomes of a bet; Void is the unusual one.
-    if (status === "VOID" && !window.confirm("Void this bet?")) {
-      return;
-    }
-
-    setPendingAction(status);
-    setError(null);
-
-    try {
-      const response = await fetch(`/api/dashboard/bets/${betId}/settle`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status }),
-      });
-
-      if (response.ok) {
-        // The bet's new status moves it out of Active Bets and into
-        // History on the next refetch — no local mutation of this row is
-        // needed or attempted; this component simply unmounts once fresh
-        // props arrive.
-        dispatchDashboardRefresh();
-        return;
-      }
-
-      const body = (await response.json().catch(() => null)) as SettleErrorBody | null;
-      setError(body?.error?.message ?? "Не удалось выполнить действие. Попробуйте ещё раз.");
-    } catch {
-      setError("Не удалось связаться с сервером. Проверьте соединение.");
-    } finally {
-      setPendingAction(null);
-    }
-  }
-
-  const disabled = pendingAction !== null;
-
-  return (
-    <div className="flex flex-col items-center gap-1">
-      <div className="flex gap-1.5">
-        <button
-          type="button"
-          onClick={() => handleSettle("SETTLED_WIN")}
-          disabled={disabled}
-          aria-label="Mark bet as Won"
-          className="rounded-lg border border-green-500/30 bg-green-500/10 px-2 py-1 text-xs font-medium text-green-400 transition-colors hover:bg-green-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {pendingAction === "SETTLED_WIN" ? "…" : "🟢 Won"}
-        </button>
-        <button
-          type="button"
-          onClick={() => handleSettle("SETTLED_LOSS")}
-          disabled={disabled}
-          aria-label="Mark bet as Lost"
-          className="rounded-lg border border-red-500/30 bg-red-500/10 px-2 py-1 text-xs font-medium text-red-400 transition-colors hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {pendingAction === "SETTLED_LOSS" ? "…" : "🔴 Lost"}
-        </button>
-        <button
-          type="button"
-          onClick={() => handleSettle("VOID")}
-          disabled={disabled}
-          aria-label="Void bet"
-          className="rounded-lg border border-slate-500/30 bg-slate-500/10 px-2 py-1 text-xs font-medium text-slate-300 transition-colors hover:bg-slate-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {pendingAction === "VOID" ? "…" : "⚪ Void"}
-        </button>
-      </div>
-      {error && <p className="text-xs text-red-400">{error}</p>}
-    </div>
-  );
-}
+// Bet UI Design System — Active Bets and History are both read-only. Won/
+// Lost/Void are lifecycle statuses rendered by the shared StatusBadge, not
+// operator actions: the operator's only manual decision is Confirm/Reject
+// on a new request (BetQueueItem.tsx). Settlement itself (WON/LOST/VOID
+// determination, exposure/wallet/ledger updates, player notification) will
+// be automated by a separate future backend task; manual settlement will
+// then exist only as an exception workflow for bets that automation can't
+// resolve, once that pipeline and its real failure states exist — not
+// built here. The Won/Lost/Void POST endpoint this screen used to call
+// (app/api/dashboard/bets/[id]/settle/route.ts, lib/bets/settleBet.ts) is
+// left in place unchanged; it's simply no longer wired to any button.
 
 function MiniStat({
   label,
@@ -183,6 +121,71 @@ function MiniStat({
   );
 }
 
+// EXPRESS is inferred from selection count, not a `type` field — GET
+// /api/dashboard/players doesn't select Bet.type (not needed: a real
+// EXPRESS bet always has >1 BetSelection row, a real SINGLE bet always has
+// zero), matching the same established convention as
+// ActiveBetsScreen.tsx/HistoryScreen.tsx/BetQueueItem.tsx.
+function displayForBet(bet: PlayerBet) {
+  return mapBetForDisplay({ ...bet, type: bet.selections.length > 1 ? "EXPRESS" : "SINGLE" });
+}
+
+// Desktop table row for one bet — collapsed by default. A SINGLE row is
+// static (nothing to expand); an EXPRESS row shows a compact "Express ×N"
+// / joined-event-names summary and can be expanded to reveal the complete
+// shared SelectionList in a full-width row directly beneath it, so the
+// operator never has to leave the table to see every leg.
+function DesktopBetRow({ bet, tab }: { bet: PlayerBet; tab: Tab }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const display = displayForBet(bet);
+  const isExpress = display.selectionCount > 1;
+  const payout = computePotentialPayout(bet);
+  const columnCount = tab === "active" ? 7 : 6;
+
+  const eventLabel = isExpress ? `Express ×${display.selectionCount}` : display.displayTitle;
+  const selectionSummary = isExpress
+    ? display.selections.map((selection) => selection.event).join(" · ")
+    : display.displaySubtitle;
+
+  return (
+    <>
+      <tr className="border-t border-slate-800 text-center">
+        <td className="py-2 pr-4 text-white">
+          {isExpress ? (
+            <button
+              type="button"
+              onClick={() => setIsOpen((current) => !current)}
+              aria-expanded={isOpen}
+              aria-label={`${isOpen ? "Hide" : "Show"} all ${display.selectionCount} selections`}
+              className="inline-flex items-center gap-1.5 hover:text-blue-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-400"
+            >
+              <i className={`ti ti-chevron-${isOpen ? "down" : "right"} text-sm`} aria-hidden="true" />
+              {eventLabel}
+            </button>
+          ) : (
+            eventLabel
+          )}
+        </td>
+        <td className="max-w-[240px] truncate py-2 pr-4 text-slate-200">{selectionSummary}</td>
+        <td className="py-2 pr-4 text-white">{bet.stake}</td>
+        <td className="py-2 pr-4 text-slate-200">{bet.totalOdds ?? bet.odds ?? "—"}</td>
+        {tab === "active" && <td className="py-2 pr-4 text-green-400">{payout ?? "—"}</td>}
+        <td className="py-2 pr-4">
+          <StatusBadge status={bet.status} />
+        </td>
+        <td className="py-2 text-slate-200">{formatDateTime(tab === "active" ? bet.createdAt : bet.updatedAt)}</td>
+      </tr>
+      {isExpress && isOpen && (
+        <tr className="border-t border-slate-800/50">
+          <td colSpan={columnCount} className="bg-slate-950/40 px-4 py-3 text-left">
+            <SelectionList selections={display.selections} mode="full" showStatus showLegLabels />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
 function BetsTable({ bets, tab }: { bets: PlayerBet[]; tab: Tab }) {
   if (bets.length === 0) {
     return (
@@ -195,7 +198,7 @@ function BetsTable({ bets, tab }: { bets: PlayerBet[]; tab: Tab }) {
 
   return (
     <>
-      {/* Desktop (lg+): table */}
+      {/* Desktop (lg+): table — read-only, no Actions column. */}
       <div className="hidden overflow-x-auto lg:block">
         <table className="w-full text-left text-sm">
           <thead>
@@ -207,50 +210,41 @@ function BetsTable({ bets, tab }: { bets: PlayerBet[]; tab: Tab }) {
               {tab === "active" && <th className="pb-2 pr-4 font-normal">Potential payout</th>}
               <th className="pb-2 pr-4 font-normal">Status</th>
               <th className="pb-2 font-normal">{tab === "active" ? "Placed" : "Resolved"}</th>
-              {tab === "active" && <th className="pb-2 pl-4 font-normal">Actions</th>}
             </tr>
           </thead>
           <tbody>
-            {bets.map((bet) => {
-              const payout = computePotentialPayout(bet);
-              return (
-                <tr key={bet.id} className="border-t border-slate-800 text-center">
-                  <td className="py-2 pr-4 text-white">{bet.event}</td>
-                  <td className="py-2 pr-4 text-slate-200">{bet.outcome}</td>
-                  <td className="py-2 pr-4 text-white">{bet.stake}</td>
-                  <td className="py-2 pr-4 text-slate-200">{bet.totalOdds ?? bet.odds ?? "—"}</td>
-                  {tab === "active" && <td className="py-2 pr-4 text-green-400">{payout ?? "—"}</td>}
-                  <td className="py-2 pr-4">
-                    <StatusBadge status={bet.status} />
-                  </td>
-                  <td className="py-2 text-slate-200">
-                    {formatDateTime(tab === "active" ? bet.createdAt : bet.updatedAt)}
-                  </td>
-                  {tab === "active" && (
-                    <td className="py-2 pl-4">
-                      <SettleBetActions betId={bet.id} />
-                    </td>
-                  )}
-                </tr>
-              );
-            })}
+            {bets.map((bet) => (
+              <DesktopBetRow key={bet.id} bet={bet} tab={tab} />
+            ))}
           </tbody>
         </table>
       </div>
 
-      {/* Mobile + tablet (below lg): card list */}
+      {/* Mobile + tablet (below lg): card list — read-only. */}
       <div className="space-y-3 lg:hidden">
         {bets.map((bet) => {
+          const display = displayForBet(bet);
+          const isExpress = display.selectionCount > 1;
           const payout = computePotentialPayout(bet);
+
           return (
             <div key={bet.id} className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="font-semibold text-white">{bet.event}</p>
-                  <p className="text-sm text-slate-400">{bet.outcome}</p>
+                  <p className="font-semibold text-white">
+                    {isExpress ? `Express ×${display.selectionCount}` : display.displayTitle}
+                  </p>
+                  {!isExpress && <p className="text-sm text-slate-400">{display.displaySubtitle}</p>}
                 </div>
                 <StatusBadge status={bet.status} />
               </div>
+
+              {isExpress && (
+                <div className="mt-3">
+                  <SelectionList selections={display.selections} mode="list" showStatus={false} showLegLabels />
+                </div>
+              )}
+
               <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
                 <span className="text-slate-200">
                   {bet.stake} @ {bet.totalOdds ?? bet.odds ?? "—"}
@@ -258,11 +252,6 @@ function BetsTable({ bets, tab }: { bets: PlayerBet[]; tab: Tab }) {
                 {tab === "active" && payout && <span className="text-green-400">Payout {payout}</span>}
                 <span className="text-slate-500">{formatDateTime(tab === "active" ? bet.createdAt : bet.updatedAt)}</span>
               </div>
-              {tab === "active" && (
-                <div className="mt-3 flex justify-end">
-                  <SettleBetActions betId={bet.id} />
-                </div>
-              )}
             </div>
           );
         })}

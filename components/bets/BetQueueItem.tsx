@@ -2,20 +2,42 @@
 
 import { useState } from "react";
 import { dispatchDashboardRefresh } from "@/lib/dashboard/refreshEvent";
+import SelectionList from "./SelectionList";
+import { mapBetForDisplay } from "@/lib/bets/mapBetForDisplay";
+
+export interface PendingBetSelection {
+  id: string;
+  sport: string;
+  event: string;
+  outcome: string;
+  market: string | null;
+  odds: string | null;
+  currentOdds: string | null;
+  oddsStatus: string;
+}
 
 export interface PendingBet {
   id: string;
   playerId: string;
   player: { id: string; name: string };
   sport: string;
-  event: string;
-  outcome: string;
+  // Nullable to match the real Prisma contract — both are genuinely null
+  // for an EXPRESS bet (event/outcome live per-leg on selections instead).
+  // Already true on the wire; this type was simply never honest about it.
+  event: string | null;
+  outcome: string | null;
   odds: string | null;
+  totalOdds: string | null;
   stake: string;
   status: string;
   rawMessage: string | null;
   createdAt: string;
   updatedAt: string;
+  // Already present on every real API response (GET /api/bets/pending
+  // includes selections; the dashboard route proxies it unmodified) — just
+  // not previously declared here, which is the root cause of an EXPRESS
+  // Pending row rendering with a blank Event/Selection before this fix.
+  selections: PendingBetSelection[];
   oddsSnapshot: {
     id: string;
     sourceOdds: string | null;
@@ -73,22 +95,40 @@ export default function BetQueueItem({ bet, onResolved }: BetQueueItemProps) {
     }
   }
 
+  // EXPRESS is never given its own type of Bet on the client — inferred
+  // from selection count, same established convention as
+  // ActiveBetsScreen.tsx/HistoryScreen.tsx (a real EXPRESS bet always has
+  // >1 BetSelection row; a real SINGLE bet always has zero).
+  const display = mapBetForDisplay({
+    ...bet,
+    type: bet.selections.length > 1 ? "EXPRESS" : "SINGLE",
+  });
+  const isExpress = display.selectionCount > 1;
+  const effectiveOdds = bet.totalOdds ?? bet.odds;
+
   return (
     <div className="rounded-2xl border border-slate-800/70 bg-[#0b1220] p-6 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.04)]">
-      <div className="flex justify-between">
+      <div className="flex items-start justify-between gap-3">
         <div>
           <h3 className="text-xl font-semibold">{bet.player.name}</h3>
-
-          <p className="mt-2 text-slate-400">{bet.event}</p>
-
-          <p className="mt-1 text-slate-400">{bet.outcome}</p>
+          <p className="mt-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+            {isExpress ? `Express ×${display.selectionCount}` : "Single"}
+          </p>
         </div>
 
         <div className="text-right">
           <p className="text-2xl font-bold">{bet.stake}</p>
-
-          <p className="text-slate-400">Odds {bet.odds ?? "—"}</p>
+          <p className="text-slate-400">
+            {isExpress ? "Total odds" : "Odds"} {effectiveOdds ?? "—"}
+          </p>
         </div>
+      </div>
+
+      {/* Every selection is always fully rendered here, never collapsed —
+          the operator must see the complete bet before Confirm/Reject is
+          even reachable, at any leg count. */}
+      <div className="mt-4">
+        <SelectionList selections={display.selections} mode="full" showStatus showLegLabels={isExpress} />
       </div>
 
       {error && (
