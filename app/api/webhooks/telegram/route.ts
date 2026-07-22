@@ -1,21 +1,58 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/db/client";
+import type { PrismaClient } from "@/lib/generated/prisma/client";
 import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
 import { isTelegramWebhookAuthorized } from "@/lib/auth/telegramWebhookAuth";
 import { bindInvitedPlayerByTelegramUsername } from "@/lib/telegram/bindInvitedPlayer";
+import { handleScreenshotMessage } from "@/lib/telegram/handleScreenshotMessage";
+import type { TelegramUpdate } from "@/lib/telegram/telegramTypes";
 
-interface TelegramUpdate {
-  message?: {
-    date: number;
-    text?: string;
-    chat: { id: number };
-    // username is genuinely optional in the Bot API (not every Telegram
-    // account has one set) — closed-demo onboarding (see
-    // lib/telegram/bindInvitedPlayer.ts) is the only thing that reads it;
-    // everything else in this route is unaffected by its presence/absence.
-    from: { id: number; username?: string };
-  };
+// Stage 14.1 — this route previously declared its own inline, text-only
+// TelegramUpdate interface; it now imports the shared shape from
+// lib/telegram/telegramTypes.ts (extended with photo/document/caption/
+// update_id) so the screenshot-intake modules and this route can't drift
+// out of sync with two independently-maintained copies of the same API
+// shape.
+
+// Duplicate-delivery guard (Part 8) — Telegram retries a webhook delivery
+// whenever it doesn't get a prompt 200 back (slow cold start, transient
+// error, etc.), and this route previously had *no* deduplication at all: a
+// retried /start would just re-run bindInvitedPlayerByTelegramUsername
+// (already idempotent) and resend the welcome text; a retried screenshot
+// would re-download the file from Telegram and resend the "received"
+// acknowledgement. Neither case can create a duplicate Bet/Transaction —
+// nothing in this route or lib/telegram/handleScreenshotMessage.ts writes
+// one — so the only real-world impact is a duplicate outbound message and
+// wasted download bandwidth.
+//
+// No update_id-based deduplication exists anywhere else in the codebase
+// (confirmed by full-repo search) and Part 8 explicitly forbids adding a
+// schema change solely for this. This is the smallest safe mitigation that
+// fits the existing architecture: an in-memory, size-capped set of recently
+// seen update_ids, module-scoped to this route. It only protects against
+// redeliveries that land on the same warm serverless instance — a cold
+// start (or Fluid Compute routing the retry to a different instance) resets
+// it, so this is a best-effort reduction of duplicate replies, not a
+// guarantee. A guaranteed fix would need a persisted dedup key (e.g. a
+// unique index on update_id), which is exactly the kind of schema change
+// Part 8 says to stop and review separately rather than add here.
+const MAX_TRACKED_UPDATE_IDS = 500;
+const seenUpdateIds = new Set<number>();
+const updateIdOrder: number[] = [];
+
+function isDuplicateUpdate(updateId: number): boolean {
+  if (seenUpdateIds.has(updateId)) return true;
+
+  seenUpdateIds.add(updateId);
+  updateIdOrder.push(updateId);
+
+  if (updateIdOrder.length > MAX_TRACKED_UPDATE_IDS) {
+    const oldest = updateIdOrder.shift();
+    if (oldest !== undefined) seenUpdateIds.delete(oldest);
+  }
+
+  return false;
 }
 
 const WELCOME_TEXT =
@@ -58,13 +95,42 @@ function extractCommand(text: string): string | null {
   return command || null;
 }
 
-export async function POST(request: NextRequest) {
+// Injectable so tests can supply an in-memory fake db instead of the real
+// shared production database — same DI shape as
+// app/api/miniapp/bets/text/confirm/route.ts's handleBetConfirm and
+// app/api/bets/[id]/settle/route.ts's handleSettleBet. POST (the actual
+// Next.js route export) always calls this with no overrides.
+export interface HandleTelegramWebhookOptions {
+  db?: PrismaClient;
+}
+
+export async function handleTelegramWebhook(
+  request: NextRequest,
+  options: HandleTelegramWebhookOptions = {},
+): Promise<NextResponse> {
   if (!isTelegramWebhookAuthorized(request)) {
     return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
   }
 
+  const db = options.db ?? prisma;
+
   try {
-    const body = (await request.json()) as TelegramUpdate;
+    const rawBody: unknown = await request.json();
+
+    // Malformed/unexpected payload shapes (null, an array, a bare string,
+    // an object missing the fields below) must never crash this route —
+    // guarded explicitly here rather than relying only on the outer
+    // catch's TypeError safety net, so the intent is visible at the call
+    // site.
+    if (typeof rawBody !== "object" || rawBody === null) {
+      return NextResponse.json({ ok: true });
+    }
+
+    const body = rawBody as TelegramUpdate;
+
+    if (typeof body.update_id === "number" && isDuplicateUpdate(body.update_id)) {
+      return NextResponse.json({ ok: true });
+    }
 
     // Non-message updates (edited_message, callback_query, channel_post,
     // etc.) have no `message` field — nothing for us to process.
@@ -73,6 +139,18 @@ export async function POST(request: NextRequest) {
     }
 
     const tgMessage = body.message;
+
+    // Stage 14.1 — image handling takes priority over text handling: a
+    // photo/document message is fully handled (including whichever reply
+    // fits its outcome) and never falls through to the text branch below.
+    // This is also naturally exclusive already — Telegram puts a
+    // photo/document message's caption in `caption`, never in `text` — but
+    // checking image-first regardless makes that priority explicit rather
+    // than incidental.
+    const screenshotOutcome = await handleScreenshotMessage(tgMessage, { db });
+    if (screenshotOutcome.kind !== "NO_IMAGE") {
+      return NextResponse.json({ ok: true });
+    }
 
     // Non-text messages (stickers, photos without a caption, etc.) — ignore.
     if (!tgMessage.text) {
@@ -92,7 +170,7 @@ export async function POST(request: NextRequest) {
       // this route's existing outer catch, same as any other failure —
       // Telegram still gets an ok:true ack either way, just without the
       // welcome text on that one delivery.
-      await bindInvitedPlayerByTelegramUsername(prisma, String(tgMessage.from.id), tgMessage.from.username);
+      await bindInvitedPlayerByTelegramUsername(db, String(tgMessage.from.id), tgMessage.from.username);
 
       await sendTelegramMessage(chatId, WELCOME_TEXT, openAppKeyboard(origin));
       return NextResponse.json({ ok: true });
@@ -107,4 +185,8 @@ export async function POST(request: NextRequest) {
     console.error("POST /api/webhooks/telegram failed:", err);
     return NextResponse.json({ ok: true });
   }
+}
+
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  return handleTelegramWebhook(request);
 }
