@@ -1,9 +1,11 @@
 import type { ReactNode } from "react";
+import Image from "next/image";
 
-// Centralized sport -> icon system. Every icon here is a small, hand-drawn
-// local SVG (no @tabler/icons-react, no lucide-react, no emoji, no images) —
-// each sport gets its own distinct silhouette so cards read at a glance
-// without needing the text label next to it.
+// Centralized sport -> icon system. Football/basketball/tennis/hockey render
+// prepared, realistic PNG artwork from public/icons/sports/ (no emoji, no
+// Unicode symbols, no Tabler/Lucide/Material icon for these four); every
+// other sport still falls back to a small hand-drawn local SVG. Each sport
+// gets its own distinct glyph so cards read at a glance without a text label.
 //
 // Used by BetScreen.tsx's "Последняя активность" list, ActiveBetsScreen.tsx
 // and HistoryScreen.tsx's card lists, and BetTicket.tsx's per-selection rows
@@ -41,58 +43,42 @@ function IconBase({ size = 22, className, children }: SportSvgProps & { children
   );
 }
 
-// Soccer ball: outer circle + a центральный pentagon + five short seams
-// radiating out from each pentagon vertex toward the rim.
+// Image-based icons (Football/Basketball/Tennis/Hockey, per-request) —
+// prepared, realistic PNG artwork from public/icons/sports/, not line art.
+// 28px default (per spec) but still honors an explicit `size` override, so
+// a dense context like BetTicket.tsx's per-leg row can still request a
+// smaller render.
+const SPORT_IMAGE_SIZE = 28;
+
+function ImageSportIcon({ src, size = SPORT_IMAGE_SIZE, className }: SportSvgProps & { src: string }) {
+  const px = typeof size === "number" ? size : SPORT_IMAGE_SIZE;
+  return (
+    <Image
+      src={src}
+      alt=""
+      aria-hidden="true"
+      width={px}
+      height={px}
+      className={className}
+      style={{ width: px, height: px, objectFit: "contain" }}
+    />
+  );
+}
+
 export function FootballIcon({ size, className }: SportSvgProps) {
-  return (
-    <IconBase size={size} className={className}>
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 7.6l2.9 2.1-1.1 3.4h-3.6l-1.1-3.4z" />
-      <path d="M12 7.6V4.2" />
-      <path d="M14.9 9.7l2.7-1.8" />
-      <path d="M13.8 13.1l1.1 3.4" />
-      <path d="M10.2 13.1l-1.1 3.4" />
-      <path d="M9.1 9.7L6.4 7.9" />
-    </IconBase>
-  );
+  return <ImageSportIcon src="/icons/sports/football.png" size={size} className={className} />;
 }
 
-// Basketball: circle + a vertical/horizontal cross + two curved side seams
-// bulging inward — the classic four-panel basketball look.
 export function BasketballIcon({ size, className }: SportSvgProps) {
-  return (
-    <IconBase size={size} className={className}>
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 3v18" />
-      <path d="M3 12h18" />
-      <path d="M5.3 5.3c2.4 2.6 2.4 11 0 13.4" />
-      <path d="M18.7 5.3c-2.4 2.6-2.4 11 0 13.4" />
-    </IconBase>
-  );
+  return <ImageSportIcon src="/icons/sports/basketball.png" size={size} className={className} />;
 }
 
-// Tennis ball: circle + exactly two curved seams near the edges (no cross),
-// so the silhouette stays visually distinct from the basketball.
 export function TennisIcon({ size, className }: SportSvgProps) {
-  return (
-    <IconBase size={size} className={className}>
-      <circle cx="12" cy="12" r="9" />
-      <path d="M7 4.5c3 3 3 12 0 15" />
-      <path d="M17 4.5c-3 3-3 12 0 15" />
-    </IconBase>
-  );
+  return <ImageSportIcon src="/icons/sports/tennis.png" size={size} className={className} />;
 }
 
-// Hockey: a real stick (angled shaft + blade) next to a flattened puck —
-// deliberately not a plain circle/cylinder.
 export function HockeyIcon({ size, className }: SportSvgProps) {
-  return (
-    <IconBase size={size} className={className}>
-      <ellipse cx="7.6" cy="18.6" rx="3.3" ry="1.3" />
-      <path d="M16 3l-5 12.2" />
-      <path d="M11 15.2l5 1.2" />
-    </IconBase>
-  );
+  return <ImageSportIcon src="/icons/sports/hockey.png" size={size} className={className} />;
 }
 
 // Baseball: circle + two curved seams, each crossed by small stitch ticks —
@@ -220,10 +206,10 @@ export interface SportIconProps {
 }
 
 // The one place every screen renders a sport glyph through — callers never
-// know or care which local icon a given sport resolves to. No wrapper
-// element: renders exactly the icon's own <svg>, so the 36x36 container/
-// background styling stays the caller's responsibility.
-export function SportIcon({ sport, size = 22, className }: SportIconProps) {
+// know or care whether a given sport resolves to a PNG image or a hand-drawn
+// SVG. No wrapper element: renders exactly the icon's own <img>/<svg>, so the
+// 36x36 container/background styling stays the caller's responsibility.
+export function SportIcon({ sport, size = 28, className }: SportIconProps) {
   const Icon = getSportIconComponent(sport);
   // eslint-disable-next-line react-hooks/static-components -- Icon is picked from a fixed, module-level map of never-redefined component references, not created during render.
   return <Icon size={size} className={className} />;

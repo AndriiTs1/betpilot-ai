@@ -212,7 +212,7 @@ export default function BetScreen({
                       className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
                       style={{ background: "rgba(59,130,246,0.14)" }}
                     >
-                      <SportIcon sport={bet.sport} size={22} className="text-slate-200" />
+                      <SportIcon sport={bet.sport} size={28} className="text-slate-200" />
                     </span>
                     <p className="min-w-0 truncate text-sm font-medium text-white">
                       {bet.selections && bet.selections.length > 1
