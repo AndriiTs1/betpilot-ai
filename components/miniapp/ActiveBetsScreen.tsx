@@ -1,7 +1,7 @@
 import { Check } from "lucide-react";
 import StatusBadge from "@/components/bets/StatusBadge";
 import BetSelectionsList from "./BetSelectionsList";
-import { formatCompactDate } from "./formatCompactDate";
+import { formatBetDate } from "./formatBetDate";
 import { SportIcon } from "./sportIcons";
 import type { RecentBet } from "./types";
 
@@ -67,10 +67,10 @@ export default function ActiveBetsScreen({ recentBets }: ActiveBetsScreenProps) 
                   at the same x position regardless of event/outcome length. */}
               <div className="flex items-start gap-2">
                 <span
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
-                  style={{ background: "rgba(59,130,246,0.10)" }}
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
+                  style={{ background: "rgba(59,130,246,0.14)" }}
                 >
-                  <SportIcon sport={bet.sport} size={18} stroke={2} className="text-slate-400" />
+                  <SportIcon sport={bet.sport} size={22} className="text-slate-200" />
                 </span>
 
                 <div className="min-w-0 flex-1">
@@ -91,7 +91,7 @@ export default function ActiveBetsScreen({ recentBets }: ActiveBetsScreenProps) 
                       {(bet.selections && bet.selections.length > 1 ? bet.totalOdds : bet.odds) ?? "—"}
                     </span>
                     <ActiveStatus status={bet.status} />
-                    <span className="shrink-0 text-slate-400">{formatCompactDate(bet.createdAt)}</span>
+                    <span className="shrink-0 text-slate-400">{formatBetDate(bet.createdAt)}</span>
                   </div>
                 </div>
               </div>

@@ -242,7 +242,7 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
                   </p>
                 )}
                 <div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-slate-500">
-                  <SportIcon sport={selection.sport} size={13} stroke={2} />
+                  <SportIcon sport={selection.sport} size={15} />
                   {selection.sport}
                   {selection.league ? ` · ${selection.league}` : ""}
                 </div>

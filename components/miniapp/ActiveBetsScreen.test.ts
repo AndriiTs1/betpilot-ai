@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { IconBallFootball, IconBallBasketball, IconBallTennis, IconTrophy } from "@tabler/icons-react";
-import { getSportIconComponent, HockeyPuckIcon } from "./sportIcons";
+import { FootballIcon, BasketballIcon, TennisIcon, HockeyIcon, TrophyIcon } from "./sportIcons";
+import { getSportIconComponent } from "./sportIcons";
 import { ACTIVE_STATUSES } from "./ActiveBetsScreen";
 import type { RecentBet } from "./types";
 
@@ -47,7 +47,7 @@ test("ActiveBetsScreen: each active bet resolves to its own correct sport icon",
     bet({ id: "4", sport: "Hockey" }),
   ];
 
-  assert.deepEqual(activeCardIcons(bets), [IconBallFootball, IconBallTennis, IconBallBasketball, HockeyPuckIcon]);
+  assert.deepEqual(activeCardIcons(bets), [FootballIcon, TennisIcon, BasketballIcon, HockeyIcon]);
 });
 
 test("ActiveBetsScreen: a mixed-sport active list shows independent icons per card, in order", () => {
@@ -58,17 +58,12 @@ test("ActiveBetsScreen: a mixed-sport active list shows independent icons per ca
     bet({ id: "4", sport: "Tennis" }),
   ];
 
-  assert.deepEqual(activeCardIcons(bets), [
-    IconBallBasketball,
-    IconBallFootball,
-    IconBallBasketball,
-    IconBallTennis,
-  ]);
+  assert.deepEqual(activeCardIcons(bets), [BasketballIcon, FootballIcon, BasketballIcon, TennisIcon]);
 });
 
 test("ActiveBetsScreen: an unknown sport falls back to the neutral Trophy icon", () => {
   const bets = [bet({ id: "1", sport: "Darts" }), bet({ id: "2", sport: "" })];
-  assert.deepEqual(activeCardIcons(bets), [IconTrophy, IconTrophy]);
+  assert.deepEqual(activeCardIcons(bets), [TrophyIcon, TrophyIcon]);
 });
 
 test("ActiveBetsScreen: PENDING and CONFIRMED both count as active and get their own icon; settled/rejected bets are filtered out before icon resolution", () => {
@@ -82,10 +77,10 @@ test("ActiveBetsScreen: PENDING and CONFIRMED both count as active and get their
   // Only the two active bets (1, 2) are ever passed through
   // getSportIconComponent — the settled/rejected ones never reach the card
   // list at all.
-  assert.deepEqual(activeCardIcons(bets), [IconBallFootball, IconBallTennis]);
+  assert.deepEqual(activeCardIcons(bets), [FootballIcon, TennisIcon]);
 });
 
 test("ActiveBetsScreen: sport icon resolution is case-insensitive per card, matching getSportIconComponent's own contract", () => {
   const bets = [bet({ id: "1", sport: "FOOTBALL" }), bet({ id: "2", sport: "tennis" })];
-  assert.deepEqual(activeCardIcons(bets), [IconBallFootball, IconBallTennis]);
+  assert.deepEqual(activeCardIcons(bets), [FootballIcon, TennisIcon]);
 });

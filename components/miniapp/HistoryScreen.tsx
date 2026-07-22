@@ -1,7 +1,7 @@
 import StatusBadge from "@/components/bets/StatusBadge";
 import BetSelectionsList from "./BetSelectionsList";
 import { SportIcon } from "./sportIcons";
-import { formatCompactDate } from "./formatCompactDate";
+import { formatBetDate } from "./formatBetDate";
 import type { RecentBet } from "./types";
 
 interface HistoryScreenProps {
@@ -32,10 +32,10 @@ export default function HistoryScreen({ recentBets }: HistoryScreenProps) {
                   title, not centered against the whole card. */}
               <div className="flex items-start gap-2">
                 <span
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
-                  style={{ background: "rgba(59,130,246,0.10)" }}
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
+                  style={{ background: "rgba(59,130,246,0.14)" }}
                 >
-                  <SportIcon sport={bet.sport} size={18} stroke={2} className="text-slate-400" />
+                  <SportIcon sport={bet.sport} size={22} className="text-slate-200" />
                 </span>
 
                 <div className="min-w-0 flex-1">
@@ -50,14 +50,10 @@ export default function HistoryScreen({ recentBets }: HistoryScreenProps) {
                       {(bet.selections && bet.selections.length > 1 ? bet.totalOdds : bet.odds) ?? "—"}
                     </span>
                     <StatusBadge status={bet.status} />
-                    {/* Compact date (Today/Yesterday/"D Mon"/"D Mon YYYY")
-                        instead of the previous full Russian long form
-                        ("21 июля 2026 г.") — same helper ActiveBetsScreen.tsx
-                        already uses, for a consistent date language across
-                        both card lists. Never wraps to a second line: it's
-                        short enough at 320px that shrink-0 + the stake
-                        span's own truncate is enough on its own now. */}
-                    <span className="shrink-0 text-slate-400">{formatCompactDate(bet.createdAt)}</span>
+                    {/* Fixed-width DD.MM.YY — same helper ActiveBetsScreen.tsx
+                        uses, for a consistent date format across both card
+                        lists. Never wraps to a second line at 320px. */}
+                    <span className="shrink-0 text-slate-400">{formatBetDate(bet.createdAt)}</span>
                   </div>
                 </div>
               </div>
