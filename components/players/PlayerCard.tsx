@@ -4,6 +4,7 @@ import { useId, useState } from "react";
 import StatusBadge from "@/components/bets/StatusBadge";
 import EmptyState from "@/components/dashboard/EmptyState";
 import { formatDisplayNumber } from "@/lib/format/number";
+import { dispatchDashboardRefresh } from "@/lib/dashboard/refreshEvent";
 
 export interface PlayerBet {
   id: string;
@@ -67,6 +68,100 @@ function computePotentialPayout(bet: PlayerBet): string | null {
   return payout.toFixed(2);
 }
 
+// Stage 13.5 — settlement actions for a CONFIRMED bet. Only ever rendered
+// in the Active Bets tab, whose `bets` array GET /api/dashboard/players
+// already filters to `status === "CONFIRMED"` server-side (see
+// app/api/dashboard/players/route.ts) — so there's no separate per-row
+// status check needed here; every bet this component is ever given is
+// already eligible.
+type SettlementStatus = "SETTLED_WIN" | "SETTLED_LOSS" | "VOID";
+
+interface SettleErrorBody {
+  success: false;
+  error: { code: string; message: string };
+}
+
+// Same local-state, disable-while-pending, inline-error shape as
+// BetQueueItem.tsx's handleAction/pendingAction/error — this is that exact
+// convention's settlement counterpart, one level down (per-row inside
+// PlayerCard's Active Bets table instead of the separate Pending queue).
+function SettleBetActions({ betId }: { betId: string }) {
+  const [pendingAction, setPendingAction] = useState<SettlementStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSettle(status: SettlementStatus) {
+    // Only VOID is a decision worth a confirmation prompt — Won/Lost are
+    // the expected, routine outcomes of a bet; Void is the unusual one.
+    if (status === "VOID" && !window.confirm("Void this bet?")) {
+      return;
+    }
+
+    setPendingAction(status);
+    setError(null);
+
+    try {
+      const response = await fetch(`/api/dashboard/bets/${betId}/settle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+
+      if (response.ok) {
+        // The bet's new status moves it out of Active Bets and into
+        // History on the next refetch — no local mutation of this row is
+        // needed or attempted; this component simply unmounts once fresh
+        // props arrive.
+        dispatchDashboardRefresh();
+        return;
+      }
+
+      const body = (await response.json().catch(() => null)) as SettleErrorBody | null;
+      setError(body?.error?.message ?? "Не удалось выполнить действие. Попробуйте ещё раз.");
+    } catch {
+      setError("Не удалось связаться с сервером. Проверьте соединение.");
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  const disabled = pendingAction !== null;
+
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <div className="flex gap-1.5">
+        <button
+          type="button"
+          onClick={() => handleSettle("SETTLED_WIN")}
+          disabled={disabled}
+          aria-label="Mark bet as Won"
+          className="rounded-lg border border-green-500/30 bg-green-500/10 px-2 py-1 text-xs font-medium text-green-400 transition-colors hover:bg-green-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {pendingAction === "SETTLED_WIN" ? "…" : "🟢 Won"}
+        </button>
+        <button
+          type="button"
+          onClick={() => handleSettle("SETTLED_LOSS")}
+          disabled={disabled}
+          aria-label="Mark bet as Lost"
+          className="rounded-lg border border-red-500/30 bg-red-500/10 px-2 py-1 text-xs font-medium text-red-400 transition-colors hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {pendingAction === "SETTLED_LOSS" ? "…" : "🔴 Lost"}
+        </button>
+        <button
+          type="button"
+          onClick={() => handleSettle("VOID")}
+          disabled={disabled}
+          aria-label="Void bet"
+          className="rounded-lg border border-slate-500/30 bg-slate-500/10 px-2 py-1 text-xs font-medium text-slate-300 transition-colors hover:bg-slate-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {pendingAction === "VOID" ? "…" : "⚪ Void"}
+        </button>
+      </div>
+      {error && <p className="text-xs text-red-400">{error}</p>}
+    </div>
+  );
+}
+
 function MiniStat({
   label,
   value,
@@ -112,6 +207,7 @@ function BetsTable({ bets, tab }: { bets: PlayerBet[]; tab: Tab }) {
               {tab === "active" && <th className="pb-2 pr-4 font-normal">Potential payout</th>}
               <th className="pb-2 pr-4 font-normal">Status</th>
               <th className="pb-2 font-normal">{tab === "active" ? "Placed" : "Resolved"}</th>
+              {tab === "active" && <th className="pb-2 pl-4 font-normal">Actions</th>}
             </tr>
           </thead>
           <tbody>
@@ -130,6 +226,11 @@ function BetsTable({ bets, tab }: { bets: PlayerBet[]; tab: Tab }) {
                   <td className="py-2 text-slate-200">
                     {formatDateTime(tab === "active" ? bet.createdAt : bet.updatedAt)}
                   </td>
+                  {tab === "active" && (
+                    <td className="py-2 pl-4">
+                      <SettleBetActions betId={bet.id} />
+                    </td>
+                  )}
                 </tr>
               );
             })}
@@ -157,6 +258,11 @@ function BetsTable({ bets, tab }: { bets: PlayerBet[]; tab: Tab }) {
                 {tab === "active" && payout && <span className="text-green-400">Payout {payout}</span>}
                 <span className="text-slate-500">{formatDateTime(tab === "active" ? bet.createdAt : bet.updatedAt)}</span>
               </div>
+              {tab === "active" && (
+                <div className="mt-3 flex justify-end">
+                  <SettleBetActions betId={bet.id} />
+                </div>
+              )}
             </div>
           );
         })}
