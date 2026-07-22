@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { toBetTicketData } from "./BetScreen";
 import type { ConfirmedBet, ConfirmedExpressBet, ConfirmedExpressSelection } from "./betConfirmApi";
 
@@ -154,4 +156,35 @@ test("toBetTicketData: repeated calls with the same confirmed bet (simulating an
   const first = toBetTicketData(bet, "Andrii", "9390");
   const second = toBetTicketData(bet, "Andrii", "9390");
   assert.deepEqual(first, second);
+});
+
+// ---------------------------------------------------------------------
+// Data-freshness fix — BetTextForm and BetScreenshotForm must both feed
+// the exact same confirmation-update path (handleConfirmed), never two
+// separate handlers. This project has no DOM-rendering test infra (see
+// ActiveBetsScreen.test.ts's own comment), so this is a source-level
+// regression guard rather than a rendered-tree assertion: it fails loudly
+// if BetScreen.tsx is ever changed to wire the two forms to different
+// callbacks, or if handleConfirmed stops forwarding to the page-level
+// onBetConfirmed callback (components/miniapp/mergeConfirmedBet.ts /
+// app/miniapp/page.tsx) that actually does the optimistic merge.
+// ---------------------------------------------------------------------
+
+test("BetScreen: BetTextForm and BetScreenshotForm are both wired to the exact same onConfirmed handler", () => {
+  const source = readFileSync(fileURLToPath(new URL("./BetScreen.tsx", import.meta.url)), "utf8");
+
+  // [\s\S]*? (not [^>]*) — these JSX elements' own props can contain
+  // arrow functions (e.g. onBack={() => ...}), which include a literal
+  // ">" that would otherwise truncate a "stop at the next >" pattern
+  // before ever reaching onConfirmed=.
+  const textFormMatch = source.match(/<BetTextForm[\s\S]*?onConfirmed=\{(\w+)\}[\s\S]*?\/>/);
+  const screenshotFormMatch = source.match(/<BetScreenshotForm[\s\S]*?onConfirmed=\{(\w+)\}[\s\S]*?\/>/);
+
+  assert.ok(textFormMatch, "expected BetTextForm to be wired to an onConfirmed handler");
+  assert.ok(screenshotFormMatch, "expected BetScreenshotForm to be wired to an onConfirmed handler");
+  assert.equal(textFormMatch![1], screenshotFormMatch![1], "both forms must share the exact same handler");
+
+  // And that shared handler must actually forward to the page-level
+  // optimistic-merge callback, not just set local ticket state.
+  assert.match(source, /onBetConfirmed\(bet\)/);
 });

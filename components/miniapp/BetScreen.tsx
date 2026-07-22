@@ -18,6 +18,13 @@ interface BetScreenProps {
   exposure: string;
   pendingExposure: string;
   recentBets: RecentBet[];
+  // Data-freshness fix — the one shared confirmation-update path both
+  // BetTextForm and BetScreenshotForm feed into below (via a single local
+  // handleConfirmed), rather than either form talking to the Mini App's
+  // page-level data owner directly. Optimistically merges the confirmed
+  // bet into recentBets and kicks off a silent background reconciliation —
+  // see components/miniapp/mergeConfirmedBet.ts and app/miniapp/page.tsx.
+  onBetConfirmed: (bet: AnyConfirmedBet) => void;
   onNavigateToHistory: () => void;
 }
 
@@ -85,6 +92,7 @@ export default function BetScreen({
   exposure,
   pendingExposure,
   recentBets,
+  onBetConfirmed,
   onNavigateToHistory,
 }: BetScreenProps) {
   const [isSheetOpen, setSheetOpen] = useState(false);
@@ -94,6 +102,16 @@ export default function BetScreen({
   // whitelisted server response only, never previewId/playerId/previewToken.
   const [confirmedBet, setConfirmedBet] = useState<AnyConfirmedBet | null>(null);
   const recentActivity = recentBets.slice(0, RECENT_ACTIVITY_LIMIT);
+
+  // The single shared confirmation-update path — sets the local ticket
+  // state (unchanged UI concern) and, in the same call, feeds the
+  // page-level optimistic-merge + background-reconciliation path. Both
+  // forms below are wired to this exact same function reference, never two
+  // separate handlers.
+  const handleConfirmed = (bet: AnyConfirmedBet) => {
+    setConfirmedBet(bet);
+    onBetConfirmed(bet);
+  };
 
   const closeSheet = () => setSheetOpen(false);
 
@@ -127,12 +145,12 @@ export default function BetScreen({
   }
 
   if (isTextFormOpen) {
-    return <BetTextForm onBack={() => setTextFormOpen(false)} onConfirmed={setConfirmedBet} />;
+    return <BetTextForm onBack={() => setTextFormOpen(false)} onConfirmed={handleConfirmed} />;
   }
 
   if (isScreenshotFormOpen) {
     return (
-      <BetScreenshotForm onBack={() => setScreenshotFormOpen(false)} onConfirmed={setConfirmedBet} />
+      <BetScreenshotForm onBack={() => setScreenshotFormOpen(false)} onConfirmed={handleConfirmed} />
     );
   }
 

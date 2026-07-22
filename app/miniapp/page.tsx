@@ -10,6 +10,8 @@ import HistoryScreen from "@/components/miniapp/HistoryScreen";
 import BalanceScreen from "@/components/miniapp/BalanceScreen";
 import WelcomeBanner from "@/components/miniapp/WelcomeBanner";
 import type { MiniAppTab, MeResponse } from "@/components/miniapp/types";
+import type { AnyConfirmedBet } from "@/components/miniapp/betConfirmApi";
+import { applyMiniAppDataAction } from "@/components/miniapp/mergeConfirmedBet";
 
 interface TelegramWebApp {
   initData: string;
@@ -80,6 +82,53 @@ export default function MiniAppPage() {
       setFetchState({ status: "error", reason: "network" });
     }
   }, []);
+
+  // Background reconciliation (data-freshness fix) — deliberately never
+  // sets `status: "loading"` (that would blank the whole screen) and never
+  // sets `status: "error"` on failure (the player already sees the
+  // optimistically-confirmed bet; a failed background refresh must not
+  // take that away or show an error page over it). A no-op on any failure
+  // path — whatever's already in `fetchState` (including an optimistic
+  // BET_CONFIRMED merge) simply stays.
+  const refreshDataSilently = useCallback(async () => {
+    const tg = window.Telegram?.WebApp;
+    if (!tg) return;
+
+    try {
+      const response = await fetch("/api/miniapp/me", {
+        headers: { Authorization: `tma ${tg.initData}` },
+      });
+
+      if (!response.ok) return;
+
+      const data = (await response.json()) as MeResponse;
+      setFetchState((prev) =>
+        prev.status !== "ready"
+          ? prev
+          : { status: "ready", data: applyMiniAppDataAction(prev.data, { type: "BACKGROUND_REFRESH_SUCCESS", data }) },
+      );
+    } catch {
+      // Best-effort — see this function's own header comment.
+    }
+  }, []);
+
+  // The one shared confirmation-update path both BetTextForm and
+  // BetScreenshotForm now feed into via BetScreen.tsx's single
+  // onBetConfirmed prop — never duplicated between the two forms. Merges
+  // the confirmed bet in immediately (synchronous, so it's visible before
+  // the player ever taps Done/View History — no waiting on the network),
+  // then fires a background reconciliation fetch without awaiting it.
+  const handleBetConfirmed = useCallback(
+    (bet: AnyConfirmedBet) => {
+      setFetchState((prev) =>
+        prev.status !== "ready"
+          ? prev
+          : { status: "ready", data: applyMiniAppDataAction(prev.data, { type: "BET_CONFIRMED", bet }) },
+      );
+      void refreshDataSilently();
+    },
+    [refreshDataSilently],
+  );
 
   const handleScriptReady = useCallback(() => {
     const tg = window.Telegram?.WebApp;
@@ -156,7 +205,7 @@ export default function MiniAppPage() {
       {screen === "banner" ? (
         <BannerScreen ready={scriptReady} viewportHeight={viewportStableHeight} />
       ) : (
-        <DataScreen state={fetchState} onRetry={loadData} />
+        <DataScreen state={fetchState} onRetry={loadData} onBetConfirmed={handleBetConfirmed} />
       )}
     </>
   );
@@ -225,7 +274,15 @@ function BannerScreen({
   );
 }
 
-function DataScreen({ state, onRetry }: { state: FetchState; onRetry: () => void }) {
+function DataScreen({
+  state,
+  onRetry,
+  onBetConfirmed,
+}: {
+  state: FetchState;
+  onRetry: () => void;
+  onBetConfirmed: (bet: AnyConfirmedBet) => void;
+}) {
   const [activeTab, setActiveTab] = useState<MiniAppTab>("bet");
 
   if (state.status === "loading") {
@@ -269,6 +326,7 @@ function DataScreen({ state, onRetry }: { state: FetchState; onRetry: () => void
             exposure={data.exposure}
             pendingExposure={data.pendingExposure}
             recentBets={data.recentBets}
+            onBetConfirmed={onBetConfirmed}
             onNavigateToHistory={() => setActiveTab("history")}
           />
         )}
