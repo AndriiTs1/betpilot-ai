@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { NextRequest } from "next/server";
 import type { PrismaClient } from "@/lib/generated/prisma/client";
 import { handleTelegramWebhook } from "./route";
+import type { OcrProvider, OcrResult } from "@/lib/ocr/ocrTypes";
 
 // Route-level tests — everything screenshot-intake-specific is already
 // covered in depth by lib/telegram/handleScreenshotMessage.test.ts and
@@ -27,6 +28,29 @@ interface FakePlayerRow {
   telegramId: string | null;
 }
 
+// Stage 14.2 — deterministic fake OCR provider (Part 8: no real provider, no
+// real API key, no real network in any route-level test either). Every
+// postUpdate() call below defaults to a provider that always "recognizes"
+// fixed text, so a route test that doesn't care about OCR specifically
+// never touches ANTHROPIC_API_KEY or the real Claude adapter.
+let ocrRecognizeCallCount = 0;
+
+function defaultFakeOcrProvider(): OcrProvider {
+  return {
+    name: "fake-route-ocr-provider",
+    recognize: async (): Promise<OcrResult> => {
+      ocrRecognizeCallCount += 1;
+      return {
+        kind: "SUCCESS",
+        provider: "fake-route-ocr-provider",
+        rawText: "Real Madrid vs Barcelona",
+        normalizedText: "Real Madrid vs Barcelona",
+        durationMs: 1,
+      };
+    },
+  };
+}
+
 function fakeDb(players: FakePlayerRow[] = []): PrismaClient {
   return {
     player: {
@@ -47,6 +71,7 @@ test.beforeEach(() => {
   process.env.TELEGRAM_WEBHOOK_SECRET = WEBHOOK_SECRET;
   process.env.TELEGRAM_BOT_TOKEN = "test-bot-token";
   sentMessages = [];
+  ocrRecognizeCallCount = 0;
 
   global.fetch = (async (url: string | URL, init?: RequestInit) => {
     const urlStr = String(url);
@@ -71,7 +96,11 @@ test.afterEach(() => {
   global.fetch = originalFetch;
 });
 
-function postUpdate(body: unknown, db: PrismaClient = fakeDb()): Promise<Response> {
+function postUpdate(
+  body: unknown,
+  db: PrismaClient = fakeDb(),
+  ocrProvider: OcrProvider = defaultFakeOcrProvider(),
+): Promise<Response> {
   const request = new NextRequest("https://example.com/api/webhooks/telegram", {
     method: "POST",
     headers: {
@@ -80,7 +109,7 @@ function postUpdate(body: unknown, db: PrismaClient = fakeDb()): Promise<Respons
     },
     body: JSON.stringify(body),
   });
-  return handleTelegramWebhook(request, { db });
+  return handleTelegramWebhook(request, { db, ocrProvider });
 }
 
 test("webhook: rejects a request missing the secret token", async () => {
@@ -198,7 +227,7 @@ test("webhook: a photo message for an unregistered account does not fall through
   assert.ok(!sentMessages.some((m) => m.text === "Для работы откройте приложение BetPilot AI."));
 });
 
-test("webhook: a photo message for a registered account is accepted end-to-end through the route", async () => {
+test("webhook: a photo message for a registered account is recognized end-to-end through the route", async () => {
   const response = await postUpdate(
     {
       update_id: 203,
@@ -215,5 +244,28 @@ test("webhook: a photo message for a registered account is accepted end-to-end t
 
   assert.equal(response.status, 200);
   assert.equal(sentMessages.length, 1);
-  assert.match(sentMessages[0].text, /^✅ Скриншот получен/);
+  assert.match(sentMessages[0].text, /^✅ Текст со скриншота распознан/);
+  assert.equal(ocrRecognizeCallCount, 1);
+});
+
+test("webhook: a repeated update_id does not cause a duplicate OCR call on the same warm instance", async () => {
+  const update = {
+    update_id: 204,
+    message: {
+      message_id: 5,
+      date: 1700000000,
+      chat: { id: 781 },
+      from: { id: 46 },
+      photo: [{ file_id: "ph-1", file_unique_id: "u-ph-1", width: 100, height: 100, file_size: 1000 }],
+    },
+  };
+  const db = fakeDb([{ id: "player-synthetic-route-2", telegramId: "46" }]);
+
+  const first = await postUpdate(update, db);
+  const second = await postUpdate(update, db);
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(ocrRecognizeCallCount, 1, "the OCR provider must only be invoked once, for the first delivery");
+  assert.equal(sentMessages.length, 1);
 });

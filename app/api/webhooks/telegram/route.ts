@@ -7,6 +7,7 @@ import { isTelegramWebhookAuthorized } from "@/lib/auth/telegramWebhookAuth";
 import { bindInvitedPlayerByTelegramUsername } from "@/lib/telegram/bindInvitedPlayer";
 import { handleScreenshotMessage } from "@/lib/telegram/handleScreenshotMessage";
 import type { TelegramUpdate } from "@/lib/telegram/telegramTypes";
+import type { OcrProvider } from "@/lib/ocr/ocrTypes";
 
 // Stage 14.1 — this route previously declared its own inline, text-only
 // TelegramUpdate interface; it now imports the shared shape from
@@ -102,6 +103,10 @@ function extractCommand(text: string): string | null {
 // Next.js route export) always calls this with no overrides.
 export interface HandleTelegramWebhookOptions {
   db?: PrismaClient;
+  // Stage 14.2 — same DI shape as db: tests inject a deterministic fake OCR
+  // provider (see app/api/webhooks/telegram/route.test.ts), production
+  // always gets handleScreenshotMessage's own real Claude-backed default.
+  ocrProvider?: OcrProvider;
 }
 
 export async function handleTelegramWebhook(
@@ -147,7 +152,7 @@ export async function handleTelegramWebhook(
     // photo/document message's caption in `caption`, never in `text` — but
     // checking image-first regardless makes that priority explicit rather
     // than incidental.
-    const screenshotOutcome = await handleScreenshotMessage(tgMessage, { db });
+    const screenshotOutcome = await handleScreenshotMessage(tgMessage, { db, ocrProvider: options.ocrProvider });
     if (screenshotOutcome.kind !== "NO_IMAGE") {
       return NextResponse.json({ ok: true });
     }
