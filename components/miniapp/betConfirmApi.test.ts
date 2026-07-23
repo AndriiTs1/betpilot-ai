@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fetchBetConfirm } from "./betConfirmApi";
+import { fetchBetConfirm, getBetConfirmErrorMessage } from "./betConfirmApi";
 
 // Stubs the global fetch this module calls internally — no new dependency,
 // Node's native fetch/Response are already used throughout this project.
@@ -139,4 +139,38 @@ test("fetchBetConfirm: a 422 PREVIEW_INVALID error response is still surfaced (u
   } finally {
     restore();
   }
+});
+
+// ---------------------------------------------------------------------
+// getBetConfirmErrorMessage — Telegram auth error unification
+// ---------------------------------------------------------------------
+
+test("getBetConfirmErrorMessage: expired gets the shared, distinct expired message", () => {
+  const message = getBetConfirmErrorMessage({ kind: "http", code: "expired" });
+  assert.equal(message, "Your Telegram session has expired. Close and reopen the Mini App through the bot.");
+});
+
+test("getBetConfirmErrorMessage: malformed and invalid_signature share the same message as each other", () => {
+  const malformed = getBetConfirmErrorMessage({ kind: "http", code: "malformed" });
+  const invalidSignature = getBetConfirmErrorMessage({ kind: "http", code: "invalid_signature" });
+
+  assert.equal(malformed, "Unable to verify your Telegram session. Close and reopen the Mini App through the bot.");
+  assert.equal(malformed, invalidSignature);
+  assert.notEqual(malformed, getBetConfirmErrorMessage({ kind: "http", code: "expired" }));
+});
+
+test("getBetConfirmErrorMessage: PREVIEW_EXPIRED/PREVIEW_INVALID are unrelated to Telegram auth and keep their own unchanged message", () => {
+  const previewExpired = getBetConfirmErrorMessage({ kind: "http", code: "PREVIEW_EXPIRED" });
+  const previewInvalid = getBetConfirmErrorMessage({ kind: "http", code: "PREVIEW_INVALID" });
+
+  assert.equal(previewExpired, "⏳ This preview has expired.\n\nOdds may have changed.\n\nPlease generate a new preview.");
+  assert.equal(previewExpired, previewInvalid);
+  assert.notEqual(previewExpired, getBetConfirmErrorMessage({ kind: "http", code: "expired" }));
+});
+
+test("getBetConfirmErrorMessage: network/timeout/aborted/invalid_response keep their existing, unrelated messages", () => {
+  assert.equal(getBetConfirmErrorMessage({ kind: "network" }), "Unable to connect. Check your internet connection.");
+  assert.equal(getBetConfirmErrorMessage({ kind: "timeout" }), "The request took too long. Please try again.");
+  assert.equal(getBetConfirmErrorMessage({ kind: "aborted" }), "");
+  assert.equal(getBetConfirmErrorMessage({ kind: "invalid_response" }), "Something went wrong. Please try again.");
 });

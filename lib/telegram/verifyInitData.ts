@@ -1,6 +1,11 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-const INIT_DATA_MAX_AGE_SECONDS = 5 * 60;
+// Telegram initData remains unchanged for the entire lifetime of a single
+// Mini App launch (it is never reissued by a reload or hot refresh — only
+// by actually reopening the Mini App through the bot). 1 hour is chosen as
+// the balance between normal session UX and limiting how long a leaked
+// initData (a bearer credential) stays usable.
+const INIT_DATA_MAX_AGE_SECONDS = 60 * 60;
 
 export interface TelegramInitDataUser {
   id: number;

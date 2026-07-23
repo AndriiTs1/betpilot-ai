@@ -12,6 +12,7 @@ import WelcomeBanner from "@/components/miniapp/WelcomeBanner";
 import type { MiniAppTab, MeResponse } from "@/components/miniapp/types";
 import type { AnyConfirmedBet } from "@/components/miniapp/betConfirmApi";
 import { applyMiniAppDataAction } from "@/components/miniapp/mergeConfirmedBet";
+import { isTelegramAuthErrorReason, getTelegramAuthErrorMessage } from "@/components/miniapp/telegramAuthError";
 
 interface TelegramWebApp {
   initData: string;
@@ -38,9 +39,17 @@ declare global {
   }
 }
 
+// "expired" and "auth_invalid" both come from a 401 response carrying one
+// of lib/telegram/verifyInitData.ts's three reasons ("expired" is kept as
+// its own case since it gets a distinct message; "malformed"/
+// "invalid_signature" share the "auth_invalid" bucket and message, per
+// components/miniapp/telegramAuthError.ts). "invalid" is unchanged from
+// before — it's the catch-all for every other non-ok response (e.g. a
+// genuine 500), which still gets the existing generic Retry UI below,
+// since a retry can actually help there, unlike an auth failure.
 type FetchState =
   | { status: "loading" }
-  | { status: "error"; reason: "not_registered" | "expired" | "invalid" | "network" }
+  | { status: "error"; reason: "not_registered" | "expired" | "auth_invalid" | "invalid" | "network" }
   | { status: "ready"; data: MeResponse };
 
 export default function MiniAppPage() {
@@ -70,9 +79,21 @@ export default function MiniAppPage() {
       }
 
       if (!response.ok) {
-        const body = await response.json().catch(() => null);
-        const reason = body?.error === "expired" ? "expired" : "invalid";
-        setFetchState({ status: "error", reason });
+        // /api/miniapp/me returns 401 only for one of verifyInitData's
+        // three reasons — anything else not-ok (e.g. a genuine 500) falls
+        // through to the existing generic "invalid" retry path unchanged.
+        if (response.status === 401) {
+          const body: unknown = await response.json().catch(() => null);
+          const errorCode =
+            typeof body === "object" && body !== null ? (body as { error?: unknown }).error : undefined;
+
+          if (typeof errorCode === "string" && isTelegramAuthErrorReason(errorCode)) {
+            setFetchState({ status: "error", reason: errorCode === "expired" ? "expired" : "auth_invalid" });
+            return;
+          }
+        }
+
+        setFetchState({ status: "error", reason: "invalid" });
         return;
       }
 
@@ -294,8 +315,16 @@ function DataScreen({
       return <CenteredMessage text="Вы ещё не зарегистрированы. Обратитесь к оператору." />;
     }
 
+    // Neither "expired" nor "auth_invalid" gets a Retry action — resending
+    // the exact same initData cannot succeed (see
+    // components/miniapp/telegramAuthError.ts), only reopening through the
+    // bot can.
     if (state.reason === "expired") {
-      return <CenteredMessage text="Сессия устарела. Переоткройте приложение через бота." />;
+      return <CenteredMessage text={getTelegramAuthErrorMessage("expired")} />;
+    }
+
+    if (state.reason === "auth_invalid") {
+      return <CenteredMessage text={getTelegramAuthErrorMessage("malformed")} />;
     }
 
     return (

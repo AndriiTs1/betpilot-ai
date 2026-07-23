@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --import tsx --test lib/auth/*.test.ts lib/ai/*.test.ts lib/betPreview/*.test.ts lib/bets/*.test.ts lib/odds/*.test.ts lib/telegram/*.test.ts lib/ocr/*.test.ts app/api/miniapp/bets/text/confirm/*.test.ts app/api/miniapp/bets/screenshot/preview/*.test.ts app/api/dashboard/debug/screenshot-preview/*.test.ts app/api/bets/*.test.ts app/api/webhooks/telegram/*.test.ts components/miniapp/*.test.ts",
+    "test": "node --import tsx --test lib/auth/*.test.ts lib/ai/*.test.ts lib/betPreview/*.test.ts lib/bets/*.test.ts lib/odds/*.test.ts lib/telegram/*.test.ts lib/ocr/*.test.ts app/api/miniapp/me/*.test.ts app/api/miniapp/bets/text/confirm/*.test.ts app/api/miniapp/bets/screenshot/preview/*.test.ts app/api/dashboard/debug/screenshot-preview/*.test.ts app/api/bets/*.test.ts app/api/webhooks/telegram/*.test.ts components/miniapp/*.test.ts",
     "postinstall": "prisma generate",
     "db:seed": "tsx prisma/seed.ts",
     "db:backfill-bet-selections": "tsx scripts/backfill-bet-selections.ts",

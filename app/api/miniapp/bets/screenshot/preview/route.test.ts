@@ -262,6 +262,22 @@ test("screenshot preview: an unregistered telegramId is rejected", async () => {
   assert.deepEqual(await response.json(), { error: "PLAYER_NOT_FOUND" });
 });
 
+test("screenshot preview: an expired initData (older than the 1h TTL) is rejected with 401 expired, before any OCR call", async () => {
+  let ocrCalled = false;
+  const staleAuthDate = Math.floor(Date.now() / 1000) - (60 * 60 + 1); // 1h + 1s old
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID, staleAuthDate);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  const response = await handleScreenshotPreview(
+    request,
+    baseOptions({ ocrProvider: fakeOcrProvider(() => { ocrCalled = true; return ocrSuccess("x"); }) }),
+  );
+
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: "expired" });
+  assert.equal(ocrCalled, false, "OCR must never run for a request that fails auth");
+});
+
 test("screenshot preview: a missing file is rejected", async () => {
   const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
   const request = new NextRequest("https://example.com/api/miniapp/bets/screenshot/preview", {

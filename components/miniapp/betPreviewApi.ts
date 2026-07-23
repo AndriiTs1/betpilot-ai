@@ -1,3 +1,5 @@
+import { isTelegramAuthErrorReason, getTelegramAuthErrorMessage } from "./telegramAuthError";
+
 const REQUEST_TIMEOUT_MS = 15000;
 
 // Stage 12, Phase 3 — unified SINGLE/EXPRESS shape. For a SINGLE bet,
@@ -161,12 +163,11 @@ export function getBetPreviewErrorMessage(failure: BetPreviewFailure): string {
   if (failure.kind === "timeout") return "The request took too long. Please try again.";
   if (failure.kind === "invalid_response") return "Something went wrong. Please try again.";
 
+  if (isTelegramAuthErrorReason(failure.code)) {
+    return getTelegramAuthErrorMessage(failure.code);
+  }
+
   switch (failure.code) {
-    case "malformed":
-    case "invalid_signature":
-      return "Unable to verify Telegram session. Reopen the Mini App.";
-    case "expired":
-      return "Your Telegram session expired. Reopen the Mini App.";
     case "PLAYER_NOT_FOUND":
       return "Your player account was not found.";
     case "INVALID_MESSAGE":

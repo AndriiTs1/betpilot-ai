@@ -1,5 +1,7 @@
 import { isBetPreviewSuccess, type BetPreviewSuccess } from "./betPreviewApi";
 
+import { isTelegramAuthErrorReason, getTelegramAuthErrorMessage } from "./telegramAuthError";
+
 // Full-screen-screenshot support — the server-side pipeline this timeout
 // bounds can now involve up to four sequential Claude-backed stages for a
 // large image: region detection (lib/ocr/regionDetection.ts,
@@ -116,11 +118,11 @@ export function getBetScreenshotErrorMessage(failure: BetScreenshotFailure): str
   if (failure.kind === "timeout") return "The request took too long. Please try again.";
   if (failure.kind === "invalid_response") return "Something went wrong. Please try again.";
 
+  if (isTelegramAuthErrorReason(failure.code)) {
+    return getTelegramAuthErrorMessage(failure.code);
+  }
+
   switch (failure.code) {
-    case "malformed":
-    case "invalid_signature":
-    case "expired":
-      return "Unable to verify Telegram session. Reopen the Mini App.";
     case "PLAYER_NOT_FOUND":
       return "Your player account was not found.";
     case "MISSING_FILE":

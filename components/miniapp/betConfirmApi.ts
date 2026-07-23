@@ -1,3 +1,5 @@
+import { isTelegramAuthErrorReason, getTelegramAuthErrorMessage } from "./telegramAuthError";
+
 const REQUEST_TIMEOUT_MS = 15000;
 
 // ConfirmedBet — unchanged since Phase 3, byte-for-byte. Kept exactly as
@@ -222,11 +224,11 @@ export function getBetConfirmErrorMessage(failure: BetConfirmFailure): string {
   if (failure.kind === "invalid_response") return "Something went wrong. Please try again.";
   if (failure.kind === "aborted") return "";
 
+  if (isTelegramAuthErrorReason(failure.code)) {
+    return getTelegramAuthErrorMessage(failure.code);
+  }
+
   switch (failure.code) {
-    case "malformed":
-    case "invalid_signature":
-    case "expired":
-      return "Your Telegram session needs to be refreshed. Reopen the Mini App.";
     case "PLAYER_NOT_FOUND":
       return "Your player account could not be found.";
     // Stage 10 — same friendly message for every reason a previewToken can
