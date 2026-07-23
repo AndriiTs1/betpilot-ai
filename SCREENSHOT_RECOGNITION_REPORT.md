@@ -1,5 +1,7 @@
 # Screenshot Recognition Report — Stage 4.5E
 
+> **Historical document — superseded architecture.** This report describes the previous direct-Claude-Vision screenshot parsing design (a single multimodal call straight from image bytes to structured bet fields, via `extract_single_bet_from_image`/`extract_parlay_bet_from_image`). That design has since been replaced by an OCR-first pipeline: a provider-agnostic OCR step transcribes the image to text (`lib/ocr/`), and the same parser the text-bet flow uses (`lib/ai/betParser.ts`) extracts the structured bet from that text — there is no separate image-to-structured-data call anymore. `README.md` and the current code under `lib/ocr/`, `lib/ai/`, and the preview/confirm flow are the source of truth for actual behavior today. This document is kept only as a historical record of the architecture and findings at the time it was written, and is not being updated to match the current pipeline.
+
 Analysis-only. No code, UI, backend, confirm, previewToken, Prisma, dashboard, or settlement logic was modified while producing this document.
 
 ## Executive Summary

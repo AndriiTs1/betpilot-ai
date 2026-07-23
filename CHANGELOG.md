@@ -18,7 +18,7 @@ This file summarizes what shipped in each version, for anyone consuming the proj
 - Operator authentication: password login (`scrypt` hashing), database-backed sessions, and route protection across the entire dashboard and its API.
 - Closed-demo player onboarding by Telegram username, with one-time ID binding on first `/start`.
 - Dedicated sport and Express icons shared between the Mini App and the operator dashboard.
-- 505 automated tests covering authentication, the bet lifecycle, settlement, AI parsing, OCR, and odds verification.
+- 648 automated tests covering authentication, the bet lifecycle, settlement, AI parsing, OCR, and odds verification.
 
 ### Fixed
 

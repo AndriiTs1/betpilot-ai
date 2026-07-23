@@ -22,7 +22,7 @@ Current project documentation:
 
 ## Status
 
-**v1.0.** Operator authentication (session-based login, every dashboard page and API route protected), the operator workflow (queue, confirm/reject against credit limit, player notification), and the player-facing Telegram Mini App (balance, active bets, history, bet submission) are built and running in production on a real Postgres database. The credit-limit check is safe under concurrent confirms (a `SELECT ... FOR UPDATE` row lock closes a write-skew race — see "Credit-limit risk model" below), baseline HTTP security headers protect the operator surface, and 505 automated tests cover authentication, the bet lifecycle, and settlement.
+**v1.0.** Operator authentication (session-based login, every dashboard page and API route protected), the operator workflow (queue, confirm/reject against credit limit, player notification), and the player-facing Telegram Mini App (balance, active bets, history, bet submission) are built and running in production on a real Postgres database. The credit-limit check is safe under concurrent confirms (a `SELECT ... FOR UPDATE` row lock closes a write-skew race — see "Credit-limit risk model" below), baseline HTTP security headers protect the operator surface, and 648 automated tests cover authentication, the bet lifecycle, and settlement.
 
 Both **SINGLE and EXPRESS (2–10 selection accumulator) bets** can be submitted as text or a screenshot, AI-parsed, odds-verified per leg, and confirmed into a real `Bet` (+ `BetSelection` rows for EXPRESS). The Mini App and the operator dashboard share one **Bet UI Design System** (`components/bets/SelectionRow.tsx` / `SelectionList.tsx`) so a bet's selections render with the same information hierarchy everywhere — full, uncollapsed disclosure in decision contexts (Preview, Confirmation Ticket, operator Pending Queue), and a "first 3 + N more" summary in review contexts (Active Bets, History).
 
@@ -44,7 +44,7 @@ Both **SINGLE and EXPRESS (2–10 selection accumulator) bets** can be submitted
 - `parseBetSlipMessage()` is the one parser both the text and screenshot flows call — it classifies and extracts either a `SINGLE` or `EXPRESS` bet slip (event/selection/stake/odds per leg) from free text, distinguishing a `BetSlipParseMode` of `"CHAT"` (player-typed message) or `"OCR"` (OCR-transcribed screenshot text) only for prompt-tuning purposes, not different output shapes. Dual provider, switchable via `AI_PROVIDER`: local **Ollama** (default, no API key, no EXPRESS/tool-use support — local dev only) or **Claude** (`@anthropic-ai/sdk`, strict tool-use schema); production always runs `AI_PROVIDER=claude`.
 - Screenshots go through a separate, provider-agnostic **OCR step first**: `lib/ocr/recognizeScreenshot.ts` takes raw image bytes and an `OcrProvider` and returns transcribed text (`lib/ocr/claudeOcrProvider.ts` is the only implementation today, but nothing in `lib/ocr/` itself knows about Telegram, bets, or Claude specifically), then that text is normalized (`normalizeOcrText.ts`) and handed to the same `parseBetSlipMessage()` the text flow uses. This replaced an earlier design where the screenshot flow called its own separate Claude-vision-multimodal parser directly.
 - `MAX_DECIMAL_ODDS = 1000` — values above this are rejected during AI output validation (guards against an OCR/decimal-separator misread reaching preview).
-- `processBet()`/`handleIncomingBet()` (`lib/bets/betService.ts`, `lib/telegram/betHandler.ts`) — the older WhatsApp-era chain that parsed a message and created a `Bet` directly, with no preview step — remain dead code, fully superseded by the preview → confirm flow. Not called from any live route.
+- The earlier WhatsApp-era chain that parsed a message and created a `Bet` directly, with no preview step, has been removed entirely — the preview → confirm flow described below is the only bet-creation path today.
 
 **Odds verification** (`lib/odds/oddsVerifier.ts`)
 
@@ -68,7 +68,7 @@ Both **SINGLE and EXPRESS (2–10 selection accumulator) bets** can be submitted
 
 **Telegram Mini App** (`app/miniapp/`, `components/miniapp/`, `app/api/miniapp/me`)
 
-- Player-facing PWA-like app opened from the bot's "Open app" button. Verifies Telegram `initData` server-side (`lib/telegram/verifyInitData.ts`, HMAC-SHA256, rejects data older than 5 minutes) via `Authorization: tma <initData>`.
+- Player-facing PWA-like app opened from the bot's "Open app" button. Verifies Telegram `initData` server-side (`lib/telegram/verifyInitData.ts`, HMAC-SHA256, rejects data older than 1 hour) via `Authorization: tma <initData>`.
 - 4-tab bottom navigation (`BottomNav.tsx`): **Bet** (`BetScreen.tsx`), **Active** (`ActiveBetsScreen.tsx`), **History** (`HistoryScreen.tsx`), **Balance** (`BalanceScreen.tsx`) — active/history classified client-side from `Bet.status`.
 - `BetScreen.tsx` — "AI Assistant First" composition: one primary CTA opens `BetActionSheet.tsx` (hand-rolled bottom sheet, no dependency) offering text or screenshot submission, a compact credit summary, and the last 2 bets ("Recent Activity" — a deliberately compact teaser, distinct from the full Active Bets tab).
 - `BetPreviewCard.tsx` (`PreviewCard`/`OddsStatus`) is the one preview UI both `BetTextForm.tsx` and `BetScreenshotForm.tsx` render — full, unconditional selection disclosure (a decision context: the player is about to confirm).
@@ -143,7 +143,6 @@ A closed demo has no public sign-up: every player is invited by an operator befo
 - **Automatic settlement.** `lib/bets/settleBet.ts` can grade a bet, but nothing ingests real match results to decide WON/LOST/VOID — settlement only happens today via a direct, manual API call with no dashboard UI. A future automated pipeline (result ingestion → auto-settle) and, separately, a manual "Settlement Issues / Manual Review" exception workflow for bets automation can't resolve are both explicitly deferred — see the Bet UI Design System's architecture note in `components/players/PlayerCard.tsx`.
 - **No rate limiting** on `POST /api/miniapp/bets/text/preview`, `/text/confirm`, or `/screenshot/preview` — a registered player (or anyone who can forge valid-looking requests past Telegram auth) can call these as fast as the AI provider/odds API will respond.
 - **Screenshot uploads are never persisted.** The image only exists in memory for the request — no storage integration exists, so there's no way for an operator to later review the original screenshot behind a confirmed bet.
-- **`types/bet.ts` is stale and unused.** A completely different `BetStatus` union than Prisma's, sharing only 2 of 7 values, plus a `Currency = "USDC"` the UI no longer shows. Confirmed dead (zero imports). `components/bets/StatusBadge.tsx` is the one place correctly in sync with Prisma's real `BetStatus`.
 - **`types/player.ts`, `lib/wallet/balance.ts`, `lib/wallet/transaction.ts` are dead code** — zero imports anywhere, pre-date the credit-limit model.
 - **`Wallet` model is unused application-wide** (only referenced by `scripts/reset-test-data.ts`'s cleanup and the generated Prisma client). `Transaction` **is** now used — `settleBet.ts` writes one per settlement — so it's no longer dead, unlike `Wallet`.
 - **No operator scoping**: schema allows multiple `Operator`s, but nothing in the UI/API scopes by operator — `/api/dashboard/*` reads across all operators.
@@ -161,7 +160,7 @@ A closed demo has no public sign-up: every player is invited by an operator befo
 - **The Odds API** — live odds
 - **Telegram Bot API** + **Telegram Mini Apps** — player messaging and the `/miniapp` player-facing UI
 - **Tabler Icons** webfont (operator dashboard) + **lucide-react** (Mini App) + prepared PNG artwork for sport/Express icons, shared by both surfaces
-- **`node --test`** (Node's built-in test runner, via `tsx`) — the project's one test framework; no Jest/Vitest. **505 tests** as of v1.0, covering operator auth, the bet lifecycle (confirm/reject/settle, including dedicated confirm-route concurrency tests), AI parsing, OCR, and odds verification. No DOM-rendering test infra (no jsdom/@testing-library) — component tests exercise pure/exported logic only, not rendered trees
+- **`node --test`** (Node's built-in test runner, via `tsx`) — the project's one test framework; no Jest/Vitest. **648 tests**, covering operator auth, the bet lifecycle (confirm/reject/settle, including dedicated confirm-route concurrency tests), AI parsing, OCR, and odds verification. No DOM-rendering test infra (no jsdom/@testing-library) — component tests exercise pure/exported logic only, not rendered trees
 - Deployed on **Vercel**
 
 ## Getting Started
