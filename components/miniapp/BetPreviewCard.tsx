@@ -3,6 +3,7 @@ import type { BetPreview } from "./betPreviewApi";
 import SelectionList from "@/components/bets/SelectionList";
 import type { DisplaySelection } from "@/lib/bets/mapBetForDisplay";
 import { formatAmount } from "@/lib/bets/formatAmount";
+import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
 
 // Shared preview display — used by both BetTextForm (text flow) and
 // BetScreenshotForm (screenshot flow, Stage 4.5D). Extracted out of
@@ -34,7 +35,16 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
         <PreviewRow label="Bet type" value="Single" />
         <PreviewRow label="Sport" value={selection.sport} />
         <PreviewRow label="Event" value={selection.event} wrap />
-        <PreviewRow label="Selection" value={selection.selection} wrap />
+        <PreviewRow
+          label="Selection"
+          value={normalizeSelectionToEnglish({
+            selection: selection.selection,
+            sport: selection.sport,
+            event: selection.event,
+            market: selection.market,
+          })}
+          wrap
+        />
         <PreviewRow label="Stake" value={formatAmount(preview.stake)} />
         <PreviewRow
           label="Submitted odds"
@@ -58,7 +68,12 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
     id: String(index),
     sport: selection.sport,
     event: selection.event,
-    outcome: selection.selection,
+    outcome: normalizeSelectionToEnglish({
+      selection: selection.selection,
+      sport: selection.sport,
+      event: selection.event,
+      market: selection.market,
+    }),
     market: selection.market,
     odds: selection.submittedOdds !== null ? String(selection.submittedOdds) : null,
     currentOdds: selection.currentOdds !== null ? String(selection.currentOdds) : null,

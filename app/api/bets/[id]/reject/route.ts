@@ -5,6 +5,7 @@ import { isOperatorAuthorized } from "@/lib/auth/operatorAuth";
 import { serializeBet } from "@/lib/bets/serialize";
 import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
 import { escapeHtml } from "@/lib/telegram/escapeHtml";
+import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
 
 export interface HandleBetRejectOptions {
   db?: PrismaClient;
@@ -61,6 +62,11 @@ export async function handleBetReject(
 
     if (existing.player.telegramId) {
       try {
+        const normalizedOutcome =
+          existing.outcome !== null
+            ? normalizeSelectionToEnglish({ selection: existing.outcome, sport: existing.sport, event: existing.event })
+            : existing.outcome;
+
         await sendTelegramMessage(
           existing.player.telegramId,
           // Stage 12 — event/outcome are nullable as of this migration (an
@@ -68,7 +74,7 @@ export async function handleBetReject(
           // EXPRESS bet yet, so every real row still has both set. The
           // fallback exists only to satisfy the now-nullable type, not
           // because this path is expected to hit it today.
-          `🔴 <b>Ставка отклонена</b>\n⚽ ${escapeHtml(existing.event ?? "—")}\n🎯 ${escapeHtml(existing.outcome ?? "—")}`,
+          `🔴 <b>Ставка отклонена</b>\n⚽ ${escapeHtml(existing.event ?? "—")}\n🎯 ${escapeHtml(normalizedOutcome ?? "—")}`,
         );
       } catch (err) {
         console.error(`POST /api/bets/${id}/reject: failed to notify player via Telegram`, err);

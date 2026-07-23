@@ -14,6 +14,22 @@
 // operates on the already-serialized (Decimal -> string) shape every
 // consumer already receives over JSON, matching RecentBet/PendingBet/
 // PlayerBet's existing field conventions exactly.
+//
+// Also the single point where every selection's `outcome` is run through
+// normalizeSelectionToEnglish() (temporary "English-only labels" product
+// rule) — applied here, once, rather than in each UI consumer, and it
+// retroactively normalizes already-stored Russian-language rows on read
+// with no data migration needed. This mapper is called unconditionally on
+// every RecentBet/PendingBet/PlayerBet regardless of where that object
+// came from — including a just-confirmed bet optimistically merged via
+// mergeConfirmedBet.ts, whose fields were already normalized once by the
+// confirm route's own serializer. Re-normalizing it here is a harmless,
+// idempotent no-op (this mapper has no way to know a given bet's
+// provenance, and every canonical output is also a recognized input) —
+// not a bug, and not worth threading an "already normalized" flag through
+// the type system to avoid.
+
+import { normalizeSelectionToEnglish } from "./normalizeSelectionToEnglish";
 
 export interface DisplaySelection {
   id: string;
@@ -106,7 +122,17 @@ function toLegacyFallbackSelections(bet: BetLikeForDisplay): DisplaySelection[] 
 }
 
 export function mapBetForDisplay(bet: BetLikeForDisplay): DisplayBet {
-  const selections = bet.selections.length > 0 ? [...bet.selections] : toLegacyFallbackSelections(bet);
+  const rawSelections = bet.selections.length > 0 ? [...bet.selections] : toLegacyFallbackSelections(bet);
+
+  const selections = rawSelections.map((selection) => ({
+    ...selection,
+    outcome: normalizeSelectionToEnglish({
+      selection: selection.outcome,
+      sport: selection.sport,
+      event: selection.event,
+      market: selection.market ?? null,
+    }),
+  }));
 
   const selectionCount = selections.length;
   const first = selections[0] ?? null;

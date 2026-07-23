@@ -12,6 +12,7 @@ import {
 } from "@/lib/bets/settlementRules";
 import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
 import { escapeHtml } from "@/lib/telegram/escapeHtml";
+import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
 
 // Stage 13.4 — the operator-only HTTP layer over settleBet() (Stage 13.3).
 // This route does exactly three things: authorize, validate the request's
@@ -104,6 +105,7 @@ function mapSettlementError(err: unknown, betId: string): NextResponse<SettleErr
 type AppliedSettleResult = Extract<SettleBetResult, { kind: "APPLIED" }>;
 
 interface SettledBetDisplayFields {
+  sport: string;
   event: string | null;
   outcome: string | null;
   odds: Prisma.Decimal | null;
@@ -120,7 +122,9 @@ interface SettledBetDisplayFields {
 // internal/technical field.
 function buildSettlementMessage(result: AppliedSettleResult, bet: SettledBetDisplayFields): string {
   const event = escapeHtml(bet.event ?? "—");
-  const outcome = escapeHtml(bet.outcome ?? "—");
+  const normalizedOutcome =
+    bet.outcome !== null ? normalizeSelectionToEnglish({ selection: bet.outcome, sport: bet.sport, event: bet.event }) : bet.outcome;
+  const outcome = escapeHtml(normalizedOutcome ?? "—");
   const stake = bet.stake.toString();
   const effectiveOdds = bet.totalOdds ?? bet.odds;
   const oddsLine = effectiveOdds !== null ? `📈 Коэффициент: ${effectiveOdds.toString()}\n` : "";
@@ -174,6 +178,7 @@ async function notifySettlementResult(db: PrismaClient, result: AppliedSettleRes
     const bet = await db.bet.findUnique({
       where: { id: result.betId },
       select: {
+        sport: true,
         event: true,
         outcome: true,
         odds: true,

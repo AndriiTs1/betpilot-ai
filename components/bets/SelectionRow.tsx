@@ -3,6 +3,15 @@ import { getOddsStatusBadge } from "@/lib/bets/oddsStatusBadge";
 import { formatAmount } from "@/lib/bets/formatAmount";
 import type { DisplaySelection } from "@/lib/bets/mapBetForDisplay";
 
+// English-only selection labels (temporary product rule) are normalized by
+// each caller before a DisplaySelection reaches this component — never
+// here. Every current caller already does this at its own entry point
+// (lib/bets/mapBetForDisplay.ts for BetQueueItem/PlayerCard,
+// BetPreviewCard.tsx for the pre-persistence preview, BetSelectionsList.tsx
+// for the raw Mini App selections list) — see normalizeSelectionToEnglish's
+// own header comment for the full list. Normalizing again here would be a
+// second, redundant pass over already-normalized text on every render.
+
 // The canonical per-selection row for the shared Bet Card family — one
 // SINGLE bet's only selection and one EXPRESS bet's each leg both render
 // through this exact component, on every surface (Mini App Preview,

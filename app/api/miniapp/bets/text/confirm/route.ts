@@ -8,6 +8,7 @@ import {
   type VerifyPreviewTokenFailureReason,
 } from "@/lib/betPreview/previewToken";
 import { createBetFromPreview } from "@/lib/bets/createBetFromPreview";
+import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
 
 // Requires node:crypto (verifyInitData/verifyPreviewToken) and Prisma —
 // neither runs on the Edge runtime.
@@ -88,7 +89,10 @@ function serializeSingleBet(bet: Bet) {
     type: bet.type,
     sport: bet.sport,
     event: bet.event,
-    outcome: bet.outcome,
+    outcome:
+      bet.outcome !== null
+        ? normalizeSelectionToEnglish({ selection: bet.outcome, sport: bet.sport, event: bet.event })
+        : bet.outcome,
     stake: bet.stake.toNumber(),
     odds: bet.odds !== null ? bet.odds.toNumber() : null,
     totalOdds: bet.totalOdds !== null ? bet.totalOdds.toNumber() : null,
@@ -108,7 +112,12 @@ function serializeExpressSelection(selection: BetSelection) {
     id: selection.id,
     sport: selection.sport,
     event: selection.event,
-    outcome: selection.outcome,
+    outcome: normalizeSelectionToEnglish({
+      selection: selection.outcome,
+      sport: selection.sport,
+      event: selection.event,
+      market: selection.market,
+    }),
     market: selection.market,
     odds: selection.odds !== null ? selection.odds.toString() : null,
     currentOdds: selection.currentOdds !== null ? selection.currentOdds.toString() : null,
@@ -123,7 +132,10 @@ function serializeExpressBet(bet: Bet & { selections: BetSelection[] }) {
     type: bet.type,
     sport: bet.sport,
     event: bet.event,
-    outcome: bet.outcome,
+    outcome:
+      bet.outcome !== null
+        ? normalizeSelectionToEnglish({ selection: bet.outcome, sport: bet.sport, event: bet.event })
+        : bet.outcome,
     odds: bet.odds !== null ? bet.odds.toString() : null,
     stake: bet.stake.toString(),
     totalOdds: bet.totalOdds !== null ? bet.totalOdds.toString() : null,

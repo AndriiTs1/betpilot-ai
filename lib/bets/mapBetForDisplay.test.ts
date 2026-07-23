@@ -199,6 +199,51 @@ test("nullable optional fields (odds, totalOdds) are passed through as null, nev
   assert.equal(display.selections[0].odds, null);
 });
 
+// ---------------------------------------------------------------------
+// English-only selection labels (temporary product rule, not full i18n)
+// ---------------------------------------------------------------------
+
+test("an existing stored SINGLE bet (legacy fallback, no BetSelection rows) with a Russian outcome displays in English", () => {
+  const b = bet({
+    event: "Spartak vs CSKA",
+    outcome: "П1",
+    selections: [],
+  });
+
+  const display = mapBetForDisplay(b);
+
+  assert.equal(display.displaySubtitle, "Home Win");
+  assert.equal(display.selections[0].outcome, "Home Win");
+});
+
+test("an existing stored EXPRESS bet's Russian-language legs all display in English, order preserved", () => {
+  const b = bet({
+    type: "EXPRESS",
+    event: null,
+    outcome: null,
+    totalOdds: "5.10",
+    selections: [
+      selection({ id: "sel-1", outcome: "Победа 1" }),
+      selection({ id: "sel-2", outcome: "Ничья" }),
+      selection({ id: "sel-3", outcome: "Обе забьют — Да" }),
+    ],
+  });
+
+  const display = mapBetForDisplay(b);
+
+  assert.deepEqual(
+    display.selections.map((s) => s.outcome),
+    ["Home Win", "Draw", "Both Teams to Score — Yes"],
+  );
+  assert.equal(display.displaySubtitle, "Home Win");
+});
+
+test("an unrecognized already-stored outcome is left exactly as stored", () => {
+  const b = bet({ selections: [selection({ outcome: "Handicap -1.5 (Team A)" })] });
+  const display = mapBetForDisplay(b);
+  assert.equal(display.selections[0].outcome, "Handicap -1.5 (Team A)");
+});
+
 test("does not mutate the source bet or its selections array/objects", () => {
   const originalSelections = [selection({ id: "sel-1" }), selection({ id: "sel-2" })];
   const b = bet({ type: "EXPRESS", event: null, outcome: null, selections: originalSelections });

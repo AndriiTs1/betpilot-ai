@@ -6,6 +6,7 @@ import { serializeBet } from "@/lib/bets/serialize";
 import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
 import { escapeHtml } from "@/lib/telegram/escapeHtml";
 import { computeRemainingCredit } from "@/lib/players/credit";
+import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
 
 class InsufficientCreditError extends Error {}
 class BetNoLongerPendingError extends Error {}
@@ -113,6 +114,11 @@ export async function handleBetConfirm(
 
     if (existing.player.telegramId) {
       try {
+        const normalizedOutcome =
+          existing.outcome !== null
+            ? normalizeSelectionToEnglish({ selection: existing.outcome, sport: existing.sport, event: existing.event })
+            : existing.outcome;
+
         await sendTelegramMessage(
           existing.player.telegramId,
           // Stage 12 — event/outcome are nullable as of this migration (an
@@ -120,7 +126,7 @@ export async function handleBetConfirm(
           // EXPRESS bet yet, so every real row still has both set. The
           // fallback exists only to satisfy the now-nullable type, not
           // because this path is expected to hit it today.
-          `🟢 <b>Ставка подтверждена!</b>\n⚽ ${escapeHtml(existing.event ?? "—")}\n🎯 ${escapeHtml(existing.outcome ?? "—")}\n💰 Ставка: ${existing.stake.toString()}`,
+          `🟢 <b>Ставка подтверждена!</b>\n⚽ ${escapeHtml(existing.event ?? "—")}\n🎯 ${escapeHtml(normalizedOutcome ?? "—")}\n💰 Ставка: ${existing.stake.toString()}`,
         );
       } catch (err) {
         console.error(`POST /api/bets/${id}/confirm: failed to notify player via Telegram`, err);
