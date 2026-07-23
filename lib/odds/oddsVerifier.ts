@@ -213,10 +213,141 @@ function pickBookmaker(
 
 const SELECTION_MATCH_THRESHOLD = 0.4;
 
-function extractOutcomePrice(bookmaker: OddsApiBookmaker, selection: string): number | null {
+/* -------------------------------------------------------------------------- */
+/* Single 1X2 shorthand ("1"/"X"/"2" and a few common spellings)              */
+/* -------------------------------------------------------------------------- */
+//
+// The Odds API's h2h market never uses "1"/"X"/"2" as an outcome name — its
+// outcomes are always the literal home_team/away_team strings plus "Draw".
+// A parser/OCR result can legitimately hand back the short European
+// notation instead of a team name (that's exactly what's printed on many
+// bookmaker slips), and the fuzzy word-overlap matching below this section
+// scores that at 0 against any real team name — hence the previously
+// unconditional NOT_FOUND for "1"/"X"/"2". This section recognizes that
+// narrow, closed set of tokens *before* falling back to the existing fuzzy
+// name matching, and resolves "1"/"2" against whichever provider team is
+// actually first/second in the *parsed* event string — never a blind
+// home_team/away_team assumption, since findMatchingEvent() already proves
+// the provider's home/away order doesn't have to agree with the order the
+// player's slip was read in.
+
+type SingleSelectionClass = "FIRST_TEAM" | "DRAW" | "SECOND_TEAM" | "TEAM_NAME_OR_OTHER";
+
+// Exact-match only (after trim + lowercase) — deliberately not a substring
+// or word-boundary test, so combined-market notation like "1X"/"X2"/"12"
+// (double chance) never collides with a single outcome. "Х" (Cyrillic,
+// U+0425) and "X" (Latin) both lowercase to their own script's lowercase
+// form; both are listed explicitly since they are different codepoints.
+const FIRST_TEAM_TOKENS: ReadonlySet<string> = new Set(["1", "п1", "p1", "home"]);
+const DRAW_TOKENS: ReadonlySet<string> = new Set(["x", "х", "draw", "ничья"]);
+const SECOND_TEAM_TOKENS: ReadonlySet<string> = new Set(["2", "п2", "p2", "away"]);
+
+function classifySingleSelection(selection: string): SingleSelectionClass {
+  const key = selection.trim().toLowerCase();
+  if (FIRST_TEAM_TOKENS.has(key)) return "FIRST_TEAM";
+  if (DRAW_TOKENS.has(key)) return "DRAW";
+  if (SECOND_TEAM_TOKENS.has(key)) return "SECOND_TEAM";
+  return "TEAM_NAME_OR_OTHER";
+}
+
+type TeamOrderResolution =
+  | { kind: "RESOLVED"; firstTeamName: string; secondTeamName: string }
+  | { kind: "UNCERTAIN" };
+
+// Reuses the exact same forward/backward pairing idea findMatchingEvent()
+// already uses to tolerate a reversed home/away order — recomputed here
+// against the one event that was actually matched, since findMatchingEvent()
+// itself only returns the winning event, not which orientation won it.
+// Never guesses: returns UNCERTAIN whenever the parsed event string can't
+// be split into two teams at all, when neither orientation reaches
+// EVENT_MATCH_THRESHOLD, or when both orientations are confident but tied
+// (genuinely ambiguous) — the caller must then leave the selection
+// unmatched rather than silently pick one team.
+function resolveTeamOrder(parsedEvent: string, event: OddsApiEvent): TeamOrderResolution {
+  const teams = splitEventTeams(parsedEvent);
+  if (!teams) return { kind: "UNCERTAIN" };
+
+  const [t1, t2] = teams.map(normalizeTeamName);
+  const home = normalizeTeamName(event.home_team);
+  const away = normalizeTeamName(event.away_team);
+
+  const forward = (overlapScore(t1, home) + overlapScore(t2, away)) / 2;
+  const backward = (overlapScore(t1, away) + overlapScore(t2, home)) / 2;
+
+  const forwardConfident = forward >= EVENT_MATCH_THRESHOLD;
+  const backwardConfident = backward >= EVENT_MATCH_THRESHOLD;
+
+  if (forwardConfident && (!backwardConfident || forward > backward)) {
+    return { kind: "RESOLVED", firstTeamName: event.home_team, secondTeamName: event.away_team };
+  }
+  if (backwardConfident && (!forwardConfident || backward > forward)) {
+    return { kind: "RESOLVED", firstTeamName: event.away_team, secondTeamName: event.home_team };
+  }
+
+  // Neither orientation is confident, or both are confident but tied — a
+  // coin flip either way, so this is left unresolved rather than guessed.
+  return { kind: "UNCERTAIN" };
+}
+
+// Finds the h2h outcome whose name matches teamName — exact match after
+// normalization first (The Odds API's outcome.name is always literally the
+// event's own home_team/away_team string for h2h), falling back to the
+// same overlapScore/threshold the general name-matching path below uses,
+// for resilience against minor formatting differences.
+function findOutcomePriceByTeamName(market: OddsApiMarket, teamName: string): number | null {
+  const normalizedTarget = normalizeTeamName(teamName);
+
+  let best: { outcome: OddsApiOutcome; score: number } | null = null;
+
+  for (const outcome of market.outcomes) {
+    const outcomeName = normalizeTeamName(outcome.name);
+    const score = outcomeName === normalizedTarget ? 1 : overlapScore(normalizedTarget, outcomeName);
+
+    if (!best || score > best.score) {
+      best = { outcome, score };
+    }
+  }
+
+  if (!best || best.score < SELECTION_MATCH_THRESHOLD) return null;
+
+  return best.outcome.price;
+}
+
+// Same /\bdraw\b/ recognition the old single-branch matcher already used
+// for a bare "Draw"/"Ничья" selection — just applied directly to find the
+// Draw outcome, rather than only steering that selection's own score.
+function findDrawOutcomePrice(market: OddsApiMarket): number | null {
+  const drawOutcome = market.outcomes.find((outcome) => /\bdraw\b/.test(normalizeTeamName(outcome.name)));
+  return drawOutcome ? drawOutcome.price : null;
+}
+
+function extractOutcomePrice(
+  bookmaker: OddsApiBookmaker,
+  selection: string,
+  event: OddsApiEvent,
+  parsedEvent: string,
+): number | null {
   const market = bookmaker.markets.find((m) => m.key === "h2h");
   if (!market) return null;
 
+  const selectionClass = classifySingleSelection(selection);
+
+  if (selectionClass === "DRAW") {
+    return findDrawOutcomePrice(market);
+  }
+
+  if (selectionClass === "FIRST_TEAM" || selectionClass === "SECOND_TEAM") {
+    const order = resolveTeamOrder(parsedEvent, event);
+    if (order.kind === "UNCERTAIN") return null;
+
+    const targetTeamName = selectionClass === "FIRST_TEAM" ? order.firstTeamName : order.secondTeamName;
+    return findOutcomePriceByTeamName(market, targetTeamName);
+  }
+
+  // TEAM_NAME_OR_OTHER — unchanged existing fuzzy matching (a full team
+  // name, a bare "Draw"/"Ничья" not caught by the exact-token set above,
+  // combined-market notation like "1X"/"X2"/"12" which scores 0 here and
+  // correctly stays unmatched, or anything else).
   const normalizedSelection = normalizeTeamName(selection);
   const isDraw = /\b(draw|ничья)\b/.test(normalizedSelection);
 
@@ -356,7 +487,7 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
     return { ...baseResult, note: `No bookmaker odds available for "${bet.event}"` };
   }
 
-  const price = extractOutcomePrice(bookmakerPick.bookmaker, bet.selection);
+  const price = extractOutcomePrice(bookmakerPick.bookmaker, bet.selection, event, bet.event);
 
   if (price === null) {
     return {
