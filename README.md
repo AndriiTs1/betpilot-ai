@@ -17,6 +17,8 @@ Current project documentation:
 - `docs/decisions/` — Architecture Decision Records (ADRs): why significant technical/product decisions were made
 - `docs/architecture/`, `docs/domain/` — original pre-implementation planning docs (outdated, see note above)
 - `OPERATOR_AUTH_AUDIT.md`, `docs/OPERATOR_AUTH_IMPLEMENTATION.md` — the approved design and implementation notes for operator authentication
+- `docs/ODDS_SUPPORT_MATRIX.md` — the product-level target for which sports, leagues, and markets the odds integration should support, grounded in current code; the source of truth for the next odds architecture stage
+- `docs/ODDS_PROVIDER_DESIGN.md` — the canonical odds domain model and `OddsProvider` contract design: implementation-ready types, request/response shapes, confirmation policy, and a staged migration plan from the current implementation
 
 **README is the source of truth for current behavior. Architecture decisions are stored as ADRs** — see `docs/decisions/README.md` for the format and rules, and `docs/decisions/ADR-0001-project-history.md` for how the system got here.
 
