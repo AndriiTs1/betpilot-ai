@@ -5,8 +5,9 @@ import { verifyInitData } from "@/lib/telegram/verifyInitData";
 import { parseBetSlipMessage, type ParseBetSlipResult } from "@/lib/ai/betParser";
 import type { ParsedBetSlip } from "@/lib/bets/betSlip";
 import { buildBetSlipPreview, BetSlipValidationError, type BuildBetSlipPreviewOptions } from "@/lib/bets/buildBetSlipPreview";
-import { recognizeScreenshot } from "@/lib/ocr/recognizeScreenshot";
+import { recognizeBetSlipScreenshot, type ScreenshotPipelineDiagnostics } from "@/lib/ocr/recognizeBetSlipScreenshot";
 import { createClaudeOcrProvider } from "@/lib/ocr/claudeOcrProvider";
+import { detectBettingRegion } from "@/lib/ocr/regionDetection";
 import type { OcrFailure, OcrProvider } from "@/lib/ocr/ocrTypes";
 import { ALLOWED_MIME_TYPES, MAX_FILE_SIZE_BYTES, detectImageSignature, type AllowedMimeType } from "@/lib/uploads/imageValidation";
 import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
@@ -31,10 +32,26 @@ import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
 // no normalization step is needed for screenshots anymore (unlike the old
 // normalizeParsedImageBet(), now removed).
 //
-// The client-facing contract is unchanged: same endpoint, same multipart
-// request shape, same { preview, previewToken } response shape, same error
-// code vocabulary components/miniapp/betScreenshotApi.ts already knows —
-// no Mini App UI change required.
+// Full-screen-screenshot support — recognizeScreenshot() itself is
+// unchanged; this route now calls recognizeBetSlipScreenshot()
+// (lib/ocr/recognizeBetSlipScreenshot.ts) instead, which decides whether
+// the upload needs a region detected and cropped first (a large,
+// full-desktop-looking image) or can go straight to recognizeScreenshot()
+// unchanged (an already-cropped slip — the majority case, and byte-for-byte
+// the same path as before this addition). Region detection is strictly
+// additive: every one of its failure modes (timeout, no region found, an
+// invalid box) falls back to plain full-image OCR rather than failing the
+// request.
+//
+// The client-facing contract is unchanged except for one new upload-time
+// error code (IMAGE_TOO_LARGE, an oversized-pixel-dimensions guard — see
+// lib/ocr/screenshotPreprocessing.ts's MAX_IMAGE_DIMENSION_PX — already
+// understood by components/miniapp/betScreenshotApi.ts); same endpoint,
+// same multipart request shape, same { preview, previewToken } response
+// shape otherwise. A buffer sharp can't read dimensions from at all is
+// never rejected on that basis alone — it just skips the region-detection
+// optimization and reaches the exact same OCR call as before (see
+// lib/ocr/recognizeBetSlipScreenshot.ts's metadataDecodeFailed doc).
 
 // Requires node:crypto (verifyInitData/previewToken signing), Buffer
 // (base64 conversion), and the Anthropic SDK — none of these run on the
@@ -61,6 +78,45 @@ function extractInitData(request: NextRequest): string | null {
 // UNSUPPORTED_FORMAT are not expected to actually trigger here (the upload
 // validation above already rejects those before recognizeScreenshot() is
 // ever called) but are mapped defensively rather than left unhandled.
+// Logs the outcome of the adaptive region-detection stage (Stage: full-screen
+// screenshot support) — a no-op for the unchanged cropped-slip path
+// (region_detection_skipped), one event per outcome otherwise, plus a
+// separate crop_applied event only when a region was actually cropped.
+// Never logs the model's own free-text reason (Step 3's "do not expose raw
+// model reasoning" — that restriction applies to more than just the client
+// response; server logs aren't a place for it either).
+function logRegionDetectionOutcome(diagnostics: ScreenshotPipelineDiagnostics): void {
+  const region = diagnostics.regionDetection;
+
+  if (region.outcome === "skipped_small_image") {
+    logScreenshotPipelineEvent("region_detection_skipped");
+    return;
+  }
+
+  const durationMs = diagnostics.regionDetectionMs ?? undefined;
+
+  switch (region.outcome) {
+    case "region_found":
+      logScreenshotPipelineEvent("region_detection_found", { durationMs, regionConfidence: region.confidence });
+      if (diagnostics.cropMs !== null) {
+        logScreenshotPipelineEvent("crop_applied", { durationMs: diagnostics.cropMs });
+      }
+      return;
+    case "region_not_found":
+      logScreenshotPipelineEvent("region_detection_not_found", { durationMs });
+      return;
+    case "region_invalid":
+      logScreenshotPipelineEvent("region_detection_invalid", { durationMs });
+      return;
+    case "region_timeout":
+      logScreenshotPipelineEvent("region_detection_timeout", { durationMs });
+      return;
+    case "region_error":
+      logScreenshotPipelineEvent("region_detection_error", { durationMs });
+      return;
+  }
+}
+
 function mapOcrFailureToResponse(failure: OcrFailure): NextResponse {
   switch (failure.code) {
     case "EMPTY_IMAGE":
@@ -92,6 +148,10 @@ export interface HandleScreenshotPreviewOptions {
   // technique lib/ocr/claudeOcrProvider.test.ts/lib/ai/betParser.test.ts
   // already had to use for the module-level Anthropic client.
   parseBetSlip?: typeof parseBetSlipMessage;
+  // Same DI shape as the two above — lets a route test control region
+  // detection (found/not-found/invalid/timeout/error) without a real
+  // Claude call. Defaults to the real detectBettingRegion.
+  detectRegion?: typeof detectBettingRegion;
 }
 
 // Injectable so tests can supply a fake db/OCR provider/bet parser/odds
@@ -198,12 +258,47 @@ export async function handleScreenshotPreview(
     }
 
     const ocrProvider = options.ocrProvider ?? createClaudeOcrProvider();
+    const detectRegion = options.detectRegion ?? detectBettingRegion;
 
-    const ocrResult = await recognizeScreenshot({
+    // Adaptive two-stage recognition: small/already-cropped images reach
+    // the exact same recognizeScreenshot() call as before this stage
+    // existed; a large full-screen screenshot additionally gets a region
+    // detected and cropped first (lib/ocr/recognizeBetSlipScreenshot.ts).
+    // Every failure of the region-detection stage itself falls through to
+    // full-image OCR rather than failing the request.
+    const recognition = await recognizeBetSlipScreenshot({
       intake: { mimeType, originalFilename: image.name || undefined },
       buffer: Buffer.from(bytes),
       provider: ocrProvider,
+      detectRegion,
     });
+
+    if (recognition.diagnostics.metadataDecodeFailed) {
+      // Log-only — sharp couldn't read dimensions, so the size-based
+      // region-detection heuristic was skipped, but the request still
+      // proceeds through plain OCR on the original buffer below (Step 2C's
+      // "do not fail solely because region detection failed", extended to
+      // the metadata-read step it depends on).
+      logScreenshotPipelineEvent("image_decode_failed");
+    } else {
+      logScreenshotPipelineEvent("image_metadata_read", {
+        durationMs: recognition.diagnostics.metadataMs,
+        imageWidth: recognition.diagnostics.imageWidth ?? undefined,
+        imageHeight: recognition.diagnostics.imageHeight ?? undefined,
+      });
+    }
+
+    if (recognition.kind === "IMAGE_TOO_LARGE") {
+      logScreenshotPipelineEvent("image_too_large", {
+        imageWidth: recognition.diagnostics.imageWidth ?? undefined,
+        imageHeight: recognition.diagnostics.imageHeight ?? undefined,
+      });
+      return NextResponse.json({ error: "IMAGE_TOO_LARGE" }, { status: 413 });
+    }
+
+    logRegionDetectionOutcome(recognition.diagnostics);
+
+    const ocrResult = recognition.ocrResult;
 
     if (ocrResult.kind === "FAILURE") {
       // Structured code only — never the provider's own safeMessage, and

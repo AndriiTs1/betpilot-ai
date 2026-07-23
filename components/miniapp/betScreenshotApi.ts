@@ -1,6 +1,24 @@
 import { isBetPreviewSuccess, type BetPreviewSuccess } from "./betPreviewApi";
 
-const REQUEST_TIMEOUT_MS = 15000;
+// Full-screen-screenshot support — the server-side pipeline this timeout
+// bounds can now involve up to four sequential Claude-backed stages for a
+// large image: region detection (lib/ocr/regionDetection.ts,
+// REGION_DETECTION_TIMEOUT_MS = 12000ms) -> OCR
+// (lib/ocr/recognizeScreenshot.ts, DEFAULT_OCR_TIMEOUT_MS = 20000ms) ->
+// bet-slip parsing (lib/ai/betParser.ts, CLAUDE_OCR_PARSER_TIMEOUT_MS =
+// 15000ms) -> odds verification (lib/odds/oddsVerifier.ts,
+// ODDS_API_TIMEOUT_MS = 8000ms, run in parallel across selections, not
+// sequentially per leg). Worst case that's 12+20+15+8 = 55s of legitimate
+// server-side work before the server itself would ever time out — the
+// previous 15000ms value here was already shorter than the OCR stage's own
+// 20000ms budget *alone*, even before region detection existed, so the
+// client could abort a request the server would otherwise have completed
+// successfully. 65000ms leaves roughly 10s of margin over that 55s
+// worst-case total for network/serialization overhead. An already-cropped
+// slip (the majority case) skips region detection entirely and finishes
+// well under this — this raises the ceiling for the slow path, it doesn't
+// change the typical-case latency.
+const REQUEST_TIMEOUT_MS = 65000;
 
 export type BetScreenshotErrorCode =
   | "malformed"
@@ -12,6 +30,7 @@ export type BetScreenshotErrorCode =
   | "FILE_TOO_LARGE"
   | "UNSUPPORTED_FILE_TYPE"
   | "INVALID_IMAGE_SIGNATURE"
+  | "IMAGE_TOO_LARGE"
   | "AI_NOT_CONFIGURED"
   | "AI_TIMEOUT"
   | "AI_UNAVAILABLE"
@@ -114,6 +133,8 @@ export function getBetScreenshotErrorMessage(failure: BetScreenshotFailure): str
       return "Unsupported file type. Please use a JPEG, PNG, or WEBP image.";
     case "INVALID_IMAGE_SIGNATURE":
       return "That file doesn't look like a valid image. Please choose a different file.";
+    case "IMAGE_TOO_LARGE":
+      return "That image's resolution is too large. Please crop it to the bet slip and try again.";
     case "AI_TIMEOUT":
       return "Recognition took too long. Please try again.";
     case "AI_UNAVAILABLE":

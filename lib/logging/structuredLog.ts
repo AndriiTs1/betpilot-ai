@@ -11,6 +11,16 @@
 
 export type ScreenshotPipelineEvent =
   | "screenshot_preview_started"
+  | "image_metadata_read"
+  | "image_too_large"
+  | "image_decode_failed"
+  | "region_detection_skipped"
+  | "region_detection_found"
+  | "region_detection_not_found"
+  | "region_detection_invalid"
+  | "region_detection_timeout"
+  | "region_detection_error"
+  | "crop_applied"
   | "ocr_succeeded"
   | "ocr_failed"
   | "parser_succeeded"
@@ -42,6 +52,15 @@ export interface ScreenshotPipelineLogMetadata {
   // Purely positional (0, 1, 2, ...) — never the selection's own content
   // (event/selection/market/odds/stake).
   selectionIndex?: number;
+  // Pixel dimensions only — never image bytes, never a data URL, never any
+  // decoded content. Used to distinguish the cropped-slip path from the
+  // full-screen-screenshot path in logs/metrics.
+  imageWidth?: number;
+  imageHeight?: number;
+  // The region-detection model's own confidence figure — a plain number,
+  // never its free-text `reason` (that field is deliberately never passed
+  // to this logger at all, see lib/ocr/regionDetection.ts).
+  regionConfidence?: number;
 }
 
 export function logScreenshotPipelineEvent(

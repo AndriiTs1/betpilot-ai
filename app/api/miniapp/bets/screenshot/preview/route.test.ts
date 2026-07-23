@@ -1,12 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
+import sharp from "sharp";
 import { NextRequest } from "next/server";
 import type { PrismaClient } from "@/lib/generated/prisma/client";
 import { handleScreenshotPreview } from "./route";
 import type { ParseBetSlipResult } from "@/lib/ai/betParser";
 import type { OcrProvider, OcrResult } from "@/lib/ocr/ocrTypes";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
+import type { RegionDetectionOutcome } from "@/lib/ocr/regionDetection";
 
 // Stage 14.3 — this route now runs upload validation -> OCR
 // (recognizeScreenshot, injectable) -> bet parsing (parseBetSlipMessage in
@@ -61,9 +63,17 @@ function registeredDb(): PrismaClient {
   return fakeDb([{ id: PLAYER_ID, telegramId: String(PLAYER_TELEGRAM_ID) }]);
 }
 
-// Deterministic fake OCR provider — no real Claude call.
-function fakeOcrProvider(recognize: () => Promise<OcrResult> | OcrResult): OcrProvider {
-  return { name: "fake-ocr-provider", recognize: async () => recognize() };
+// Deterministic fake OCR provider — no real Claude call. Passes the real
+// input through (rather than discarding it) so a test can inspect exactly
+// what buffer/mimeType this provider was invoked with — needed to confirm
+// a large image's OCR call actually received a cropped buffer, not the
+// original. Every existing zero-arg callback (`() => ocrSuccess(...)`)
+// keeps working unchanged: a function declared with fewer parameters is
+// still assignable/callable wherever more are provided.
+function fakeOcrProvider(
+  recognize: (input: import("@/lib/ocr/ocrTypes").OcrImageInput) => Promise<OcrResult> | OcrResult,
+): OcrProvider {
+  return { name: "fake-ocr-provider", recognize: async (input) => recognize(input) };
 }
 
 function ocrSuccess(rawText: string): OcrResult {
@@ -101,12 +111,28 @@ async function fakeVerifyOddsFn(): Promise<OddsCheckResult> {
   };
 }
 
-// Minimal-but-valid signature bytes for each allowed format — long enough
-// to pass detectImageSignature() in route.ts; pixel content is irrelevant
-// since nothing in this pipeline ever decodes the image (OCR is fully
-// faked).
+// Full-screen-screenshot support — the route now reads real image
+// dimensions via sharp (lib/ocr/screenshotPreprocessing.ts) before OCR
+// ever runs, so the fixture bytes must be genuinely decodable, not just a
+// magic-number prefix (that was sufficient before this stage, since
+// nothing in the pipeline decoded the image; OCR itself is still fully
+// faked below). Small on purpose (64x64) — well under
+// LARGE_SCREENSHOT_MIN_DIMENSION_PX, so these fixtures exercise the
+// "already-cropped slip" path (skips region detection) by default, exactly
+// like a real cropped bet-slip screenshot would.
+let realJpegBytes: Uint8Array;
+let realPngBytes: Uint8Array;
+let realWebpBytes: Uint8Array;
+
+test.before(async () => {
+  const image = () => sharp({ create: { width: 64, height: 64, channels: 3, background: { r: 30, g: 30, b: 30 } } });
+  realJpegBytes = new Uint8Array(await image().jpeg().toBuffer());
+  realPngBytes = new Uint8Array(await image().png().toBuffer());
+  realWebpBytes = new Uint8Array(await image().webp().toBuffer());
+});
+
 function jpegBytes(): Uint8Array {
-  return new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0]);
+  return realJpegBytes;
 }
 
 function buildRequest(initData: string, fileBytes: Uint8Array, mimeType: string, filename = "slip.jpg"): NextRequest {
@@ -195,12 +221,9 @@ test("screenshot preview: a valid upload flows through OCR -> parser -> preview 
 });
 
 test("screenshot preview: PNG and WEBP uploads are also accepted", async () => {
-  const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]);
-  const webpBytes = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]);
-
   for (const [bytes, mimeType] of [
-    [pngBytes, "image/png"],
-    [webpBytes, "image/webp"],
+    [realPngBytes, "image/png"],
+    [realWebpBytes, "image/webp"],
   ] as const) {
     const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
     const request = buildRequest(initData, bytes, mimeType);
@@ -536,6 +559,198 @@ test("screenshot preview: never creates a Bet, BetSelection, or Transaction (fak
 });
 
 // ---------------------------------------------------------------------
+// Full-screen-screenshot support — region detection integration
+// ---------------------------------------------------------------------
+
+function fakeDetectRegion(outcome: RegionDetectionOutcome): typeof import("@/lib/ocr/regionDetection").detectBettingRegion {
+  return (async () => outcome) as typeof import("@/lib/ocr/regionDetection").detectBettingRegion;
+}
+
+test("screenshot preview: an image with oversized pixel dimensions is rejected with IMAGE_TOO_LARGE, before OCR", async () => {
+  let ocrCalled = false;
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+
+  // Very wide, 1px tall, low-quality JPEG — genuinely exceeds
+  // MAX_IMAGE_DIMENSION_PX on one axis while compressing to a tiny byte
+  // size (well under the unrelated MAX_FILE_SIZE_BYTES check).
+  const oversizedBytes = new Uint8Array(
+    await sharp({ create: { width: 6500, height: 10, channels: 3, background: { r: 0, g: 0, b: 0 } } })
+      .jpeg({ quality: 1 })
+      .toBuffer(),
+  );
+
+  const request = buildRequest(initData, oversizedBytes, "image/jpeg");
+  const response = await handleScreenshotPreview(
+    request,
+    baseOptions({ ocrProvider: fakeOcrProvider(() => { ocrCalled = true; return ocrSuccess("x"); }) }),
+  );
+
+  assert.equal(response.status, 413);
+  assert.deepEqual(await response.json(), { error: "IMAGE_TOO_LARGE" });
+  assert.equal(ocrCalled, false);
+
+  assert.deepEqual(
+    parsedLogEvents().map((e) => e.event),
+    ["screenshot_preview_started", "image_metadata_read", "image_too_large"],
+  );
+});
+
+test("screenshot preview: a large full-screen-looking image with a detected region sends OCR a cropped buffer, not the original", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+
+  const largeBytes = new Uint8Array(
+    await sharp({ create: { width: 1600, height: 1000, channels: 3, background: { r: 40, g: 40, b: 40 } } })
+      .jpeg()
+      .toBuffer(),
+  );
+
+  let receivedBufferSize: number | null = null;
+  const ocrProvider = fakeOcrProvider((input) => {
+    receivedBufferSize = input.buffer.byteLength;
+    return ocrSuccess("Real Madrid vs Barcelona\nReal Madrid Win\nOdds 1.9\nStake 50");
+  });
+
+  const detectRegion = fakeDetectRegion({
+    kind: "FOUND",
+    region: { x: 0.1, y: 0.1, width: 0.3, height: 0.3 },
+    confidence: 0.91,
+    reason: "test region",
+    durationMs: 5,
+  });
+
+  const request = buildRequest(initData, largeBytes, "image/jpeg");
+  const response = await handleScreenshotPreview(request, baseOptions({ ocrProvider, detectRegion }));
+
+  assert.equal(response.status, 200);
+  assert.ok(receivedBufferSize !== null && receivedBufferSize < largeBytes.byteLength, "OCR must receive a smaller, cropped buffer");
+
+  const events = parsedLogEvents();
+  assert.deepEqual(events.map((e) => e.event), [
+    "screenshot_preview_started",
+    "image_metadata_read",
+    "region_detection_found",
+    "crop_applied",
+    "ocr_succeeded",
+    "parser_succeeded",
+    "odds_verification_succeeded",
+    "screenshot_preview_completed",
+  ]);
+  const regionEvent = events.find((e) => e.event === "region_detection_found")!;
+  assert.equal(regionEvent.regionConfidence, 0.91);
+  // The model's free-text reason must never reach the logs.
+  assert.equal(JSON.stringify(events).includes("test region"), false);
+});
+
+test("screenshot preview: a large image where no region is found still succeeds, using the original image", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+
+  const largeBytes = new Uint8Array(
+    await sharp({ create: { width: 1600, height: 1000, channels: 3, background: { r: 40, g: 40, b: 40 } } })
+      .jpeg()
+      .toBuffer(),
+  );
+
+  let receivedBufferSize: number | null = null;
+  const ocrProvider = fakeOcrProvider((input) => {
+    receivedBufferSize = input.buffer.byteLength;
+    return ocrSuccess("Real Madrid vs Barcelona\nReal Madrid Win\nOdds 1.9\nStake 50");
+  });
+
+  const detectRegion = fakeDetectRegion({ kind: "NOT_FOUND", reason: "nothing found", durationMs: 5 });
+
+  const request = buildRequest(initData, largeBytes, "image/jpeg");
+  const response = await handleScreenshotPreview(request, baseOptions({ ocrProvider, detectRegion }));
+
+  assert.equal(response.status, 200);
+  assert.equal(receivedBufferSize, largeBytes.byteLength, "OCR must receive the original, uncropped buffer");
+
+  assert.deepEqual(
+    parsedLogEvents().map((e) => e.event),
+    [
+      "screenshot_preview_started",
+      "image_metadata_read",
+      "region_detection_not_found",
+      "ocr_succeeded",
+      "parser_succeeded",
+      "odds_verification_succeeded",
+      "screenshot_preview_completed",
+    ],
+  );
+});
+
+test("screenshot preview: region detection timing out still succeeds via full-image OCR fallback", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+
+  const largeBytes = new Uint8Array(
+    await sharp({ create: { width: 1600, height: 1000, channels: 3, background: { r: 40, g: 40, b: 40 } } })
+      .jpeg()
+      .toBuffer(),
+  );
+
+  const detectRegion = fakeDetectRegion({ kind: "TIMEOUT", durationMs: 12000 });
+
+  const request = buildRequest(initData, largeBytes, "image/jpeg");
+  const response = await handleScreenshotPreview(request, baseOptions({ detectRegion }));
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(
+    parsedLogEvents().map((e) => e.event),
+    [
+      "screenshot_preview_started",
+      "image_metadata_read",
+      "region_detection_timeout",
+      "ocr_succeeded",
+      "parser_succeeded",
+      "odds_verification_succeeded",
+      "screenshot_preview_completed",
+    ],
+  );
+});
+
+test("screenshot preview: an invalid detected region falls back to full-image OCR rather than failing", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+
+  const largeBytes = new Uint8Array(
+    await sharp({ create: { width: 1600, height: 1000, channels: 3, background: { r: 40, g: 40, b: 40 } } })
+      .jpeg()
+      .toBuffer(),
+  );
+
+  let receivedBufferSize: number | null = null;
+  const ocrProvider = fakeOcrProvider((input) => {
+    receivedBufferSize = input.buffer.byteLength;
+    return ocrSuccess("Real Madrid vs Barcelona\nReal Madrid Win\nOdds 1.9\nStake 50");
+  });
+
+  // What detectBettingRegion() actually returns for a degenerate box (e.g.
+  // negative width, or too small even after padding) — it validates
+  // internally via clampAndPadRegion and only ever resolves FOUND with an
+  // already-safe region; a raw/unvalidated box never reaches this far as
+  // "found:true" (see lib/ocr/regionDetection.test.ts's own coverage of
+  // that validation step).
+  const detectRegion = fakeDetectRegion({ kind: "INVALID", reason: "degenerate box", durationMs: 5 });
+
+  const request = buildRequest(initData, largeBytes, "image/jpeg");
+  const response = await handleScreenshotPreview(request, baseOptions({ ocrProvider, detectRegion }));
+
+  assert.equal(response.status, 200);
+  assert.equal(receivedBufferSize, largeBytes.byteLength, "an invalid region must never be cropped to; OCR gets the original");
+
+  assert.deepEqual(
+    parsedLogEvents().map((e) => e.event),
+    [
+      "screenshot_preview_started",
+      "image_metadata_read",
+      "region_detection_invalid",
+      "ocr_succeeded",
+      "parser_succeeded",
+      "odds_verification_succeeded",
+      "screenshot_preview_completed",
+    ],
+  );
+});
+
+// ---------------------------------------------------------------------
 // Stage 14.4A — timing + structured logging
 // ---------------------------------------------------------------------
 
@@ -551,11 +766,17 @@ test("screenshot preview: a successful request logs the full expected event sequ
 
   assert.deepEqual(eventNames, [
     "screenshot_preview_started",
+    "image_metadata_read",
+    "region_detection_skipped",
     "ocr_succeeded",
     "parser_succeeded",
     "odds_verification_succeeded",
     "screenshot_preview_completed",
   ]);
+
+  const metadataEvent = events.find((e) => e.event === "image_metadata_read")!;
+  assert.equal(metadataEvent.imageWidth, 64);
+  assert.equal(metadataEvent.imageHeight, 64);
 
   const ocrEvent = events.find((e) => e.event === "ocr_succeeded")!;
   assert.equal(typeof ocrEvent.durationMs, "number");
@@ -591,9 +812,9 @@ test("screenshot preview: OCR failure logs ocr_failed with the failure code and 
   const events = parsedLogEvents();
   assert.deepEqual(
     events.map((e) => e.event),
-    ["screenshot_preview_started", "ocr_failed"],
+    ["screenshot_preview_started", "image_metadata_read", "region_detection_skipped", "ocr_failed"],
   );
-  const ocrFailed = events[1];
+  const ocrFailed = events[3];
   assert.equal(ocrFailed.failureCode, "NO_TEXT_FOUND");
   assert.equal(typeof ocrFailed.durationMs, "number");
 });
@@ -608,7 +829,7 @@ test("screenshot preview: a parser rejection logs parser_rejected; a parser time
   );
   assert.deepEqual(
     parsedLogEvents().map((e) => e.event),
-    ["screenshot_preview_started", "ocr_succeeded", "parser_rejected"],
+    ["screenshot_preview_started", "image_metadata_read", "region_detection_skipped", "ocr_succeeded", "parser_rejected"],
   );
 
   loggedLines = [];
@@ -620,7 +841,7 @@ test("screenshot preview: a parser rejection logs parser_rejected; a parser time
   );
   assert.deepEqual(
     parsedLogEvents().map((e) => e.event),
-    ["screenshot_preview_started", "ocr_succeeded", "parser_timed_out"],
+    ["screenshot_preview_started", "image_metadata_read", "region_detection_skipped", "ocr_succeeded", "parser_timed_out"],
   );
 });
 
@@ -636,7 +857,7 @@ test("screenshot preview: the bet parser throwing logs parser_failed", async () 
 
   assert.deepEqual(
     parsedLogEvents().map((e) => e.event),
-    ["screenshot_preview_started", "ocr_succeeded", "parser_failed"],
+    ["screenshot_preview_started", "image_metadata_read", "region_detection_skipped", "ocr_succeeded", "parser_failed"],
   );
 });
 
