@@ -11,7 +11,9 @@ Live deployment: [betpilot-ai-five.vercel.app](https://betpilot-ai-five.vercel.a
 Current project documentation:
 
 - `README.md` — what the system does today (this file)
-- `docs/CHANGELOG.md` — chronological log of completed development stages. **Stops at Stage 5.0D** (operator dashboard/API auth) — everything from EXPRESS bet support onward (settlement, OCR, the Bet UI Design System, sport icons) shipped afterward and isn't logged there yet; this README reflects it, the changelog doesn't.
+- `RELEASE_NOTES_v1.0.0.md` — what shipped in the v1.0.0 release
+- `CHANGELOG.md` — versioned change history in [Keep a Changelog](https://keepachangelog.com/) format
+- `docs/CHANGELOG.md` — chronological log of completed development stages, a different document from the root `CHANGELOG.md` above. **Stops at Stage 5.0D** (operator dashboard/API auth) — everything from EXPRESS bet support onward (settlement, OCR, the Bet UI Design System, sport icons, the v1.0 release hardening) shipped afterward and isn't logged there; this README and the root `CHANGELOG.md` reflect it, this file doesn't.
 - `docs/decisions/` — Architecture Decision Records (ADRs): why significant technical/product decisions were made
 - `docs/architecture/`, `docs/domain/` — original pre-implementation planning docs (outdated, see note above)
 - `OPERATOR_AUTH_AUDIT.md`, `docs/OPERATOR_AUTH_IMPLEMENTATION.md` — the approved design and implementation notes for operator authentication
@@ -20,7 +22,7 @@ Current project documentation:
 
 ## Status
 
-Operator authentication (session-based login, every dashboard page and API route protected), the operator workflow (queue, confirm/reject against credit limit, player notification), and the player-facing Telegram Mini App (balance, active bets, history, bet submission) are built and running in production on a real Postgres database.
+**v1.0.** Operator authentication (session-based login, every dashboard page and API route protected), the operator workflow (queue, confirm/reject against credit limit, player notification), and the player-facing Telegram Mini App (balance, active bets, history, bet submission) are built and running in production on a real Postgres database. The credit-limit check is safe under concurrent confirms (a `SELECT ... FOR UPDATE` row lock closes a write-skew race — see "Credit-limit risk model" below), baseline HTTP security headers protect the operator surface, and 505 automated tests cover authentication, the bet lifecycle, and settlement.
 
 Both **SINGLE and EXPRESS (2–10 selection accumulator) bets** can be submitted as text or a screenshot, AI-parsed, odds-verified per leg, and confirmed into a real `Bet` (+ `BetSelection` rows for EXPRESS). The Mini App and the operator dashboard share one **Bet UI Design System** (`components/bets/SelectionRow.tsx` / `SelectionList.tsx`) so a bet's selections render with the same information hierarchy everywhere — full, uncollapsed disclosure in decision contexts (Preview, Confirmation Ticket, operator Pending Queue), and a "first 3 + N more" summary in review contexts (Active Bets, History).
 
@@ -86,7 +88,8 @@ Both **SINGLE and EXPRESS (2–10 selection accumulator) bets** can be submitted
 
 - `Player.creditLimit` / `Player.currentCredit` (`currentCredit` negative = player owes; positive = player is up).
 - A bet is accepted into the queue with **no** credit check (operator should see risky requests too).
-- On **confirm**, `POST /api/bets/[id]/confirm` computes remaining credit, subtracts the player's other `CONFIRMED` exposure, and rejects with `409` if the new bet's stake exceeds what's left. The status flip to `CONFIRMED` is an atomic conditional update (`where: { status: "PENDING" }`) guarding against concurrent confirm/reject races.
+- On **confirm**, `POST /api/bets/[id]/confirm` computes remaining credit, subtracts the player's other `CONFIRMED` exposure, and rejects with `409` if the new bet's stake exceeds what's left. The status flip to `CONFIRMED` is an atomic conditional update (`where: { status: "PENDING" }`) guarding against a concurrent confirm/reject of the *same* bet.
+- **Concurrency-safe across different bets, too.** The exposure check runs inside the same transaction as a `SELECT ... FOR UPDATE` lock on the player's row. This closes a write-skew race where two *different* PENDING bets for the same player, confirmed at nearly the same instant, could each read a stale, pre-commit exposure snapshot and both be approved even though their combined stake exceeds the limit — a real gap the row lock and its dedicated concurrency tests (`app/api/bets/confirm.route.test.ts`) close and verify, including a test that reproduces the original bug when the lock is removed.
 
 **Settlement** (`lib/bets/settleBet.ts`, `lib/bets/settlementRules.ts`, `POST /api/bets/[id]/settle`)
 
@@ -119,6 +122,7 @@ Both **SINGLE and EXPRESS (2–10 selection accumulator) bets** can be submitted
 - Deployed on Vercel, GitHub auto-deploy on push to `main` (has occasionally not fired — see below), Neon Postgres, **one shared database with no separate dev/staging copy** (see `docs/decisions/ADR-0001-project-history.md`).
 - `lib/auth/operatorAuth.ts` — constant-time (`timingSafeEqual`) Bearer-token check for the internal `/api/bets/*` API, layered underneath the session-cookie check on the dashboard proxy routes, not replaced by it.
 - `VERCEL_PROJECT_PRODUCTION_URL` used (not `request.url`) so internal dashboard→API fetches don't get redirected to a login page by Vercel Deployment Protection.
+- **Security headers** (`next.config.ts`'s `headers()`): `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin` — scoped to the operator dashboard and its API surface (`/`, `/operator/*`, `/debug/*`, `/api/bets/*`, `/api/dashboard/*`, `/api/operator/*`). Deliberately **excludes** `/miniapp` and `/api/miniapp/*`: Telegram Web legitimately loads the Mini App inside its own `<iframe>`, and framing it out would break the app in production.
 
 ## Closed-demo player onboarding
 
@@ -157,7 +161,7 @@ A closed demo has no public sign-up: every player is invited by an operator befo
 - **The Odds API** — live odds
 - **Telegram Bot API** + **Telegram Mini Apps** — player messaging and the `/miniapp` player-facing UI
 - **Tabler Icons** webfont (operator dashboard) + **lucide-react** (Mini App) + prepared PNG artwork for sport/Express icons, shared by both surfaces
-- **`node --test`** (Node's built-in test runner, via `tsx`) — the project's one test framework; no Jest/Vitest. No DOM-rendering test infra (no jsdom/@testing-library) — component tests exercise pure/exported logic only, not rendered trees
+- **`node --test`** (Node's built-in test runner, via `tsx`) — the project's one test framework; no Jest/Vitest. **505 tests** as of v1.0, covering operator auth, the bet lifecycle (confirm/reject/settle, including dedicated confirm-route concurrency tests), AI parsing, OCR, and odds verification. No DOM-rendering test infra (no jsdom/@testing-library) — component tests exercise pure/exported logic only, not rendered trees
 - Deployed on **Vercel**
 
 ## Getting Started

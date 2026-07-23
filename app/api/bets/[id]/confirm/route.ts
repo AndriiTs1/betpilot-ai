@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
-import { Prisma } from "@/lib/generated/prisma/client";
+import { Prisma, type PrismaClient } from "@/lib/generated/prisma/client";
 import { isOperatorAuthorized } from "@/lib/auth/operatorAuth";
 import { serializeBet } from "@/lib/bets/serialize";
 import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
@@ -9,23 +9,33 @@ import { computeRemainingCredit } from "@/lib/players/credit";
 
 class InsufficientCreditError extends Error {}
 class BetNoLongerPendingError extends Error {}
+class PlayerNotFoundError extends Error {}
 
 function isRecordNotFoundError(err: unknown): boolean {
   return err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025";
 }
 
-export async function POST(
+export interface HandleBetConfirmOptions {
+  db?: PrismaClient;
+}
+
+// Exported and DI-friendly (same shape as
+// app/api/bets/[id]/settle/route.ts's handleSettleBet) so a route test can
+// inject an in-memory fake instead of hitting the real, single shared
+// database. POST itself always calls this with no overrides.
+export async function handleBetConfirm(
   request: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
+  id: string,
+  options: HandleBetConfirmOptions = {},
+): Promise<NextResponse> {
   if (!isOperatorAuthorized(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { id } = await params;
+  const db = options.db ?? prisma;
 
   try {
-    const existing = await prisma.bet.findUnique({
+    const existing = await db.bet.findUnique({
       where: { id },
       include: { player: true },
     });
@@ -43,17 +53,38 @@ export async function POST(
 
     const stake = existing.stake;
 
-    const result = await prisma.$transaction(async (tx) => {
+    const result = await db.$transaction(async (tx) => {
+      // Row lock on this player, held for the rest of this transaction —
+      // closes a write-skew race where two concurrent confirms for two
+      // *different* PENDING bets belonging to the same player could each
+      // compute exposure before the other commits, both pass the credit
+      // check, and both commit even though their combined stake exceeds
+      // the limit (the previous single-bet conditional update below only
+      // ever guarded the *same* bet against a double-confirm, not this).
+      // Prisma has no query-builder API for `SELECT ... FOR UPDATE`, so
+      // this one line is raw SQL; a second concurrent transaction's own
+      // lock acquisition for the same player blocks here until this
+      // transaction commits or rolls back, so by the time it reads
+      // exposure below, it already reflects this transaction's outcome.
+      const [lockedPlayer] = await tx.$queryRaw<
+        { id: string; creditLimit: Prisma.Decimal; currentCredit: Prisma.Decimal }[]
+      >`SELECT id, "creditLimit", "currentCredit" FROM "Player" WHERE id = ${existing.playerId} FOR UPDATE`;
+
+      if (!lockedPlayer) throw new PlayerNotFoundError();
+
       // Exposure = sum of stake across this player's other CONFIRMED bets.
-      // The bet being confirmed here is still PENDING at this point, so it's
-      // naturally excluded without an explicit id filter.
+      // The bet being confirmed here is still PENDING at this point, so
+      // it's naturally excluded without an explicit id filter. Read after
+      // acquiring the lock above, so a concurrent confirm that was waiting
+      // on it is now guaranteed to be fully committed (or rolled back) —
+      // never a stale, pre-commit snapshot.
       const exposureAgg = await tx.bet.aggregate({
         where: { playerId: existing.playerId, status: "CONFIRMED" },
         _sum: { stake: true },
       });
       const exposure = exposureAgg._sum.stake ?? new Prisma.Decimal(0);
 
-      const remainingCredit = computeRemainingCredit(existing.player);
+      const remainingCredit = computeRemainingCredit(lockedPlayer);
 
       const available = remainingCredit.minus(exposure);
 
@@ -118,4 +149,12 @@ export async function POST(
     console.error(`POST /api/bets/${id}/confirm failed:`, err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
+}
+
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const { id } = await params;
+  return handleBetConfirm(request, id);
 }

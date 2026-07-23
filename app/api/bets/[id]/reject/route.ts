@@ -1,23 +1,32 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
-import { Prisma } from "@/lib/generated/prisma/client";
+import { Prisma, type PrismaClient } from "@/lib/generated/prisma/client";
 import { isOperatorAuthorized } from "@/lib/auth/operatorAuth";
 import { serializeBet } from "@/lib/bets/serialize";
 import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
 import { escapeHtml } from "@/lib/telegram/escapeHtml";
 
-export async function POST(
+export interface HandleBetRejectOptions {
+  db?: PrismaClient;
+}
+
+// Exported and DI-friendly (same shape as confirm/route.ts's
+// handleBetConfirm) so a route test can inject an in-memory fake instead
+// of hitting the real, single shared database. POST itself always calls
+// this with no overrides.
+export async function handleBetReject(
   request: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
+  id: string,
+  options: HandleBetRejectOptions = {},
+): Promise<NextResponse> {
   if (!isOperatorAuthorized(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { id } = await params;
+  const db = options.db ?? prisma;
 
   try {
-    const existing = await prisma.bet.findUnique({
+    const existing = await db.bet.findUnique({
       where: { id },
       include: { player: true },
     });
@@ -36,7 +45,7 @@ export async function POST(
     let updatedBet;
 
     try {
-      updatedBet = await prisma.bet.update({
+      updatedBet = await db.bet.update({
         where: { id, status: "PENDING" },
         data: { status: "REJECTED" },
       });
@@ -71,4 +80,12 @@ export async function POST(
     console.error(`POST /api/bets/${id}/reject failed:`, err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
+}
+
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const { id } = await params;
+  return handleBetReject(request, id);
 }
