@@ -9,6 +9,7 @@ import {
 } from "@/lib/betPreview/previewToken";
 import { createBetFromPreview } from "@/lib/bets/createBetFromPreview";
 import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
+import { verifyPreviewFreshness, type VerifyPreviewFreshnessOptions } from "@/lib/bets/verifyPreviewFreshness";
 
 // Requires node:crypto (verifyInitData/verifyPreviewToken) and Prisma —
 // neither runs on the Edge runtime.
@@ -155,6 +156,12 @@ export interface HandleBetConfirmOptions {
   db?: PrismaClient;
   botToken?: string;
   previewTokenSecret?: string;
+  // Step 11B — forwarded as-is to verifyPreviewFreshness's own
+  // buildBetSlipPreview call. Production supplies neither, so freshness
+  // verification falls through to the real default provider, exactly like
+  // preview creation already does.
+  verifyOddsFn?: VerifyPreviewFreshnessOptions["verifyOddsFn"];
+  oddsVerificationService?: VerifyPreviewFreshnessOptions["oddsVerificationService"];
 }
 
 export async function handleBetConfirm(
@@ -242,6 +249,43 @@ export async function handleBetConfirm(
         return NextResponse.json({ error: "PREVIEW_INVALID" }, { status: 422 });
       }
 
+      // Step 11B idempotency fast-path — an already-confirmed preview must
+      // never trigger a second (paid) provider call. Mirrors the exact same
+      // previewId lookup createBetFromPreview.ts's own transaction performs,
+      // run here first and read-only, purely to short-circuit before any
+      // re-verification.
+      const existingExpress = await db.bet.findUnique({
+        where: { previewId: payload.previewId },
+        include: { selections: true },
+      });
+      if (existingExpress) {
+        return NextResponse.json({ bet: serializeExpressBet(existingExpress), idempotent: true });
+      }
+
+      const expressFreshness = await verifyPreviewFreshness(payload, previewTokenSecret, {
+        verifyOddsFn: options.verifyOddsFn,
+        oddsVerificationService: options.oddsVerificationService,
+      });
+
+      if (expressFreshness.kind === "ODDS_CHANGED") {
+        return NextResponse.json(
+          {
+            error: "ODDS_CHANGED_RECONFIRM_REQUIRED",
+            refreshedPreview: expressFreshness.refreshedPreview,
+            refreshedPreviewToken: expressFreshness.refreshedPreviewToken,
+          },
+          { status: 409 },
+        );
+      }
+
+      if (expressFreshness.kind === "SELECTION_UNAVAILABLE") {
+        return NextResponse.json({ error: "SELECTION_UNAVAILABLE" }, { status: 422 });
+      }
+
+      if (expressFreshness.kind === "VERIFICATION_UNAVAILABLE") {
+        return NextResponse.json({ error: "VERIFICATION_UNAVAILABLE" }, { status: 503 });
+      }
+
       const { bet, idempotent } = await createBetFromPreview(payload, { db });
 
       return NextResponse.json({
@@ -262,6 +306,45 @@ export async function handleBetConfirm(
     // never confirms or denies that a *different* player's token was used.
     if (payload.playerId !== player.id || payload.type !== "SINGLE") {
       return NextResponse.json({ error: "PREVIEW_INVALID" }, { status: 422 });
+    }
+
+    // Step 11B idempotency fast-path — an already-confirmed preview must
+    // never trigger a second (paid) provider call. Mirrors the exact same
+    // previewId lookup createBetFromPreview.ts's own transaction performs,
+    // run here first and read-only, purely to short-circuit before any
+    // re-verification.
+    const existingSingle = await db.bet.findUnique({ where: { previewId: payload.previewId } });
+    if (existingSingle) {
+      return NextResponse.json({ bet: serializeSingleBet(existingSingle), idempotent: true });
+    }
+
+    // Step 11B — confirmation-time odds freshness verification. The one and
+    // only new provider call this route makes: verifyPreviewFreshness is a
+    // pure domain service (lib/bets/verifyPreviewFreshness.ts) that reuses
+    // buildBetSlipPreview() exactly once, never a direct provider call, and
+    // never a second comparison implementation.
+    const freshness = await verifyPreviewFreshness(payload, previewTokenSecret, {
+      verifyOddsFn: options.verifyOddsFn,
+      oddsVerificationService: options.oddsVerificationService,
+    });
+
+    if (freshness.kind === "ODDS_CHANGED") {
+      return NextResponse.json(
+        {
+          error: "ODDS_CHANGED_RECONFIRM_REQUIRED",
+          refreshedPreview: freshness.refreshedPreview,
+          refreshedPreviewToken: freshness.refreshedPreviewToken,
+        },
+        { status: 409 },
+      );
+    }
+
+    if (freshness.kind === "SELECTION_UNAVAILABLE") {
+      return NextResponse.json({ error: "SELECTION_UNAVAILABLE" }, { status: 422 });
+    }
+
+    if (freshness.kind === "VERIFICATION_UNAVAILABLE") {
+      return NextResponse.json({ error: "VERIFICATION_UNAVAILABLE" }, { status: 503 });
     }
 
     const { bet, idempotent } = await createBetFromPreview(payload, { db });
