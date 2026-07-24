@@ -6,6 +6,7 @@ import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
 import { isTelegramWebhookAuthorized } from "@/lib/auth/telegramWebhookAuth";
 import { bindInvitedPlayerByTelegramUsername } from "@/lib/telegram/bindInvitedPlayer";
 import { handleScreenshotMessage } from "@/lib/telegram/handleScreenshotMessage";
+import { handleOddsCommand, type HandleOddsCommandOptions } from "@/lib/telegram/oddsCommand";
 import type { TelegramUpdate } from "@/lib/telegram/telegramTypes";
 import type { OcrProvider } from "@/lib/ocr/ocrTypes";
 
@@ -107,6 +108,13 @@ export interface HandleTelegramWebhookOptions {
   // provider (see app/api/webhooks/telegram/route.test.ts), production
   // always gets handleScreenshotMessage's own real Claude-backed default.
   ocrProvider?: OcrProvider;
+  // Stage 14.5 (/odds command) — same DI shape as ocrProvider: tests inject
+  // fake parseBetSlip/odds-verification/clock/cooldown dependencies, all
+  // forwarded to handleOddsCommand as-is. `db` is deliberately not part of
+  // this bag — it's the same resolved `db` already used above for
+  // /start and screenshot handling, so it's passed through separately
+  // rather than duplicated in this sub-options object.
+  oddsCommandOptions?: Omit<HandleOddsCommandOptions, "db">;
 }
 
 export async function handleTelegramWebhook(
@@ -178,6 +186,17 @@ export async function handleTelegramWebhook(
       await bindInvitedPlayerByTelegramUsername(db, String(tgMessage.from.id), tgMessage.from.username);
 
       await sendTelegramMessage(chatId, WELCOME_TEXT, openAppKeyboard(origin));
+      return NextResponse.json({ ok: true });
+    }
+
+    // Stage 14.5 — the one exception to "the bot never parses message
+    // content into a bet" above: /odds is a deliberate, explicit, opt-in
+    // command (never triggered by ordinary text) that reuses the exact
+    // same parser/preview/odds-verification pipeline the Mini App already
+    // uses. See lib/telegram/oddsCommand.ts for the full authorization,
+    // cooldown, and error-handling behavior — this route only wires it in.
+    if (command === "odds") {
+      await handleOddsCommand(tgMessage, { db, ...options.oddsCommandOptions });
       return NextResponse.json({ ok: true });
     }
 

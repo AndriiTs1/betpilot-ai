@@ -4,6 +4,8 @@ import { NextRequest } from "next/server";
 import type { PrismaClient } from "@/lib/generated/prisma/client";
 import { handleTelegramWebhook } from "./route";
 import type { OcrProvider, OcrResult } from "@/lib/ocr/ocrTypes";
+import type { HandleOddsCommandOptions } from "@/lib/telegram/oddsCommand";
+import type { ParseBetSlipResult } from "@/lib/ai/betParser";
 
 // Route-level tests — everything screenshot-intake-specific is already
 // covered in depth by lib/telegram/handleScreenshotMessage.test.ts and
@@ -100,6 +102,7 @@ function postUpdate(
   body: unknown,
   db: PrismaClient = fakeDb(),
   ocrProvider: OcrProvider = defaultFakeOcrProvider(),
+  oddsCommandOptions?: Omit<HandleOddsCommandOptions, "db">,
 ): Promise<Response> {
   const request = new NextRequest("https://example.com/api/webhooks/telegram", {
     method: "POST",
@@ -109,7 +112,7 @@ function postUpdate(
     },
     body: JSON.stringify(body),
   });
-  return handleTelegramWebhook(request, { db, ocrProvider });
+  return handleTelegramWebhook(request, { db, ocrProvider, oddsCommandOptions });
 }
 
 test("webhook: rejects a request missing the secret token", async () => {
@@ -268,4 +271,164 @@ test("webhook: a repeated update_id does not cause a duplicate OCR call on the s
   assert.equal(second.status, 200);
   assert.equal(ocrRecognizeCallCount, 1, "the OCR provider must only be invoked once, for the first delivery");
   assert.equal(sentMessages.length, 1);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Stage 14.5 — /odds command route wiring                                    */
+/* -------------------------------------------------------------------------- */
+// The command's own authorization/cooldown/parsing/formatting behavior is
+// fully covered by lib/telegram/oddsCommand.test.ts against fakes — these
+// tests only prove the ROUTE dispatches to it correctly and doesn't disturb
+// any other branch. A fresh, never-reused telegramId per test avoids the
+// module-scoped odds-cooldown store (lib/telegram/oddsCommand.ts) leaking
+// between tests, exactly as in oddsCommand.test.ts itself.
+
+let nextOddsTelegramId = 900000001;
+function uniqueOddsTelegramId(): string {
+  nextOddsTelegramId += 1;
+  return String(nextOddsTelegramId);
+}
+
+function fakeOddsOptions(overrides: Partial<HandleOddsCommandOptions> = {}): Omit<HandleOddsCommandOptions, "db"> {
+  const validParse: ParseBetSlipResult = {
+    valid: true,
+    type: "SINGLE",
+    stake: 50,
+    selections: [{ sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid", submittedOdds: 2.05 }],
+  };
+  return {
+    previewTokenSecret: "test-route-preview-secret",
+    parseBetSlip: async () => validParse,
+    verifyOddsFn: async () => ({
+      matched: true,
+      withinTolerance: true,
+      sourceOdds: 2.05,
+      submittedOdds: 2.05,
+      discrepancyPercent: 0,
+      bookmaker: "Pinnacle",
+      note: null,
+    }),
+    ...overrides,
+  };
+}
+
+test("webhook: /odds with a valid payload invokes the odds handler and sends its reply, not the redirect", async () => {
+  const telegramId = uniqueOddsTelegramId();
+  const db = fakeDb([{ id: "player-odds-route-1", telegramId }]);
+
+  const response = await postUpdate(
+    {
+      update_id: 300,
+      message: { message_id: 10, date: 1700000000, text: "/odds Real Madrid vs Barcelona, odds 2.05", chat: { id: 900 }, from: { id: Number(telegramId) } },
+    },
+    db,
+    undefined,
+    fakeOddsOptions(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(sentMessages.length, 1);
+  assert.match(sentMessages[0].text, /Odds confirmed/);
+  assert.notEqual(sentMessages[0].text, "Для работы откройте приложение BetPilot AI.");
+});
+
+test("webhook: /odds@BotName with a valid payload also invokes the odds handler", async () => {
+  const telegramId = uniqueOddsTelegramId();
+  const db = fakeDb([{ id: "player-odds-route-2", telegramId }]);
+
+  const response = await postUpdate(
+    {
+      update_id: 301,
+      message: {
+        message_id: 11,
+        date: 1700000000,
+        text: "/odds@BetPilotAI_bot Real Madrid vs Barcelona, odds 2.05",
+        chat: { id: 901 },
+        from: { id: Number(telegramId) },
+      },
+    },
+    db,
+    undefined,
+    fakeOddsOptions(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(sentMessages.length, 1);
+  assert.match(sentMessages[0].text, /Odds confirmed/);
+});
+
+test("webhook: /odds for an unregistered account gets the odds handler's own rejection, not the generic redirect", async () => {
+  const response = await postUpdate(
+    {
+      update_id: 302,
+      message: { message_id: 12, date: 1700000000, text: "/odds Real Madrid vs Barcelona, odds 2.05", chat: { id: 902 }, from: { id: Number(uniqueOddsTelegramId()) } },
+    },
+    fakeDb([]),
+    undefined,
+    fakeOddsOptions(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(sentMessages.length, 1);
+  assert.match(sentMessages[0].text, /not registered/i);
+});
+
+test("webhook: a repeated update_id for /odds invokes the odds handler at most once", async () => {
+  const telegramId = uniqueOddsTelegramId();
+  const db = fakeDb([{ id: "player-odds-route-3", telegramId }]);
+  let parseCallCount = 0;
+  const options = fakeOddsOptions({
+    parseBetSlip: async () => {
+      parseCallCount += 1;
+      return {
+        valid: true,
+        type: "SINGLE",
+        stake: 50,
+        selections: [{ sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid", submittedOdds: 2.05 }],
+      };
+    },
+  });
+  const update = {
+    update_id: 303,
+    message: { message_id: 13, date: 1700000000, text: "/odds Real Madrid vs Barcelona, odds 2.05", chat: { id: 903 }, from: { id: Number(telegramId) } },
+  };
+
+  const first = await postUpdate(update, db, undefined, options);
+  const second = await postUpdate(update, db, undefined, options);
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(parseCallCount, 1, "the odds handler's parser must only run once, for the first delivery");
+  assert.equal(sentMessages.length, 1);
+});
+
+test("webhook: /start behavior is unchanged after adding the /odds branch", async () => {
+  const response = await postUpdate({
+    update_id: 304,
+    message: { message_id: 14, date: 1700000000, text: "/start", chat: { id: 904 }, from: { id: 99887766 } },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(sentMessages.length, 1);
+  assert.match(sentMessages[0].text, /Добро пожаловать/);
+});
+
+test("webhook: ordinary text still receives REDIRECT_TEXT after adding the /odds branch", async () => {
+  const response = await postUpdate({
+    update_id: 305,
+    message: { message_id: 15, date: 1700000000, text: "hello there", chat: { id: 905 }, from: { id: 99887767 } },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(sentMessages[0].text, "Для работы откройте приложение BetPilot AI.");
+});
+
+test("webhook: an unrelated command still receives REDIRECT_TEXT after adding the /odds branch", async () => {
+  const response = await postUpdate({
+    update_id: 306,
+    message: { message_id: 16, date: 1700000000, text: "/help", chat: { id: 906 }, from: { id: 99887768 } },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(sentMessages[0].text, "Для работы откройте приложение BetPilot AI.");
 });

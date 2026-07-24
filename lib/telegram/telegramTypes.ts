@@ -37,8 +37,11 @@ export interface TelegramMessage {
   document?: TelegramDocument;
   chat: { id: number };
   // username is genuinely optional in the Bot API (not every Telegram
-  // account has one set).
-  from: { id: number; username?: string };
+  // account has one set). is_bot (Stage 14.5 — /odds command) is likewise
+  // optional here even though the real Bot API always sends it: this type
+  // only declares what each consumer actually reads, and until now nothing
+  // did.
+  from: { id: number; username?: string; is_bot?: boolean };
 }
 
 export interface TelegramUpdate {
