@@ -6,7 +6,8 @@ import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
 import { isTelegramWebhookAuthorized } from "@/lib/auth/telegramWebhookAuth";
 import { bindInvitedPlayerByTelegramUsername } from "@/lib/telegram/bindInvitedPlayer";
 import { handleScreenshotMessage } from "@/lib/telegram/handleScreenshotMessage";
-import { handleOddsCommand, type HandleOddsCommandOptions } from "@/lib/telegram/oddsCommand";
+import { handleOddsCommand, handleNaturalLanguageOdds, type HandleOddsCommandOptions } from "@/lib/telegram/oddsCommand";
+import { looksLikeBettingText } from "@/lib/telegram/looksLikeBettingText";
 import type { TelegramUpdate } from "@/lib/telegram/telegramTypes";
 import type { OcrProvider } from "@/lib/ocr/ocrTypes";
 
@@ -108,12 +109,15 @@ export interface HandleTelegramWebhookOptions {
   // provider (see app/api/webhooks/telegram/route.test.ts), production
   // always gets handleScreenshotMessage's own real Claude-backed default.
   ocrProvider?: OcrProvider;
-  // Stage 14.5 (/odds command) — same DI shape as ocrProvider: tests inject
-  // fake parseBetSlip/odds-verification/clock/cooldown dependencies, all
-  // forwarded to handleOddsCommand as-is. `db` is deliberately not part of
-  // this bag — it's the same resolved `db` already used above for
-  // /start and screenshot handling, so it's passed through separately
-  // rather than duplicated in this sub-options object.
+  // Stage 14.5 (/odds command). Stage 14.6 (Step 10B) — natural-language
+  // betting text reuses this exact same options bag for
+  // handleNaturalLanguageOdds, deliberately: both entry points share one
+  // orchestration core (lib/telegram/oddsCommand.ts's runOddsLookup), so a
+  // test's fake parseBetSlip/odds-verification/clock/cooldown dependencies
+  // apply identically to either. `db` is deliberately not part of this bag
+  // — it's the same resolved `db` already used above for /start and
+  // screenshot handling, so it's passed through separately rather than
+  // duplicated in this sub-options object.
   oddsCommandOptions?: Omit<HandleOddsCommandOptions, "db">;
 }
 
@@ -200,8 +204,23 @@ export async function handleTelegramWebhook(
       return NextResponse.json({ ok: true });
     }
 
-    // Everything else — plain text or any other command — gets the same
-    // redirect. The bot never parses message content into a bet.
+    // Stage 14.6 (Step 10B) — natural-language betting text. Only ever
+    // considered when the message is not a command at all (command ===
+    // null): an unsupported/unrecognized slash command (e.g. "/help",
+    // "/oddswrong ...") never reaches looksLikeBettingText, regardless of
+    // its content, and falls straight through to the existing REDIRECT_TEXT
+    // fallback below like it always has. looksLikeBettingText() is a pure,
+    // synchronous, free check — cheap enough to run before deciding whether
+    // the (still fully authorization/cooldown/config-gated)
+    // handleNaturalLanguageOdds is worth invoking at all.
+    if (command === null && looksLikeBettingText(tgMessage.text)) {
+      await handleNaturalLanguageOdds(tgMessage, { db, ...options.oddsCommandOptions });
+      return NextResponse.json({ ok: true });
+    }
+
+    // Everything else — plain text that doesn't look like a bet, or any
+    // other command — gets the same redirect. The bot never parses
+    // unrecognized message content into a bet.
     await sendTelegramMessage(chatId, REDIRECT_TEXT, openAppKeyboard(origin));
 
     return NextResponse.json({ ok: true });

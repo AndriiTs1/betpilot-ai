@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { PrismaClient } from "@/lib/generated/prisma/client";
-import { handleOddsCommand } from "./oddsCommand";
+import { handleOddsCommand, handleNaturalLanguageOdds } from "./oddsCommand";
 import type { TelegramMessage } from "./telegramTypes";
 import type { ParseBetSlipResult } from "@/lib/ai/betParser";
 import type { OddsVerificationInput } from "@/lib/odds/oddsVerifier";
@@ -967,4 +967,707 @@ test("handleOddsCommand: two different users with concurrent deferred requests b
   gateB.resolve({ valid: false, error: "n/a" });
   await requestA;
   await requestB;
+});
+
+/* -------------------------------------------------------------------------- */
+/* Step 10B — handleNaturalLanguageOdds: the same shared core reused for     */
+/* ordinary text that app/api/webhooks/telegram/route.ts has already        */
+/* decided looksLikeBettingText() for. This module never re-runs that gate — */
+/* every text passed to handleNaturalLanguageOdds below is treated as        */
+/* already-accepted by the caller.                                           */
+/* -------------------------------------------------------------------------- */
+
+const NATURAL_TEXT = "Real Madrid to win vs Barcelona, odds 2.05";
+
+test("handleNaturalLanguageOdds: authorized valid natural text succeeds and formats via formatOddsReply", async () => {
+  const telegramId = uniqueTelegramId();
+  const { fn: parseBetSlip } = fakeParseBetSlip(validSingleParse());
+
+  const outcome = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db: registeredDb(telegramId),
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    verifyOddsFn: fakeVerifyOddsFn({ "Real Madrid vs Barcelona": verified(2.05, 2.05) }),
+  });
+
+  assert.deepEqual(outcome, { kind: "SUCCESS" });
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /Odds confirmed/);
+});
+
+test("handleNaturalLanguageOdds: an unauthorized user never reaches the parser or provider", async () => {
+  const telegramId = uniqueTelegramId();
+  const { fn: parseBetSlip, getCallCount } = fakeParseBetSlip(validSingleParse());
+
+  const outcome = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db: fakeDb([]),
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+  });
+
+  assert.deepEqual(outcome, { kind: "UNAUTHORIZED" });
+  assert.equal(getCallCount(), 0);
+});
+
+test("handleNaturalLanguageOdds: a bot-authored message never accesses DB/parser/provider", async () => {
+  const { fn: parseBetSlip, getCallCount } = fakeParseBetSlip(validSingleParse());
+  let dbCalled = false;
+
+  const outcome = await handleNaturalLanguageOdds(
+    baseMessage(uniqueTelegramId(), { text: NATURAL_TEXT }, { is_bot: true }),
+    {
+      db: { player: { findUnique: async () => { dbCalled = true; return null; } } } as unknown as PrismaClient,
+      parseBetSlip,
+      sendMessage: fakeSend(),
+      previewTokenSecret: TEST_SECRET,
+    },
+  );
+
+  assert.deepEqual(outcome, { kind: "IGNORED_BOT" });
+  assert.equal(dbCalled, false);
+  assert.equal(getCallCount(), 0);
+  assert.deepEqual(sent, []);
+});
+
+test("handleNaturalLanguageOdds: a missing preview-token secret never calls the parser and consumes no cooldown", async () => {
+  const telegramId = uniqueTelegramId();
+  const now = () => 8_000_000;
+  const db = registeredDb(telegramId);
+  const { fn: parseBetSlip, getCallCount } = fakeParseBetSlip(validSingleParse());
+  const originalEnv = process.env.BET_PREVIEW_TOKEN_SECRET;
+  delete process.env.BET_PREVIEW_TOKEN_SECRET;
+
+  try {
+    const first = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+      db,
+      parseBetSlip,
+      sendMessage: fakeSend(),
+      now,
+      cooldownMs: 10_000,
+    });
+    assert.deepEqual(first, { kind: "CONFIG_UNAVAILABLE" });
+    assert.equal(getCallCount(), 0);
+  } finally {
+    if (originalEnv !== undefined) process.env.BET_PREVIEW_TOKEN_SECRET = originalEnv;
+  }
+
+  const second = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db,
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    verifyOddsFn: fakeVerifyOddsFn({ "Real Madrid vs Barcelona": verified(2.05, 2.05) }),
+    now,
+    cooldownMs: 10_000,
+  });
+  assert.deepEqual(second, { kind: "SUCCESS" });
+  assert.equal(getCallCount(), 1);
+});
+
+test("handleNaturalLanguageOdds: text shorter than the minimum never calls the parser and consumes no cooldown", async () => {
+  const telegramId = uniqueTelegramId();
+  const now = () => 8_000_001;
+  const db = registeredDb(telegramId);
+  const { fn: parseBetSlip, getCallCount } = fakeParseBetSlip(validSingleParse());
+
+  const first = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: "ab" }), {
+    db,
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+  assert.deepEqual(first, { kind: "INVALID_PAYLOAD" });
+  assert.equal(getCallCount(), 0);
+
+  const second = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db,
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    verifyOddsFn: fakeVerifyOddsFn({ "Real Madrid vs Barcelona": verified(2.05, 2.05) }),
+    now,
+    cooldownMs: 10_000,
+  });
+  assert.deepEqual(second, { kind: "SUCCESS" });
+});
+
+test("handleNaturalLanguageOdds: text longer than the maximum never calls the parser and consumes no cooldown", async () => {
+  const telegramId = uniqueTelegramId();
+  const now = () => 8_000_002;
+  const db = registeredDb(telegramId);
+  const { fn: parseBetSlip, getCallCount } = fakeParseBetSlip(validSingleParse());
+  const tooLong = "a".repeat(2001);
+
+  const first = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: tooLong }), {
+    db,
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+  assert.deepEqual(first, { kind: "INVALID_PAYLOAD" });
+  assert.equal(getCallCount(), 0);
+
+  const second = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db,
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    verifyOddsFn: fakeVerifyOddsFn({ "Real Madrid vs Barcelona": verified(2.05, 2.05) }),
+    now,
+    cooldownMs: 10_000,
+  });
+  assert.deepEqual(second, { kind: "SUCCESS" });
+});
+
+test("handleNaturalLanguageOdds: parser valid:false retains the cooldown", async () => {
+  const telegramId = uniqueTelegramId();
+  const now = () => 8_000_003;
+  const db = registeredDb(telegramId);
+  const { fn: parseBetSlip, getCallCount } = fakeParseBetSlip({ valid: false, error: "not a bet" });
+
+  const first = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db,
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+  assert.deepEqual(first, { kind: "PARSE_FAILED" });
+  assert.equal(getCallCount(), 1);
+
+  const second = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db,
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+  assert.deepEqual(second, { kind: "COOLDOWN" });
+  assert.equal(getCallCount(), 1);
+});
+
+test("handleNaturalLanguageOdds: a parser timeout retains the cooldown", async () => {
+  const telegramId = uniqueTelegramId();
+  const now = () => 8_000_004;
+  const db = registeredDb(telegramId);
+  const { fn: parseBetSlip, getCallCount } = fakeParseBetSlip({ valid: false, error: "timed out", code: "timeout" });
+
+  const first = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db,
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+  assert.deepEqual(first, { kind: "PARSE_TIMEOUT" });
+
+  const second = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db,
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+  assert.deepEqual(second, { kind: "COOLDOWN" });
+  assert.equal(getCallCount(), 1);
+});
+
+test("handleNaturalLanguageOdds: a parser throw retains the cooldown", async () => {
+  const telegramId = uniqueTelegramId();
+  const now = () => 8_000_005;
+  const db = registeredDb(telegramId);
+  let callCount = 0;
+  const throwingParseBetSlip = async () => {
+    callCount += 1;
+    throw new Error("simulated unexpected parser failure");
+  };
+
+  const first = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db,
+    parseBetSlip: throwingParseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+  assert.deepEqual(first, { kind: "UNEXPECTED_ERROR" });
+  assert.equal(callCount, 1);
+
+  const second = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db,
+    parseBetSlip: throwingParseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+  assert.deepEqual(second, { kind: "COOLDOWN" });
+  assert.equal(callCount, 1);
+});
+
+test("handleNaturalLanguageOdds: a buildBetSlipPreview/provider failure retains the cooldown", async () => {
+  const telegramId = uniqueTelegramId();
+  const now = () => 8_000_006;
+  const db = registeredDb(telegramId);
+  const { fn: parseBetSlip, getCallCount } = fakeParseBetSlip(validSingleParse());
+  const failingService = {
+    verifyMany: async () => {
+      throw new Error("simulated provider failure");
+    },
+  };
+
+  const first = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db,
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    oddsVerificationService: failingService,
+    now,
+    cooldownMs: 10_000,
+  });
+  assert.deepEqual(first, { kind: "UNEXPECTED_ERROR" });
+  assert.equal(getCallCount(), 1);
+
+  const second = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db,
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    oddsVerificationService: failingService,
+    now,
+    cooldownMs: 10_000,
+  });
+  assert.deepEqual(second, { kind: "COOLDOWN" });
+  assert.equal(getCallCount(), 1);
+});
+
+test("handleNaturalLanguageOdds: SINGLE output renders via the unchanged formatOddsReply", async () => {
+  const telegramId = uniqueTelegramId();
+  const { fn: parseBetSlip } = fakeParseBetSlip(validSingleParse());
+
+  await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db: registeredDb(telegramId),
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    verifyOddsFn: fakeVerifyOddsFn({ "Real Madrid vs Barcelona": verified(2.05, 2.05) }),
+  });
+
+  assert.match(sent[0].text, /<b>Current odds check<\/b>/);
+  assert.match(sent[0].text, /Odds confirmed/);
+});
+
+test("handleNaturalLanguageOdds: EXPRESS output renders via the unchanged formatOddsReply, with no Telegram-side odds math", async () => {
+  const telegramId = uniqueTelegramId();
+  const expressParse: ParseBetSlipResult = {
+    valid: true,
+    type: "EXPRESS",
+    stake: 20,
+    selections: [
+      { sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid", submittedOdds: 1.7 },
+      { sport: "Football", event: "Arsenal vs Chelsea", market: null, selection: "Arsenal", submittedOdds: 1.65 },
+      { sport: "Football", event: "Inter vs Juventus", market: null, selection: "Inter", submittedOdds: 1.8 },
+    ],
+  };
+  const { fn: parseBetSlip } = fakeParseBetSlip(expressParse);
+  const multilineText = "Real Madrid to win @1.70\nArsenal to win @1.65\nInter to win @1.80\nStake 20";
+
+  const outcome = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: multilineText }), {
+    db: registeredDb(telegramId),
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    verifyOddsFn: fakeVerifyOddsFn({
+      "Real Madrid vs Barcelona": verified(1.7, 1.7),
+      "Arsenal vs Chelsea": verified(1.65, 1.65),
+      "Inter vs Juventus": verified(1.8, 1.8),
+    }),
+  });
+
+  assert.deepEqual(outcome, { kind: "SUCCESS" });
+  assert.match(sent[0].text, /Selection 1/);
+  assert.match(sent[0].text, /Selection 2/);
+  assert.match(sent[0].text, /Selection 3/);
+  // Total odds shown is whatever buildBetSlipPreview computed (1.7*1.65*1.8),
+  // never a value this test file (or the Telegram code under test)
+  // calculated independently.
+  assert.match(sent[0].text, /Total odds:/);
+});
+
+test("handleNaturalLanguageOdds: the original text, including internal newlines, reaches the parser unmodified", async () => {
+  const telegramId = uniqueTelegramId();
+  let capturedPayload: string | undefined;
+  const parseBetSlip = async (payload: string): Promise<ParseBetSlipResult> => {
+    capturedPayload = payload;
+    return validSingleParse();
+  };
+  const multilineText = "Real Madrid to win @1.70\nArsenal to win @1.65\nInter to win @1.80\nStake 20";
+
+  await handleNaturalLanguageOdds(baseMessage(telegramId, { text: multilineText }), {
+    db: registeredDb(telegramId),
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    verifyOddsFn: fakeVerifyOddsFn({ "Real Madrid vs Barcelona": verified(2.05, 2.05) }),
+  });
+
+  assert.equal(capturedPayload, multilineText);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Step 10B — shared cooldown across BOTH entry points. Proves the single    */
+/* module-scoped Map (declared once in oddsCommand.ts) is genuinely shared —  */
+/* not a per-function or per-source store.                                    */
+/* -------------------------------------------------------------------------- */
+
+test("shared cooldown: /odds starts the parser; natural text from the same user arriving before resolution is rejected, parser called once", async () => {
+  const telegramId = uniqueTelegramId();
+  const now = () => 9_000_000;
+  const db = registeredDb(telegramId);
+  const gate = deferred<ParseBetSlipResult>();
+  let parseCallCount = 0;
+  const deferredParseBetSlip = async (): Promise<ParseBetSlipResult> => {
+    parseCallCount += 1;
+    return gate.promise;
+  };
+
+  const requestA = handleOddsCommand(baseMessage(telegramId, { text: `/odds ${NATURAL_TEXT}` }), {
+    db,
+    parseBetSlip: deferredParseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(parseCallCount, 1, "the /odds request must have already invoked the parser");
+
+  const requestB = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db,
+    parseBetSlip: deferredParseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+
+  assert.deepEqual(requestB, { kind: "COOLDOWN" });
+  assert.equal(parseCallCount, 1, "natural text must never invoke the parser while /odds is still in flight for the same user");
+
+  gate.resolve({ valid: false, error: "n/a" });
+  await requestA;
+});
+
+test("shared cooldown: natural text starts the parser; /odds from the same user arriving before resolution is rejected, parser called once", async () => {
+  const telegramId = uniqueTelegramId();
+  const now = () => 9_000_001;
+  const db = registeredDb(telegramId);
+  const gate = deferred<ParseBetSlipResult>();
+  let parseCallCount = 0;
+  const deferredParseBetSlip = async (): Promise<ParseBetSlipResult> => {
+    parseCallCount += 1;
+    return gate.promise;
+  };
+
+  const requestA = handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db,
+    parseBetSlip: deferredParseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(parseCallCount, 1, "the natural-text request must have already invoked the parser");
+
+  const requestB = await handleOddsCommand(baseMessage(telegramId, { text: `/odds ${NATURAL_TEXT}` }), {
+    db,
+    parseBetSlip: deferredParseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+
+  assert.deepEqual(requestB, { kind: "COOLDOWN" });
+  assert.equal(parseCallCount, 1, "/odds must never invoke the parser while natural text is still in flight for the same user");
+
+  gate.resolve({ valid: false, error: "n/a" });
+  await requestA;
+});
+
+test("shared cooldown: two concurrent natural-text requests from the same user invoke the parser at most once", async () => {
+  const telegramId = uniqueTelegramId();
+  const now = () => 9_000_002;
+  const db = registeredDb(telegramId);
+  const gate = deferred<ParseBetSlipResult>();
+  let parseCallCount = 0;
+  const deferredParseBetSlip = async (): Promise<ParseBetSlipResult> => {
+    parseCallCount += 1;
+    return gate.promise;
+  };
+
+  const requestA = handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db,
+    parseBetSlip: deferredParseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+
+  await Promise.resolve();
+  await Promise.resolve();
+
+  const requestB = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: NATURAL_TEXT }), {
+    db,
+    parseBetSlip: deferredParseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+
+  assert.deepEqual(requestB, { kind: "COOLDOWN" });
+  assert.equal(parseCallCount, 1);
+
+  gate.resolve({ valid: false, error: "n/a" });
+  await requestA;
+});
+
+test("shared cooldown: two different users, one via /odds and one via natural text, proceed independently", async () => {
+  const telegramIdA = uniqueTelegramId();
+  const telegramIdB = uniqueTelegramId();
+  const now = () => 9_000_003;
+  const db = fakeDb([
+    { id: "player-mixed-a", telegramId: telegramIdA },
+    { id: "player-mixed-b", telegramId: telegramIdB },
+  ]);
+  const gateA = deferred<ParseBetSlipResult>();
+  const gateB = deferred<ParseBetSlipResult>();
+  let callCountA = 0;
+  let callCountB = 0;
+
+  const requestA = handleOddsCommand(baseMessage(telegramIdA, { text: `/odds ${NATURAL_TEXT}` }), {
+    db,
+    parseBetSlip: async () => {
+      callCountA += 1;
+      return gateA.promise;
+    },
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+
+  await Promise.resolve();
+  await Promise.resolve();
+
+  const requestB = handleNaturalLanguageOdds(baseMessage(telegramIdB, { text: NATURAL_TEXT }), {
+    db,
+    parseBetSlip: async () => {
+      callCountB += 1;
+      return gateB.promise;
+    },
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(callCountA, 1);
+  assert.equal(callCountB, 1, "a different user's natural-text request must proceed independently of user A's cooldown");
+
+  gateA.resolve({ valid: false, error: "n/a" });
+  gateB.resolve({ valid: false, error: "n/a" });
+  await requestA;
+  await requestB;
+});
+
+/* -------------------------------------------------------------------------- */
+/* Pre-commit bot-guard regression review — a bot-authored message must be   */
+/* ignored BEFORE payload extraction/validation, not only before             */
+/* DB/parser/provider access, so a bot-authored bare "/odds" never gets an   */
+/* (extraction-dependent) HELP_TEXT reply either.                            */
+/* -------------------------------------------------------------------------- */
+
+function countingDb(telegramId: string, playerId = "player-bot-guard-test") {
+  let findUniqueCallCount = 0;
+  const db = {
+    player: {
+      findUnique: async ({ where }: { where: { telegramId: string } }) => {
+        findUniqueCallCount += 1;
+        return where.telegramId === telegramId ? { id: playerId } : null;
+      },
+    },
+  } as unknown as PrismaClient;
+  return { db, getFindUniqueCallCount: () => findUniqueCallCount };
+}
+
+function countingProviderOptions() {
+  let providerCallCount = 0;
+  const oddsVerificationService = {
+    verifyMany: async () => {
+      providerCallCount += 1;
+      return [];
+    },
+  };
+  return { oddsVerificationService, getProviderCallCount: () => providerCallCount };
+}
+
+test("bot guard: a bot-authored bare /odds is ignored before payload extraction — no HELP_TEXT, no DB, no parser, no provider, no cooldown", async () => {
+  const telegramId = uniqueTelegramId();
+  const now = () => 10_000_000;
+  const { db, getFindUniqueCallCount } = countingDb(telegramId);
+  const { oddsVerificationService, getProviderCallCount } = countingProviderOptions();
+  const { fn: parseBetSlip, getCallCount } = fakeParseBetSlip(validSingleParse());
+  const send = fakeSend();
+
+  const outcome = await handleOddsCommand(baseMessage(telegramId, { text: "/odds" }, { is_bot: true }), {
+    db,
+    parseBetSlip,
+    sendMessage: send,
+    previewTokenSecret: TEST_SECRET,
+    oddsVerificationService,
+    now,
+    cooldownMs: 10_000,
+  });
+
+  assert.deepEqual(outcome, { kind: "IGNORED_BOT" });
+  assert.deepEqual(sent, [], "no HELP_TEXT or any other reply may be sent to a bot-authored message");
+  assert.equal(getFindUniqueCallCount(), 0);
+  assert.equal(getCallCount(), 0);
+  assert.equal(getProviderCallCount(), 0);
+
+  // Cooldown must not have been consumed either — a valid human /odds
+  // request from the SAME telegram user ID, at the SAME frozen time, must
+  // proceed immediately rather than observing COOLDOWN.
+  const humanOutcome = await handleOddsCommand(baseMessage(telegramId, { text: "/odds Real Madrid vs Barcelona, odds 2.05" }), {
+    db,
+    parseBetSlip,
+    sendMessage: send,
+    previewTokenSecret: TEST_SECRET,
+    verifyOddsFn: fakeVerifyOddsFn({ "Real Madrid vs Barcelona": verified(2.05, 2.05) }),
+    now,
+    cooldownMs: 10_000,
+  });
+  assert.deepEqual(humanOutcome, { kind: "SUCCESS" });
+});
+
+test("bot guard: a bot-authored /odds with a payload is ignored with the same zero side effects", async () => {
+  const telegramId = uniqueTelegramId();
+  const { db, getFindUniqueCallCount } = countingDb(telegramId);
+  const { oddsVerificationService, getProviderCallCount } = countingProviderOptions();
+  const { fn: parseBetSlip, getCallCount } = fakeParseBetSlip(validSingleParse());
+  const send = fakeSend();
+
+  const outcome = await handleOddsCommand(
+    baseMessage(telegramId, { text: "/odds Real Madrid to win vs Barcelona" }, { is_bot: true }),
+    { db, parseBetSlip, sendMessage: send, previewTokenSecret: TEST_SECRET, oddsVerificationService },
+  );
+
+  assert.deepEqual(outcome, { kind: "IGNORED_BOT" });
+  assert.deepEqual(sent, []);
+  assert.equal(getFindUniqueCallCount(), 0);
+  assert.equal(getCallCount(), 0);
+  assert.equal(getProviderCallCount(), 0);
+});
+
+test("bot guard: bot-authored natural betting text is ignored before any validation, DB, parser, provider, or cooldown consumption", async () => {
+  const telegramId = uniqueTelegramId();
+  const now = () => 10_000_001;
+  const { db, getFindUniqueCallCount } = countingDb(telegramId);
+  const { oddsVerificationService, getProviderCallCount } = countingProviderOptions();
+  const { fn: parseBetSlip, getCallCount } = fakeParseBetSlip(validSingleParse());
+  const send = fakeSend();
+
+  const outcome = await handleNaturalLanguageOdds(
+    baseMessage(telegramId, { text: "Real Madrid to win vs Barcelona" }, { is_bot: true }),
+    { db, parseBetSlip, sendMessage: send, previewTokenSecret: TEST_SECRET, oddsVerificationService, now, cooldownMs: 10_000 },
+  );
+
+  assert.deepEqual(outcome, { kind: "IGNORED_BOT" });
+  assert.deepEqual(sent, [], "no validation reply may be sent to a bot-authored message");
+  assert.equal(getFindUniqueCallCount(), 0);
+  assert.equal(getCallCount(), 0);
+  assert.equal(getProviderCallCount(), 0);
+
+  const humanOutcome = await handleNaturalLanguageOdds(baseMessage(telegramId, { text: "Real Madrid to win vs Barcelona" }), {
+    db,
+    parseBetSlip,
+    sendMessage: send,
+    previewTokenSecret: TEST_SECRET,
+    verifyOddsFn: fakeVerifyOddsFn({ "Real Madrid vs Barcelona": verified(2.05, 2.05) }),
+    now,
+    cooldownMs: 10_000,
+  });
+  assert.deepEqual(humanOutcome, { kind: "SUCCESS" }, "cooldown must not have been consumed by the ignored bot message");
+});
+
+test("bot guard: a human sending a bare /odds still gets HELP_TEXT, with no parser/provider call and no cooldown consumed", async () => {
+  const telegramId = uniqueTelegramId();
+  const now = () => 10_000_002;
+  const { db } = countingDb(telegramId);
+  const { fn: parseBetSlip, getCallCount } = fakeParseBetSlip(validSingleParse());
+  const send = fakeSend();
+
+  const outcome = await handleOddsCommand(baseMessage(telegramId, { text: "/odds" }), {
+    db,
+    parseBetSlip,
+    sendMessage: send,
+    previewTokenSecret: TEST_SECRET,
+    now,
+    cooldownMs: 10_000,
+  });
+
+  assert.deepEqual(outcome, { kind: "HELP" });
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /Usage/i);
+  assert.equal(getCallCount(), 0);
+
+  const second = await handleOddsCommand(baseMessage(telegramId, { text: "/odds Real Madrid vs Barcelona, odds 2.05" }), {
+    db,
+    parseBetSlip,
+    sendMessage: send,
+    previewTokenSecret: TEST_SECRET,
+    verifyOddsFn: fakeVerifyOddsFn({ "Real Madrid vs Barcelona": verified(2.05, 2.05) }),
+    now,
+    cooldownMs: 10_000,
+  });
+  assert.deepEqual(second, { kind: "SUCCESS" }, "cooldown must not have been consumed by the HELP_TEXT reply");
+});
+
+test("bot guard: a human sending an invalid /odds payload still gets INVALID_PAYLOAD_TEXT, unchanged", async () => {
+  const telegramId = uniqueTelegramId();
+  const { db } = countingDb(telegramId);
+  const { fn: parseBetSlip, getCallCount } = fakeParseBetSlip(validSingleParse());
+
+  const outcome = await handleOddsCommand(baseMessage(telegramId, { text: "/odds ab" }), {
+    db,
+    parseBetSlip,
+    sendMessage: fakeSend(),
+    previewTokenSecret: TEST_SECRET,
+  });
+
+  assert.deepEqual(outcome, { kind: "INVALID_PAYLOAD" });
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /too short or too long/i);
+  assert.equal(getCallCount(), 0);
 });

@@ -432,3 +432,199 @@ test("webhook: an unrelated command still receives REDIRECT_TEXT after adding th
   assert.equal(response.status, 200);
   assert.equal(sentMessages[0].text, "Для работы откройте приложение BetPilot AI.");
 });
+
+/* -------------------------------------------------------------------------- */
+/* Step 10B — natural-language betting text route wiring                     */
+/* -------------------------------------------------------------------------- */
+// looksLikeBettingText()'s own decision logic is fully covered by
+// lib/telegram/looksLikeBettingText.test.ts; handleNaturalLanguageOdds's own
+// authorization/cooldown/parsing/formatting behavior is fully covered by
+// lib/telegram/oddsCommand.test.ts. These tests only prove the ROUTE wires
+// the gate and handler in correctly, in the right place, and doesn't
+// disturb any other branch. Fresh, never-reused telegramIds avoid the
+// shared module-scoped cooldown store leaking between tests.
+
+const BETTING_TEXT = "Real Madrid to win vs Barcelona, odds 2.05";
+
+test("webhook: ordinary betting text (no command) invokes the natural-language handler and sends its reply, not the redirect", async () => {
+  const telegramId = uniqueOddsTelegramId();
+  const db = fakeDb([{ id: "player-nl-route-1", telegramId }]);
+
+  const response = await postUpdate(
+    {
+      update_id: 400,
+      message: { message_id: 20, date: 1700000000, text: BETTING_TEXT, chat: { id: 950 }, from: { id: Number(telegramId) } },
+    },
+    db,
+    undefined,
+    fakeOddsOptions(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(sentMessages.length, 1);
+  assert.match(sentMessages[0].text, /Odds confirmed/);
+  assert.notEqual(sentMessages[0].text, "Для работы откройте приложение BetPilot AI.");
+});
+
+test("webhook: text that fails the intent gate never invokes the parser/provider and keeps the existing redirect", async () => {
+  let parseCallCount = 0;
+  const response = await postUpdate(
+    {
+      update_id: 401,
+      message: { message_id: 21, date: 1700000000, text: "Hello, how are you?", chat: { id: 951 }, from: { id: 99887769 } },
+    },
+    undefined,
+    undefined,
+    fakeOddsOptions({ parseBetSlip: async () => { parseCallCount += 1; throw new Error("must not be called"); } }),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(sentMessages.length, 1);
+  assert.equal(sentMessages[0].text, "Для работы откройте приложение BetPilot AI.");
+  assert.equal(parseCallCount, 0);
+});
+
+test("webhook: an unsupported command whose payload looks bet-like never reaches the natural-language gate", async () => {
+  let parseCallCount = 0;
+  const response = await postUpdate(
+    {
+      update_id: 402,
+      message: {
+        message_id: 22,
+        date: 1700000000,
+        text: `/oddswrong ${BETTING_TEXT}`,
+        chat: { id: 952 },
+        from: { id: 99887770 },
+      },
+    },
+    undefined,
+    undefined,
+    fakeOddsOptions({ parseBetSlip: async () => { parseCallCount += 1; throw new Error("must not be called"); } }),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(sentMessages.length, 1);
+  assert.equal(sentMessages[0].text, "Для работы откройте приложение BetPilot AI.");
+  assert.equal(parseCallCount, 0);
+});
+
+test("webhook: bot-authored betting-looking text is ignored entirely by the shared core — no reply at all, not even the redirect", async () => {
+  const response = await postUpdate(
+    {
+      update_id: 403,
+      message: {
+        message_id: 23,
+        date: 1700000000,
+        text: BETTING_TEXT,
+        chat: { id: 953 },
+        from: { id: 99887771, is_bot: true },
+      },
+    },
+    undefined,
+    undefined,
+    fakeOddsOptions(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(sentMessages.length, 0);
+});
+
+test("webhook: an unauthorized user's betting-looking text gets the odds handler's own rejection, not the generic redirect", async () => {
+  const response = await postUpdate(
+    {
+      update_id: 404,
+      message: {
+        message_id: 24,
+        date: 1700000000,
+        text: BETTING_TEXT,
+        chat: { id: 954 },
+        from: { id: Number(uniqueOddsTelegramId()) },
+      },
+    },
+    fakeDb([]),
+    undefined,
+    fakeOddsOptions(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(sentMessages.length, 1);
+  assert.match(sentMessages[0].text, /not registered/i);
+});
+
+test("webhook: a repeated update_id for natural-language betting text invokes the handler at most once", async () => {
+  const telegramId = uniqueOddsTelegramId();
+  const db = fakeDb([{ id: "player-nl-route-2", telegramId }]);
+  let parseCallCount = 0;
+  const options = fakeOddsOptions({
+    parseBetSlip: async () => {
+      parseCallCount += 1;
+      return {
+        valid: true,
+        type: "SINGLE",
+        stake: 50,
+        selections: [{ sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid", submittedOdds: 2.05 }],
+      };
+    },
+  });
+  const update = {
+    update_id: 405,
+    message: { message_id: 25, date: 1700000000, text: BETTING_TEXT, chat: { id: 955 }, from: { id: Number(telegramId) } },
+  };
+
+  const first = await postUpdate(update, db, undefined, options);
+  const second = await postUpdate(update, db, undefined, options);
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(parseCallCount, 1, "the natural-language handler's parser must only run once, for the first delivery");
+  assert.equal(sentMessages.length, 1);
+});
+
+test("webhook: gate-rejected ordinary text does not consume cooldown — an immediate /odds request from the same user proceeds", async () => {
+  const telegramId = uniqueOddsTelegramId();
+  const db = fakeDb([{ id: "player-nl-route-3", telegramId }]);
+
+  const rejectedResponse = await postUpdate(
+    {
+      update_id: 406,
+      message: { message_id: 26, date: 1700000000, text: "Hello there, just saying hi", chat: { id: 956 }, from: { id: Number(telegramId) } },
+    },
+    db,
+    undefined,
+    fakeOddsOptions(),
+  );
+  assert.equal(rejectedResponse.status, 200);
+  assert.equal(sentMessages[0].text, "Для работы откройте приложение BetPilot AI.");
+
+  const oddsResponse = await postUpdate(
+    {
+      update_id: 407,
+      message: { message_id: 27, date: 1700000000, text: `/odds ${BETTING_TEXT}`, chat: { id: 956 }, from: { id: Number(telegramId) } },
+    },
+    db,
+    undefined,
+    fakeOddsOptions(),
+  );
+
+  assert.equal(oddsResponse.status, 200);
+  assert.equal(sentMessages.length, 2);
+  assert.match(sentMessages[1].text, /Odds confirmed/);
+});
+
+test("webhook: a bot-authored bare /odds gets no reply at all, not even HELP_TEXT, and never reaches the parser", async () => {
+  let parseCallCount = 0;
+
+  const response = await postUpdate(
+    {
+      update_id: 408,
+      message: { message_id: 28, date: 1700000000, text: "/odds", chat: { id: 957 }, from: { id: 99887772, is_bot: true } },
+    },
+    undefined,
+    undefined,
+    fakeOddsOptions({ parseBetSlip: async () => { parseCallCount += 1; throw new Error("must not be called"); } }),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(sentMessages.length, 0, "no HELP_TEXT or any other reply may be sent for a bot-authored bare /odds");
+  assert.equal(parseCallCount, 0);
+});
