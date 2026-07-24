@@ -4,7 +4,15 @@ import type { ParsedBetSlip } from "@/lib/bets/betSlip";
 import { validateBetSlipType, BetSlipValidationError } from "@/lib/bets/betSlipRules";
 import { computeTotalOdds, computePotentialWin } from "@/lib/bets/expressMath";
 import { mapOddsCheckToSelectionStatus } from "@/lib/odds/mapOddsStatus";
-import { verifyOdds, type OddsVerificationInput } from "@/lib/odds/oddsVerifier";
+import type { verifyOdds } from "@/lib/odds/oddsVerifier";
+import { TheOddsApiProvider } from "@/lib/odds/theOddsApiProvider";
+import { OddsVerificationService } from "@/lib/odds/oddsVerificationService";
+import type { VerifySelectionRequest } from "@/lib/odds/oddsProvider";
+import {
+  legacySelectionToCanonicalRequest,
+  verificationResultToLegacyOddsCheck,
+  type ReconstructedOddsCheck,
+} from "@/lib/odds/legacyOddsBridge";
 import { signPreviewToken, signExpressPreviewToken } from "@/lib/betPreview/previewToken";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
@@ -19,6 +27,62 @@ import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
 // signed token confirm already accepts for SINGLE (Phase 3) and now signs
 // for EXPRESS too (Phase 4, Step 2) — Confirm itself still only knows how
 // to redeem a SINGLE token; that's Phase 4, Step 3's job, not this file's.
+//
+// Step 7 — odds verification now runs through the provider-neutral
+// OddsVerificationService + TheOddsApiProvider (lib/odds/) instead of
+// calling verifyOdds() directly. See docs/ODDS_PROVIDER_DESIGN.md Section
+// 18 Phase E. This is a compatibility migration only: every public
+// input/output shape below, and every odds-related field in the preview
+// and both previewToken payloads, is unchanged — only the mechanism that
+// fetches odds moved. lib/odds/legacyOddsBridge.ts owns the (pure,
+// separately tested) translation in both directions; oddsVerifier.ts
+// itself is untouched and remains the sole place that actually talks to
+// The Odds API.
+
+// One shared, stateless singleton — TheOddsApiProvider/OddsVerificationService
+// hold no per-request mutable state, so there is no reason to reconstruct
+// either per preview call (docs/ODDS_PROVIDER_DESIGN.md Section 10's
+// "provider registry/resolver... trivial for MVP" — a full registry isn't
+// warranted for exactly one always-used provider).
+const defaultOddsProvider = new TheOddsApiProvider();
+const defaultOddsVerificationService = new OddsVerificationService(defaultOddsProvider);
+
+export type BuildBetSlipPreviewConfigErrorCode = "AMBIGUOUS_ODDS_DEPENDENCY";
+
+// Same narrow-purpose "Error subclass with an explicit code" convention as
+// BetSlipValidationError below — this is a programmer/configuration error
+// (an impossible-by-contract caller mistake), not an expected verification
+// outcome, so it throws rather than returning a typed result.
+export class BuildBetSlipPreviewConfigError extends Error {
+  readonly code: BuildBetSlipPreviewConfigErrorCode;
+
+  constructor(code: BuildBetSlipPreviewConfigErrorCode, message: string) {
+    super(message);
+    this.name = "BuildBetSlipPreviewConfigError";
+    this.code = code;
+  }
+}
+
+// Precedence: oddsVerificationService (new primary seam) > verifyOddsFn
+// (existing legacy seam, wrapped with TheOddsApiProvider so it flows
+// through the exact same OddsVerificationService path production uses) >
+// the shared default. Supplying both is rejected rather than silently
+// prioritized — docs/ODDS_PROVIDER_DESIGN.md gives no reason two
+// simultaneous odds dependencies would ever be intentional, and an
+// ambiguous test/caller configuration is a bug worth surfacing loudly.
+function resolveOddsVerificationService(
+  options: BuildBetSlipPreviewOptions,
+): Pick<OddsVerificationService, "verifyMany"> {
+  if (options.oddsVerificationService && options.verifyOddsFn) {
+    throw new BuildBetSlipPreviewConfigError(
+      "AMBIGUOUS_ODDS_DEPENDENCY",
+      "buildBetSlipPreview: supply either options.oddsVerificationService or options.verifyOddsFn, not both",
+    );
+  }
+  if (options.oddsVerificationService) return options.oddsVerificationService;
+  if (options.verifyOddsFn) return new OddsVerificationService(new TheOddsApiProvider(options.verifyOddsFn));
+  return defaultOddsVerificationService;
+}
 
 export interface BetSlipPreviewSelection {
   sport: string;
@@ -57,10 +121,19 @@ export interface BuildBetSlipPreviewResult {
 }
 
 // Injectable so tests can supply a fake without hitting the real Odds API —
-// defaults to the real verifyOdds for actual routes. Not a general
-// dependency-injection framework, just one parameter with a default.
+// defaults to the shared TheOddsApiProvider + OddsVerificationService for
+// actual routes. Not a general dependency-injection framework, just two
+// alternative seams with a shared default; see resolveOddsVerificationService.
 export interface BuildBetSlipPreviewOptions {
-  verifyOddsFn?: (input: OddsVerificationInput) => Promise<OddsCheckResult>;
+  // Existing seam (unchanged type) — still the most direct way for a test
+  // to control odds-check outcomes without knowing about the canonical
+  // layer at all. Wrapped internally with TheOddsApiProvider so it reaches
+  // the real production code path, not a bypass of it.
+  verifyOddsFn?: typeof verifyOdds;
+  // New seam — lets a test or future caller inject a full
+  // OddsVerificationService-shaped dependency (a real instance, or
+  // anything providing a compatible verifyMany) directly.
+  oddsVerificationService?: Pick<OddsVerificationService, "verifyMany">;
 }
 
 export async function buildBetSlipPreview(
@@ -75,27 +148,45 @@ export async function buildBetSlipPreview(
   // invalid slip.
   validateBetSlipType(slip.type, slip.selections);
 
-  const verifyOddsFn = options.verifyOddsFn ?? verifyOdds;
+  const oddsVerificationService = resolveOddsVerificationService(options);
 
-  // One request per selection, in parallel. allSettled (not Promise.all) so
-  // a single rejected/thrown check never aborts the others — each outcome
-  // is mapped independently right below.
-  const settled = await Promise.allSettled(
-    slip.selections.map((selection) =>
-      selection.submittedOdds !== null
-        ? verifyOddsFn({
-            sport: selection.sport,
-            event: selection.event,
-            selection: selection.selection,
-            odds: selection.submittedOdds,
-          })
-        : Promise.resolve(null),
-    ),
-  );
+  // Selections with no submitted odds are never sent to the provider —
+  // there is nothing to verify against, mirroring the exact call-gating
+  // this function has always had (previously: Promise.resolve(null)
+  // instead of calling verifyOddsFn). `verifiableIndices[batchIndex]` maps
+  // each verifyMany() result back to its original position in
+  // slip.selections, since the two arrays are no longer the same length.
+  const verifiableIndices: number[] = [];
+  const requests: VerifySelectionRequest[] = [];
+
+  slip.selections.forEach((selection, index) => {
+    if (selection.submittedOdds === null) return;
+    verifiableIndices.push(index);
+    requests.push(
+      legacySelectionToCanonicalRequest({
+        sport: selection.sport,
+        event: selection.event,
+        selection: selection.selection,
+        submittedOdds: selection.submittedOdds,
+      }),
+    );
+  });
+
+  // One call for the whole batch — OddsVerificationService owns
+  // concurrency (bounded, order-preserving, failure-isolated) internally;
+  // this file never loops verifyOne() itself. See
+  // lib/odds/oddsVerificationService.ts.
+  const results = await oddsVerificationService.verifyMany(requests);
+
+  const reconstructedByIndex = new Map<number, ReconstructedOddsCheck>();
+  verifiableIndices.forEach((selectionIndex, batchIndex) => {
+    const submittedOdds = slip.selections[selectionIndex].submittedOdds!;
+    reconstructedByIndex.set(selectionIndex, verificationResultToLegacyOddsCheck(results[batchIndex], submittedOdds));
+  });
 
   const previewSelections: BetSlipPreviewSelection[] = slip.selections.map((selection, index) => {
-    const settledResult = settled[index];
-    const oddsCheck: OddsCheckResult | null = settledResult.status === "fulfilled" ? settledResult.value : null;
+    const reconstructed = reconstructedByIndex.get(index);
+    const oddsCheck: OddsCheckResult | null = reconstructed?.oddsCheck ?? null;
 
     // Stage 14.4A security cleanup: this used to log selection.event
     // directly (plus, on the rejected-check path, oddsCheck.note /
@@ -113,7 +204,12 @@ export async function buildBetSlipPreview(
         oddsVerificationStatus: mapOddsCheckToSelectionStatus(oddsCheck),
       });
     }
-    if (settledResult.status === "rejected") {
+    // Equivalent to the old settledResult.status === "rejected" check —
+    // see ReconstructedOddsCheck's own doc comment in legacyOddsBridge.ts
+    // for exactly why this is the correct signal now that
+    // OddsVerificationService always converts a thrown verifyOddsFn error
+    // into a normal (never-rejected) FAILED result.
+    if (reconstructed?.wasExceptionMapped) {
       logScreenshotPipelineEvent("odds_check_rejected", { selectionIndex: index });
     }
 
@@ -154,7 +250,7 @@ export async function buildBetSlipPreview(
 
   if (slip.type === "SINGLE") {
     const single = previewSelections[0];
-    const rawOddsCheck: OddsCheckResult | null = settled[0].status === "fulfilled" ? settled[0].value : null;
+    const rawOddsCheck: OddsCheckResult | null = reconstructedByIndex.get(0)?.oddsCheck ?? null;
 
     previewToken = signPreviewToken(
       {

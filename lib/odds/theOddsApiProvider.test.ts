@@ -390,3 +390,134 @@ test("adapter mapping: a null legacy bookmaker never becomes a fabricated string
 
   assert.equal(result.bookmaker, undefined);
 });
+
+/* -------------------------------------------------------------------------- */
+/* Step 7A — football-league compatibility fix                                */
+/* -------------------------------------------------------------------------- */
+
+test("football league resolution: La Liga produces legacy sport 'la liga'", async () => {
+  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.0 }));
+  const provider = new TheOddsApiProvider(fn);
+
+  await provider.verifySelection({ selection: moneyline3Way({ league: { name: "La Liga" } }) });
+
+  assert.equal(calls[0].sport, "la liga");
+});
+
+test("football league resolution: Serie A produces legacy sport 'serie a'", async () => {
+  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.0 }));
+  const provider = new TheOddsApiProvider(fn);
+
+  await provider.verifySelection({ selection: moneyline3Way({ league: { name: "Serie A" } }) });
+
+  assert.equal(calls[0].sport, "serie a");
+});
+
+test("football league resolution: Bundesliga produces legacy sport 'bundesliga'", async () => {
+  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.0 }));
+  const provider = new TheOddsApiProvider(fn);
+
+  await provider.verifySelection({ selection: moneyline3Way({ league: { name: "Bundesliga" } }) });
+
+  assert.equal(calls[0].sport, "bundesliga");
+});
+
+test("football league resolution: Ligue 1 produces legacy sport 'ligue 1'", async () => {
+  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.0 }));
+  const provider = new TheOddsApiProvider(fn);
+
+  await provider.verifySelection({ selection: moneyline3Way({ league: { name: "Ligue 1" } }) });
+
+  assert.equal(calls[0].sport, "ligue 1");
+});
+
+test("football league resolution: UEFA Champions League produces legacy sport 'champions league'", async () => {
+  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.0 }));
+  const provider = new TheOddsApiProvider(fn);
+
+  await provider.verifySelection({ selection: moneyline3Way({ league: { name: "UEFA Champions League" } }) });
+
+  assert.equal(calls[0].sport, "champions league");
+});
+
+test("football league resolution: the 'Champions League' naming variant also produces legacy sport 'champions league'", async () => {
+  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.0 }));
+  const provider = new TheOddsApiProvider(fn);
+
+  await provider.verifySelection({ selection: moneyline3Way({ league: { name: "Champions League" } }) });
+
+  assert.equal(calls[0].sport, "champions league");
+});
+
+test("football league resolution: Premier League produces legacy sport 'premier league'", async () => {
+  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.0 }));
+  const provider = new TheOddsApiProvider(fn);
+
+  await provider.verifySelection({ selection: moneyline3Way({ league: { name: "Premier League" } }) });
+
+  assert.equal(calls[0].sport, "premier league");
+});
+
+test("football league resolution: generic FOOTBALL with no league falls back to 'football'", async () => {
+  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.0 }));
+  const provider = new TheOddsApiProvider(fn);
+
+  await provider.verifySelection({ selection: moneyline3Way({ league: undefined }) });
+
+  assert.equal(calls[0].sport, "football");
+});
+
+test("football league resolution: an unrecognized football league falls back to 'football'", async () => {
+  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.0 }));
+  const provider = new TheOddsApiProvider(fn);
+
+  await provider.verifySelection({ selection: moneyline3Way({ league: { name: "Europa League" } }) });
+
+  assert.equal(calls[0].sport, "football");
+});
+
+test("football league resolution: a non-football sport ignores any football-league value and preserves its own existing sport alias", async () => {
+  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.8 }));
+  const provider = new TheOddsApiProvider(fn);
+
+  await provider.verifySelection({
+    selection: {
+      sport: "TENNIS",
+      event: TENNIS_EVENT,
+      marketType: "MONEYLINE_2WAY",
+      period: "MATCH",
+      selectionType: "PARTICIPANT",
+      participant: { name: "Carlos Alcaraz" },
+      submittedOdds: "1.85",
+      // A league value on a non-football sport must never influence
+      // resolveLegacyFootballSport, which is only ever consulted when
+      // selection.sport === "FOOTBALL".
+      league: { name: "La Liga" },
+    },
+  });
+
+  assert.equal(calls[0].sport, "tennis");
+});
+
+test("football league resolution: whitespace/case normalization applies only to exact recognized names", async () => {
+  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.0 }));
+  const provider = new TheOddsApiProvider(fn);
+
+  await provider.verifySelection({ selection: moneyline3Way({ league: { name: "  LA   LIGA  " } }) });
+  assert.equal(calls[0].sport, "la liga");
+
+  calls.length = 0;
+  await provider.verifySelection({ selection: moneyline3Way({ league: { name: "La  Ligaa" } }) });
+  assert.equal(calls[0].sport, "football");
+});
+
+test("football league resolution: no provider sport_key is ever emitted — only the same human-readable legacy alias strings oddsVerifier.ts already accepts", async () => {
+  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.0 }));
+  const provider = new TheOddsApiProvider(fn);
+
+  for (const league of ["La Liga", "Serie A", "Bundesliga", "Ligue 1", "UEFA Champions League", "Premier League"]) {
+    calls.length = 0;
+    await provider.verifySelection({ selection: moneyline3Way({ league: { name: league } }) });
+    assert.doesNotMatch(calls[0].sport, /^soccer_/, "must never be a raw The Odds API sport_key");
+  }
+});

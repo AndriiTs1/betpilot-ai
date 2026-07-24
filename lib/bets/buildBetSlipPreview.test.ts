@@ -1,10 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildBetSlipPreview, BetSlipValidationError } from "./buildBetSlipPreview";
+import { buildBetSlipPreview, BetSlipValidationError, BuildBetSlipPreviewConfigError } from "./buildBetSlipPreview";
 import type { ParsedBetSlip } from "./betSlip";
 import type { OddsVerificationInput } from "@/lib/odds/oddsVerifier";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { verifyPreviewToken, verifyExpressPreviewToken } from "@/lib/betPreview/previewToken";
+import { OddsVerificationService } from "@/lib/odds/oddsVerificationService";
+import { TheOddsApiProvider } from "@/lib/odds/theOddsApiProvider";
+import { createVerifiedResult, createOddsChangedResult, createFailedResult } from "@/lib/odds/verification";
+import type { VerificationResult } from "@/lib/odds/verification";
+import type { OddsProvider, ProviderHealthResult, VerifySelectionRequest } from "@/lib/odds/oddsProvider";
 
 const TEST_SECRET = "test-preview-token-secret";
 
@@ -457,4 +462,375 @@ test("buildBetSlipPreview: odds check failures never log selection.event, select
     console.log = originalConsoleLog;
     console.error = originalConsoleError;
   }
+});
+
+// ---------------------------------------------------------------------
+// Step 7 — buildBetSlipPreview now runs odds verification through
+// OddsVerificationService + TheOddsApiProvider instead of calling
+// verifyOdds() directly. Every test above this line is UNCHANGED from
+// before this migration and passes unmodified against the new
+// implementation — that is the primary output-parity proof. The tests
+// below add: composition/DI coverage, direct request-mapping/batching
+// assertions, and additional scenarios from the migration's parity
+// checklist not already exercised above (provider timeout/unavailable as
+// *returned* legacy failures, out-of-order completion, bookmaker
+// preservation, ambiguous DI rejection).
+// ---------------------------------------------------------------------
+
+const CHECKED_AT = "2026-07-24T00:00:00.000Z";
+
+function fakeProvider(verifySelection: OddsProvider["verifySelection"]): OddsProvider {
+  return {
+    name: "THE_ODDS_API",
+    getCapabilities: () => ({
+      provider: "THE_ODDS_API",
+      supportedSports: [],
+      supportedMarketTypes: [],
+      leagueSelectionSupported: false,
+      livePrematchSupport: "PREMATCH_ONLY",
+      eventSearchSupported: false,
+      eventByIdLookupSupported: false,
+      regions: [],
+      notes: [],
+    }),
+    findEvents: async () => ({ ok: true, value: [] }),
+    getEventMarkets: async () => ({ ok: true, value: [] }),
+    verifySelection,
+    healthCheck: async (): Promise<ProviderHealthResult> => ({ healthy: true, provider: "THE_ODDS_API", checkedAt: CHECKED_AT }),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Group A/B — composition and dependency injection                          */
+/* -------------------------------------------------------------------------- */
+
+test("DI: TheOddsApiProvider can be built around an injected fake verifyOddsFn and used via oddsVerificationService", async () => {
+  const provider = new TheOddsApiProvider(async (input) => ({
+    matched: true,
+    withinTolerance: true,
+    sourceOdds: input.odds,
+    submittedOdds: input.odds,
+    discrepancyPercent: 0,
+    bookmaker: "Pinnacle",
+    note: null,
+  }));
+  const service = new OddsVerificationService(provider);
+
+  const result = await buildBetSlipPreview(singleSlip(1.95), "player-1", TEST_SECRET, { oddsVerificationService: service });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+});
+
+test("DI: an injected OddsVerificationService-shaped dependency is called exactly once, with one request per verifiable selection, in order", async () => {
+  const calls: readonly VerifySelectionRequest[][] = [];
+  const fakeService = {
+    verifyMany: async (requests: readonly VerifySelectionRequest[]): Promise<readonly VerificationResult[]> => {
+      (calls as VerifySelectionRequest[][]).push([...requests]);
+      return requests.map(() => createVerifiedResult({ submittedOdds: "2.0", currentOdds: "2.0", provider: "THE_ODDS_API", checkedAt: CHECKED_AT }));
+    },
+  };
+
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 30,
+    selections: [
+      { sport: "Football", event: "Match A", market: null, selection: "1", submittedOdds: 2.0 },
+      { sport: "Football", event: "Match B", market: null, selection: "Win", submittedOdds: null }, // no submitted odds — excluded from the batch
+      { sport: "Football", event: "Match C", market: null, selection: "2", submittedOdds: 1.9 },
+    ],
+  };
+
+  await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: fakeService });
+
+  assert.equal(calls.length, 1, "verifyMany is called exactly once for the whole batch");
+  assert.equal(calls[0].length, 2, "only the two selections with submitted odds are included");
+  assert.equal(calls[0][0].selection.event.name, "Match A");
+  assert.equal(calls[0][1].selection.event.name, "Match C");
+});
+
+test("DI: supplying both oddsVerificationService and verifyOddsFn is rejected as ambiguous", async () => {
+  const service = new OddsVerificationService(new TheOddsApiProvider());
+  const verifyOddsFn = async (): Promise<OddsCheckResult> => verified(2.0, 2.0);
+
+  await assert.rejects(
+    () => buildBetSlipPreview(singleSlip(1.95), "player-1", TEST_SECRET, { oddsVerificationService: service, verifyOddsFn }),
+    (err: unknown) => err instanceof BuildBetSlipPreviewConfigError && err.code === "AMBIGUOUS_ODDS_DEPENDENCY",
+  );
+});
+
+/* -------------------------------------------------------------------------- */
+/* Additional parity scenarios                                                */
+/* -------------------------------------------------------------------------- */
+
+test("parity: PROVIDER_TIMEOUT as a normal RETURNED legacy failure (not a throw) maps to NOT_FOUND, same as today", async () => {
+  const result = await buildBetSlipPreview(singleSlip(2.0), "player-1", TEST_SECRET, {
+    verifyOddsFn: async (): Promise<OddsCheckResult> => ({
+      matched: false,
+      withinTolerance: null,
+      sourceOdds: null,
+      submittedOdds: 2.0,
+      discrepancyPercent: null,
+      bookmaker: null,
+      note: "The Odds API request timed out after 8000ms",
+    }),
+  });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "NOT_FOUND");
+});
+
+test("parity: PROVIDER_UNAVAILABLE as a normal RETURNED legacy failure (not a throw) maps to NOT_FOUND, same as today", async () => {
+  const result = await buildBetSlipPreview(singleSlip(2.0), "player-1", TEST_SECRET, {
+    verifyOddsFn: async (): Promise<OddsCheckResult> => ({
+      matched: false,
+      withinTolerance: null,
+      sourceOdds: null,
+      submittedOdds: 2.0,
+      discrepancyPercent: null,
+      bookmaker: null,
+      note: "ODDS_API_KEY is not configured",
+    }),
+  });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "NOT_FOUND");
+});
+
+test("parity: a genuinely thrown (unexpected) provider exception still maps to UNAVAILABLE, distinct from a returned provider failure", async () => {
+  const provider = fakeProvider(async () => {
+    throw new Error("simulated crash");
+  });
+  const service = new OddsVerificationService(provider);
+
+  const result = await buildBetSlipPreview(singleSlip(2.0), "player-1", TEST_SECRET, { oddsVerificationService: service });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "UNAVAILABLE");
+});
+
+test("parity: bookmaker is preserved exactly through the new path", async () => {
+  const result = await buildBetSlipPreview(singleSlip(1.95), "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => verified(1.95, 1.95, "Bet365"),
+  });
+
+  assert.equal(result.preview.selections[0].bookmaker, "Bet365");
+});
+
+test("parity: out-of-order provider completion does not change preview selection order", async () => {
+  // Selections resolve in REVERSED order (last selection's provider call
+  // finishes first) — the merge-by-original-index logic in
+  // buildBetSlipPreview.ts must still place each result at its correct
+  // position regardless of completion timing.
+  const provider = fakeProvider(async (request) => {
+    const odds = request.selection.submittedOdds ?? "0";
+    const delayTicks = odds === "2.00" ? 3 : odds === "2.01" ? 2 : 1;
+    for (let i = 0; i < delayTicks; i++) await Promise.resolve();
+    return createVerifiedResult({ submittedOdds: odds, currentOdds: odds, provider: "THE_ODDS_API", checkedAt: CHECKED_AT });
+  });
+  const service = new OddsVerificationService(provider, { concurrency: 3 });
+
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 10,
+    selections: ["2.00", "2.01", "2.02"].map((odds, i) => ({
+      sport: "Football",
+      event: `Match ${i}`,
+      market: null,
+      selection: "1",
+      submittedOdds: Number(odds),
+    })),
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+
+  assert.deepEqual(
+    result.preview.selections.map((s) => s.submittedOdds),
+    [2.0, 2.01, 2.02],
+  );
+  assert.ok(result.preview.selections.every((s) => s.oddsStatus === "VERIFIED"));
+});
+
+test("parity: duplicate-looking selections (same event/selection text) are each verified independently", async () => {
+  let callCount = 0;
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 20,
+    selections: [
+      { sport: "Football", event: "Same Match", market: null, selection: "1", submittedOdds: 2.0 },
+      { sport: "Football", event: "Same Match", market: null, selection: "1", submittedOdds: 2.0 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => {
+      callCount += 1;
+      return verified(2.0, 2.0);
+    },
+  });
+
+  assert.equal(callCount, 2);
+  assert.equal(result.preview.selections.length, 2);
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[1].oddsStatus, "VERIFIED");
+});
+
+test("parity: one provider exception does not cancel sibling verifications in a larger EXPRESS", async () => {
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 20,
+    selections: [
+      { sport: "Football", event: "Match A", market: null, selection: "1", submittedOdds: 2.0 },
+      { sport: "Football", event: "Match B", market: null, selection: "1", submittedOdds: 2.0 },
+      { sport: "Football", event: "Match C", market: null, selection: "1", submittedOdds: 2.0 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async (input) => {
+      if (input.event === "Match B") throw new Error("simulated crash");
+      return verified(2.0, 2.0);
+    },
+  });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[1].oddsStatus, "UNAVAILABLE");
+  assert.equal(result.preview.selections[2].oddsStatus, "VERIFIED");
+});
+
+test("parity: mixed EXPRESS via a directly-injected OddsProvider (VERIFIED/ODDS_CHANGED/FAILED/exception) matches the equivalent verifyOddsFn-based outcome", async () => {
+  const provider = fakeProvider(async (request) => {
+    const event = request.selection.event.name;
+    if (event === "Verified Match") return createVerifiedResult({ submittedOdds: "2.0", currentOdds: "2.0", provider: "THE_ODDS_API", checkedAt: CHECKED_AT });
+    if (event === "Changed Match") return createOddsChangedResult({ submittedOdds: "1.9", currentOdds: "2.5", provider: "THE_ODDS_API", checkedAt: CHECKED_AT });
+    if (event === "Not Found Match") return createFailedResult({ submittedOdds: "1.5", provider: "THE_ODDS_API", checkedAt: CHECKED_AT, reasonCode: "EVENT_NOT_FOUND" });
+    throw new Error("simulated crash for Rejected Match");
+  });
+  const service = new OddsVerificationService(provider);
+
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 40,
+    selections: [
+      { sport: "Football", event: "Verified Match", market: null, selection: "A Win", submittedOdds: 2.0 },
+      { sport: "Football", event: "Changed Match", market: null, selection: "B Win", submittedOdds: 1.9 },
+      { sport: "Football", event: "Not Found Match", market: null, selection: "C Win", submittedOdds: 1.5 },
+      { sport: "Football", event: "Rejected Match", market: null, selection: "D Win", submittedOdds: 1.6 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+
+  assert.deepEqual(
+    result.preview.selections.map((s) => s.oddsStatus),
+    ["VERIFIED", "ODDS_CHANGED", "NOT_FOUND", "UNAVAILABLE"],
+  );
+});
+
+/* -------------------------------------------------------------------------- */
+/* Step 7A — football-league compatibility fix, at the buildBetSlipPreview    */
+/* level: the exact same legacy sport string that reached verifyOddsFn        */
+/* before the Step 7 migration must still reach it today, for each of the     */
+/* five pre-existing league-specific aliases plus Premier League.             */
+/* -------------------------------------------------------------------------- */
+
+test("Step 7A parity: each football-league-specific sport string reaches verifyOddsFn unchanged, and preview output is VERIFIED as before", async () => {
+  const displaySportByLegacy: Record<string, string> = {
+    "la liga": "La Liga",
+    "serie a": "Serie A",
+    bundesliga: "Bundesliga",
+    "ligue 1": "Ligue 1",
+    "champions league": "Champions League",
+    "premier league": "Premier League",
+  };
+
+  for (const leagueSport of ["la liga", "serie a", "bundesliga", "ligue 1", "champions league", "premier league"]) {
+    const slip: ParsedBetSlip = {
+      type: "SINGLE",
+      stake: 75,
+      selections: [
+        {
+          sport: displaySportByLegacy[leagueSport],
+          event: "Manchester City vs Chelsea",
+          market: null,
+          selection: "Manchester City Win",
+          submittedOdds: 1.95,
+        },
+      ],
+    };
+
+    let capturedSport: string | undefined;
+    const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+      verifyOddsFn: async (input) => {
+        capturedSport = input.sport;
+        return verified(1.95, 1.95);
+      },
+    });
+
+    assert.equal(capturedSport, leagueSport, `expected verifyOddsFn to receive sport "${leagueSport}"`);
+    assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+    assert.equal(result.preview.selections[0].currentOdds, 1.95);
+  }
+});
+
+test("Step 7A parity: a League-specific SINGLE slip produces the exact same preview shape as before the migration", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 75,
+    selections: [{ sport: "Serie A", event: "Juventus vs Inter", market: null, selection: "1", submittedOdds: 2.1 }],
+  };
+
+  let capturedInput: OddsVerificationInput | undefined;
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async (input) => {
+      capturedInput = input;
+      return verified(2.1, 2.1);
+    },
+  });
+
+  assert.equal(capturedInput?.sport, "serie a");
+  assert.equal(capturedInput?.event, "Juventus vs Inter");
+  assert.equal(capturedInput?.selection, "home");
+  assert.equal(result.preview.selections[0].sport, "Serie A"); // original legacy sport string, display-only, unaffected
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[0].currentOdds, 2.1);
+  assert.equal(typeof result.previewToken, "string");
+});
+
+test("Step 7A parity: Premier League is represented honestly but still resolves through the same legacy alias as generic football", async () => {
+  const premierLeagueSlip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 50,
+    selections: [{ sport: "Premier League", event: "Arsenal vs Chelsea", market: null, selection: "1", submittedOdds: 2.2 }],
+  };
+
+  let capturedSport: string | undefined;
+  const result = await buildBetSlipPreview(premierLeagueSlip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async (input) => {
+      capturedSport = input.sport;
+      return verified(2.2, 2.2);
+    },
+  });
+
+  assert.equal(capturedSport, "premier league");
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+});
+
+test("Step 7A parity: an EXPRESS mixing generic football and a specific league still verifies each leg against its own correct legacy sport string", async () => {
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 30,
+    selections: [
+      { sport: "Football", event: "Man City vs Liverpool", market: null, selection: "1", submittedOdds: 1.8 },
+      { sport: "La Liga", event: "Real Madrid vs Barcelona", market: null, selection: "1", submittedOdds: 1.9 },
+    ],
+  };
+
+  const capturedSports: string[] = [];
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async (input) => {
+      capturedSports.push(input.sport);
+      return verified(input.odds, input.odds);
+    },
+  });
+
+  assert.deepEqual(capturedSports.sort(), ["football", "la liga"]);
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[1].oddsStatus, "VERIFIED");
 });
