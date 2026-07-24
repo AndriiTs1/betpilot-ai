@@ -6,6 +6,7 @@ import { z } from "zod";
 // reverse.
 import { normalizeParsedBet, type ParsedBetSlip } from "@/lib/bets/betSlip";
 import { chatPrompt, ocrPrompt } from "./betParserPrompt";
+import { mapRawBetSlipToParsedBetSlip, type RawBetSelectionFields } from "./betDraftMapper";
 
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "llama3.2";
@@ -22,10 +23,32 @@ const CLAUDE_TIMEOUT_MS = 8000;
 // see SCREENSHOT_RECOGNITION_REPORT.md.
 export const MAX_DECIMAL_ODDS = 1000;
 
+// league/market/period/line: Anthropic's strict tool schema (extractBetTool
+// below) declares these as REQUIRED keys whose value may be null — under
+// strict:true + additionalProperties:false, a real Claude response is
+// guaranteed to always include every one of them. This is therefore the
+// strict Claude-tool-payload contract: .nullable() (never .optional() or
+// .nullish()), so an omitted key is a validation FAILURE, not a silently
+// accepted shape — a payload missing one of these keys is malformed and
+// must be caught here, not passed through as if it meant "not stated".
+//
+// This schema is shared by both real producers of an actual Claude
+// extract_bet tool_use.input: parseTextSlipWithClaude (below) and the
+// legacy parseWithClaude (same extractBetTool, effectively unreachable in
+// production but no less bound by the same real contract).
+//
+// Ollama's freeform JSON response is a genuinely different producer with no
+// structural schema enforcement of its own — see ollamaBetFieldsSchema and
+// parseWithOllama's compatibility-enrichment step below, the ONE place an
+// omitted key is expected and legitimate.
 const betFieldsSchema = z.object({
   sport: z.string().min(1),
+  league: z.string().min(1).nullable(),
   event: z.string().min(1),
+  market: z.string().min(1).nullable(),
   selection: z.string().min(1),
+  period: z.string().min(1).nullable(),
+  line: z.string().min(1).nullable(),
   stake: z.number().positive(),
   odds: z.number().finite().positive().max(MAX_DECIMAL_ODDS, "Decimal odds exceed the supported maximum").nullable(),
 });
@@ -33,8 +56,6 @@ const betFieldsSchema = z.object({
 const validBetSchema = betFieldsSchema.extend({ valid: z.literal(true) });
 
 const invalidBetSchema = z.object({ valid: z.literal(false) });
-
-const modelResponseSchema = z.union([validBetSchema, invalidBetSchema]);
 
 export type ParsedBet = z.infer<typeof validBetSchema>;
 
@@ -65,6 +86,25 @@ interface OllamaChatResponse {
     content?: string;
   };
 }
+
+// Ollama's OWN raw JSON shape — deliberately NOT betFieldsSchema.
+// OLLAMA_SYSTEM_PROMPT (above) never asks the local model for league/
+// market/period/line, and Ollama's freeform JSON output has no structural
+// enforcement mechanism (unlike Anthropic's strict tool-use), so those four
+// keys can never be trusted to be present here. This is the ONE
+// compatibility boundary in this file where an omitted key is expected and
+// legitimate, never a malformed payload.
+const ollamaBetFieldsSchema = z.object({
+  sport: z.string().min(1),
+  event: z.string().min(1),
+  selection: z.string().min(1),
+  stake: z.number().positive(),
+  odds: z.number().finite().positive().max(MAX_DECIMAL_ODDS, "Decimal odds exceed the supported maximum").nullable(),
+});
+
+const ollamaValidBetSchema = ollamaBetFieldsSchema.extend({ valid: z.literal(true) });
+
+const ollamaModelResponseSchema = z.union([ollamaValidBetSchema, invalidBetSchema]);
 
 async function parseWithOllama(text: string): Promise<ParseBetResult> {
   const controller = new AbortController();
@@ -118,7 +158,7 @@ async function parseWithOllama(text: string): Promise<ParseBetResult> {
     return { valid: false, error: "Ollama returned invalid JSON" };
   }
 
-  const result = modelResponseSchema.safeParse(parsedJson);
+  const result = ollamaModelResponseSchema.safeParse(parsedJson);
 
   if (!result.success) {
     return { valid: false, error: result.error.message };
@@ -128,7 +168,20 @@ async function parseWithOllama(text: string): Promise<ParseBetResult> {
     return { valid: false, error: "Message does not appear to be a bet request" };
   }
 
-  return result.data;
+  // Compatibility enrichment: Ollama's own schema has no slot for the four
+  // new fields, so they're added here as null before being validated
+  // against the exact same strict contract every other ParsedBet producer
+  // must satisfy (validBetSchema) — this re-validation is a deliberate
+  // integrity check, not just a type cast, so an enrichment bug here would
+  // still be caught rather than silently producing a malformed ParsedBet.
+  const enriched = { ...result.data, league: null, market: null, period: null, line: null };
+  const strictResult = validBetSchema.safeParse(enriched);
+
+  if (!strictResult.success) {
+    return { valid: false, error: strictResult.error.message };
+  }
+
+  return strictResult.data;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -149,15 +202,32 @@ export const extractBetTool: Anthropic.Beta.BetaTool = {
     type: "object",
     properties: {
       sport: { type: "string", description: "The sport being bet on, e.g. Football, Tennis." },
+      league: {
+        type: ["string", "null"],
+        description: "The league or competition, e.g. Premier League, La Liga — only when explicitly stated. Null if not mentioned.",
+      },
       event: { type: "string", description: "The match or event, e.g. Real Madrid vs Barcelona." },
+      market: {
+        type: ["string", "null"],
+        description:
+          "The market or bet type, e.g. Match Winner, Total Goals, Both Teams to Score — only when explicitly stated or unambiguous from context. Null if not identifiable.",
+      },
       selection: { type: "string", description: "The outcome the player is betting on, e.g. Real Madrid Win." },
+      period: {
+        type: ["string", "null"],
+        description: "The period the bet applies to, e.g. First Half, Full Game — only when explicitly stated. Null if not mentioned.",
+      },
+      line: {
+        type: ["string", "null"],
+        description: "The exact numeric line as written, e.g. 2.5, -0.5, +4.5 — only when explicitly stated. Null if not applicable.",
+      },
       stake: { type: "number", description: "The amount the player wants to bet." },
       odds: {
         type: ["number", "null"],
         description: "The odds the player mentioned, or null if not mentioned.",
       },
     },
-    required: ["sport", "event", "selection", "stake", "odds"],
+    required: ["sport", "league", "event", "market", "selection", "period", "line", "stake", "odds"],
     additionalProperties: false,
   },
 };
@@ -263,10 +333,18 @@ export async function parseBetMessage(
 // image-specific parsing remains in this file as of Stage 14.3 (see
 // betParserPrompt.ts / recognizeScreenshot.ts for how a screenshot's text
 // now reaches this same module instead).
+// Same strict "required key, nullable value" contract as betFieldsSchema
+// above — this validates a real extract_express_bet leg (tool_use.input),
+// never a legacy/Ollama-shaped payload, so an omitted key must fail here
+// too.
 const parlaySelectionFieldsSchema = z.object({
   sport: z.string().trim().min(1),
+  league: z.string().trim().min(1).nullable(),
   event: z.string().trim().min(1),
+  market: z.string().trim().min(1).nullable(),
   selection: z.string().trim().min(1),
+  period: z.string().trim().min(1).nullable(),
+  line: z.string().trim().min(1).nullable(),
   odds: z.number().finite().positive().max(MAX_DECIMAL_ODDS, "Decimal odds exceed the supported maximum").nullable(),
 });
 
@@ -340,11 +418,27 @@ export const extractExpressBetTool: Anthropic.Beta.BetaTool = {
           type: "object",
           properties: {
             sport: { type: "string" },
+            league: {
+              type: ["string", "null"],
+              description: "The league or competition, e.g. Premier League, La Liga — only when explicitly stated. Null if not mentioned.",
+            },
             event: { type: "string" },
+            market: {
+              type: ["string", "null"],
+              description: "The market or bet type — only when explicitly stated or unambiguous from context. Null if not identifiable.",
+            },
             selection: { type: "string" },
+            period: {
+              type: ["string", "null"],
+              description: "The period the bet applies to — only when explicitly stated. Null if not mentioned.",
+            },
+            line: {
+              type: ["string", "null"],
+              description: "The exact numeric line as written, e.g. 2.5, -0.5, +4.5 — only when explicitly stated. Null if not applicable.",
+            },
             odds: { type: ["number", "null"] },
           },
-          required: ["sport", "event", "selection", "odds"],
+          required: ["sport", "league", "event", "market", "selection", "period", "line", "odds"],
           additionalProperties: false,
         },
         // No minItems here — Anthropic's strict tool schema only supports
@@ -361,6 +455,28 @@ export const extractExpressBetTool: Anthropic.Beta.BetaTool = {
     additionalProperties: false,
   },
 };
+
+// Wraps mapRawBetSlipToParsedBetSlip() so a programmer-error throw (the
+// mapper/adapter only ever throws for a non-finite stake/odds or a sport
+// with no raw text at all — both impossible given betFieldsSchema/
+// parlayBetFieldsSchema already validated the input) degrades to the
+// established invalid-parser-result shape rather than propagating an
+// exception into the route layer. Never logs or returns the caught error's
+// own message, since a LegacyAdapterError's message can embed the raw
+// malformed value.
+function buildParsedBetSlipResult(
+  raw: { type: "SINGLE" | "EXPRESS"; stake: number; selections: readonly RawBetSelectionFields[] },
+  text: string,
+  mode: BetSlipParseMode,
+): ParseBetSlipResult {
+  try {
+    const parsedSlip = mapRawBetSlipToParsedBetSlip(raw, { originalText: text, sourceType: mode });
+    return { valid: true, ...parsedSlip };
+  } catch (err) {
+    console.error("parseTextSlipWithClaude: failed to build bet draft", err instanceof Error ? err.name : "unknown error");
+    return { valid: false, error: "Failed to process the extracted bet details" };
+  }
+}
 
 async function parseTextSlipWithClaude(
   text: string,
@@ -431,20 +547,17 @@ async function parseTextSlipWithClaude(
     if (!result.success) {
       return { valid: false, error: result.error.message };
     }
-    return {
-      valid: true,
-      type: "SINGLE",
-      stake: result.data.stake,
-      selections: [
-        {
-          sport: result.data.sport,
-          event: result.data.event,
-          market: null,
-          selection: result.data.selection,
-          submittedOdds: result.data.odds,
-        },
-      ],
+    const rawSelection: RawBetSelectionFields = {
+      sport: result.data.sport,
+      league: result.data.league,
+      event: result.data.event,
+      market: result.data.market,
+      selection: result.data.selection,
+      period: result.data.period,
+      line: result.data.line,
+      odds: result.data.odds,
     };
+    return buildParsedBetSlipResult({ type: "SINGLE", stake: result.data.stake, selections: [rawSelection] }, text, mode);
   }
 
   if (toolUse.name === "extract_express_bet") {
@@ -452,18 +565,17 @@ async function parseTextSlipWithClaude(
     if (!result.success) {
       return { valid: false, error: result.error.message };
     }
-    return {
-      valid: true,
-      type: "EXPRESS",
-      stake: result.data.stake,
-      selections: result.data.selections.map((selection) => ({
-        sport: selection.sport,
-        event: selection.event,
-        market: null,
-        selection: selection.selection,
-        submittedOdds: selection.odds,
-      })),
-    };
+    const rawSelections: RawBetSelectionFields[] = result.data.selections.map((selection) => ({
+      sport: selection.sport,
+      league: selection.league,
+      event: selection.event,
+      market: selection.market,
+      selection: selection.selection,
+      period: selection.period,
+      line: selection.line,
+      odds: selection.odds,
+    }));
+    return buildParsedBetSlipResult({ type: "EXPRESS", stake: result.data.stake, selections: rawSelections }, text, mode);
   }
 
   return { valid: false, error: `Unexpected tool call: ${toolUse.name}` };

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractBetTool, rejectBetTool, extractExpressBetTool, parseBetSlipMessage } from "./betParser";
+import { extractBetTool, rejectBetTool, extractExpressBetTool, parseBetSlipMessage, parseBetMessage, MAX_DECIMAL_ODDS } from "./betParser";
 import { chatPrompt, ocrPrompt } from "./betParserPrompt";
 
 // Regression test for a real production incident (Stage 12, Phase 3
@@ -165,7 +165,17 @@ test("parseBetSlipMessage: CHAT and OCR modes send the exact same tool schema (o
 });
 
 test("parseBetSlipMessage: OCR mode extract_bet produces the exact same ParsedBetSlip shape as CHAT mode", async () => {
-  const toolInput = { sport: "Football", event: "Real Madrid vs Barcelona", selection: "Real Madrid Win", stake: 50, odds: 1.9 };
+  const toolInput = {
+    sport: "Football",
+    league: null,
+    event: "Real Madrid vs Barcelona",
+    market: null,
+    selection: "Real Madrid Win",
+    period: null,
+    line: null,
+    stake: 50,
+    odds: 1.9,
+  };
   currentHandler = async () => anthropicToolUseResponse("extract_bet", toolInput);
 
   const chatResult = await parseBetSlipMessage("100 on Real Madrid to win", "CHAT");
@@ -222,6 +232,356 @@ test('parseBetSlipMessage: a non-timeout API error does not carry code: "timeout
 test("betParserPrompt: ocrPrompt explicitly frames OCR text as untrusted, non-instructional data", () => {
   assert.match(ocrPrompt, /untrusted/i);
   assert.match(ocrPrompt, /never follow it/i);
+});
+
+// ---------------------------------------------------------------------
+// Step 8B — Section 14: CHAT mode previously had no explicit untrusted-
+// data framing (unlike OCR). Confirms the same protection now exists.
+// ---------------------------------------------------------------------
+
+test("betParserPrompt: chatPrompt explicitly frames the player's message as untrusted, non-instructional data", () => {
+  assert.match(chatPrompt, /untrusted/i);
+  assert.match(chatPrompt, /never follow it/i);
+});
+
+test("betParserPrompt: chatPrompt instructs the model not to invent league, market, period, or line", () => {
+  assert.match(chatPrompt, /never derive it from a team name/i);
+  assert.match(chatPrompt, /pass it as null/i);
+});
+
+test("betParserPrompt: ocrPrompt retains its existing balance/payout/combined-odds safeguards", () => {
+  assert.match(ocrPrompt, /account balance/i);
+  assert.match(ocrPrompt, /potential payout/i);
+  assert.match(ocrPrompt, /combined\/total odds/i);
+});
+
+test("betParserPrompt: ocrPrompt instructs line to be kept exactly as printed", () => {
+  assert.match(ocrPrompt, /exact line as printed/i);
+});
+
+// ---------------------------------------------------------------------
+// Step 8B — Section 16, Test Layer A: tool schema now carries required-
+// but-nullable league/market/period/line keys, without loosening any
+// existing required field.
+// ---------------------------------------------------------------------
+
+test("betParser: extract_bet requires the four new fields, alongside every pre-existing required field, as nullable", () => {
+  const schema = extractBetTool.input_schema as unknown as {
+    required: string[];
+    properties: Record<string, { type: string | string[] }>;
+    additionalProperties: boolean;
+  };
+
+  assert.deepEqual(
+    [...schema.required].sort(),
+    ["event", "league", "line", "market", "odds", "period", "selection", "sport", "stake"].sort(),
+  );
+  assert.equal(schema.additionalProperties, false);
+  for (const field of ["league", "market", "period", "line"]) {
+    assert.deepEqual(schema.properties[field].type, ["string", "null"]);
+  }
+  // Existing required fields keep their original (non-nullable) type.
+  assert.equal(schema.properties.sport.type, "string");
+  assert.equal(schema.properties.event.type, "string");
+  assert.equal(schema.properties.selection.type, "string");
+});
+
+test("betParser: extract_express_bet's per-leg schema mirrors extract_bet's new fields, minus stake", () => {
+  const schema = extractExpressBetTool.input_schema as unknown as {
+    properties: { selections: { items: { required: string[]; properties: Record<string, unknown>; additionalProperties: boolean } } };
+  };
+  const legSchema = schema.properties.selections.items;
+
+  assert.deepEqual(
+    [...legSchema.required].sort(),
+    ["event", "league", "line", "market", "odds", "period", "selection", "sport"].sort(),
+  );
+  assert.equal(legSchema.additionalProperties, false);
+  assert.ok(!("stake" in legSchema.properties), "stake belongs at the slip level, not per-leg");
+});
+
+// ---------------------------------------------------------------------
+// Step 8B — Section 16, Test Layer D: public parser parity. The existing
+// SINGLE/EXPRESS fixture shapes (with the four new keys entirely absent,
+// exactly as they were before this step) must keep producing identical
+// output, and the richer schema must not expand what's required for a
+// valid bet.
+// ---------------------------------------------------------------------
+
+test("parseBetSlipMessage: extract_bet with league/market/period/line supplied populates market, but nothing else leaks into ParsedBetSlip", async () => {
+  const toolInput = {
+    sport: "Football",
+    league: "Premier League",
+    event: "Arsenal vs Chelsea",
+    market: "Match Winner",
+    selection: "Arsenal",
+    period: "First Half",
+    line: null,
+    stake: 50,
+    odds: 1.95,
+  };
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", toolInput);
+
+  const result = await parseBetSlipMessage("Arsenal to win first half, 50 at 1.95", "CHAT");
+
+  assert.equal(result.valid, true);
+  if (!result.valid) return;
+  assert.deepEqual(Object.keys(result).sort(), ["selections", "stake", "type", "valid"]);
+  assert.deepEqual(Object.keys(result.selections[0]).sort(), ["event", "market", "selection", "sport", "submittedOdds"]);
+  assert.equal(result.selections[0].market, "Match Winner");
+  assert.equal(result.selections[0].sport, "Football");
+  assert.equal(result.selections[0].event, "Arsenal vs Chelsea");
+  assert.equal(result.selections[0].selection, "Arsenal");
+  assert.equal(result.selections[0].submittedOdds, 1.95);
+});
+
+test("parseBetSlipMessage: extract_bet with the four new fields explicitly null behaves exactly like today (market: null)", async () => {
+  const toolInput = {
+    sport: "Football",
+    league: null,
+    event: "Real Madrid vs Barcelona",
+    market: null,
+    selection: "Real Madrid Win",
+    period: null,
+    line: null,
+    stake: 50,
+    odds: 1.9,
+  };
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", toolInput);
+
+  const result = await parseBetSlipMessage("100 on Real Madrid to win", "CHAT");
+
+  assert.equal(result.valid, true);
+  if (!result.valid) return;
+  assert.deepEqual(result, {
+    valid: true,
+    type: "SINGLE",
+    stake: 50,
+    selections: [{ sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: 1.9 }],
+  });
+});
+
+test("parseBetSlipMessage: extract_express_bet with an unresolved league/market still adapts market to the raw text or null, without rejecting the bet", async () => {
+  const toolInput = {
+    stake: 30,
+    selections: [
+      { sport: "Football", league: "EPL", event: "Real Madrid vs Barcelona", market: "match winner", selection: "Real Madrid", period: null, line: null, odds: 1.8 },
+      { sport: "Football", league: null, event: "Inter vs Juventus", market: "player prop", selection: "Juventus", period: null, line: null, odds: 2.1 },
+    ],
+  };
+  currentHandler = async () => anthropicToolUseResponse("extract_express_bet", toolInput);
+
+  const result = await parseBetSlipMessage("express text", "CHAT");
+
+  assert.equal(result.valid, true);
+  if (!result.valid) return;
+  assert.equal(result.type, "EXPRESS");
+  assert.equal(result.selections.length, 2);
+  // "match winner" resolves via normalizeDraftMarket -> EXTRACTED -> raw display text.
+  assert.equal(result.selections[0].market, "match winner");
+  // "player prop" is a recognized-but-UNSUPPORTED market -> adapts to null, never rejects the leg.
+  assert.equal(result.selections[1].market, null);
+});
+
+test("parseBetSlipMessage: a null odds leg still parses successfully with the richer schema (existing behavior unchanged)", async () => {
+  const toolInput = {
+    sport: "Tennis",
+    league: null,
+    event: "Alcaraz vs Sinner",
+    market: null,
+    selection: "Alcaraz",
+    period: null,
+    line: null,
+    stake: 20,
+    odds: null,
+  };
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", toolInput);
+
+  const result = await parseBetSlipMessage("20 on Alcaraz, no odds given", "CHAT");
+
+  assert.equal(result.valid, true);
+  if (!result.valid) return;
+  assert.equal(result.selections[0].submittedOdds, null);
+});
+
+test("parseBetSlipMessage: an out-of-range odds value is still rejected, even with the new fields present and null", async () => {
+  const toolInput = {
+    sport: "Football",
+    league: null,
+    event: "A vs B",
+    market: null,
+    selection: "A",
+    period: null,
+    line: null,
+    stake: 10,
+    odds: MAX_DECIMAL_ODDS + 1,
+  };
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", toolInput);
+
+  const result = await parseBetSlipMessage("bad odds", "CHAT");
+
+  assert.equal(result.valid, false);
+});
+
+test("parseBetSlipMessage: an express slip with fewer than two legs is still rejected (min 2 unchanged)", async () => {
+  const toolInput = {
+    stake: 10,
+    selections: [{ sport: "Football", league: null, event: "A vs B", market: null, selection: "A", period: null, line: null, odds: 1.5 }],
+  };
+  currentHandler = async () => anthropicToolUseResponse("extract_express_bet", toolInput);
+
+  const result = await parseBetSlipMessage("one leg only", "CHAT");
+
+  assert.equal(result.valid, false);
+});
+
+// ---------------------------------------------------------------------
+// Post-review correction — the Claude tool boundary must be STRICT:
+// league/market/period/line are required-but-nullable (z.string().nullable()
+// semantics), not nullish. A real Claude tool_use.input under strict:true
+// always includes every declared key, so a payload that OMITS one of these
+// keys is malformed and must be rejected here, never silently accepted.
+// ---------------------------------------------------------------------
+
+const COMPLETE_SINGLE_TOOL_INPUT = {
+  sport: "Football",
+  league: "Premier League",
+  event: "Arsenal vs Chelsea",
+  market: "Match Winner",
+  selection: "Arsenal",
+  period: "Full Game",
+  line: "2.5",
+  stake: 50,
+  odds: 1.95,
+} as const;
+
+const NEW_FIELD_NAMES = ["league", "market", "period", "line"] as const;
+
+for (const field of NEW_FIELD_NAMES) {
+  test(`parseBetSlipMessage: extract_bet with "${field}" omitted entirely is rejected (strict Claude contract)`, async () => {
+    const toolInput: Record<string, unknown> = { ...COMPLETE_SINGLE_TOOL_INPUT };
+    delete toolInput[field];
+    currentHandler = async () => anthropicToolUseResponse("extract_bet", toolInput);
+
+    const result = await parseBetSlipMessage("some bet text", "CHAT");
+
+    assert.equal(result.valid, false);
+  });
+}
+
+const COMPLETE_EXPRESS_LEG = {
+  sport: "Football",
+  league: "Premier League",
+  event: "Arsenal vs Chelsea",
+  market: "Match Winner",
+  selection: "Arsenal",
+  period: "Full Game",
+  line: "2.5",
+  odds: 1.95,
+} as const;
+
+for (const field of NEW_FIELD_NAMES) {
+  test(`parseBetSlipMessage: extract_express_bet with a leg missing "${field}" is rejected (strict Claude contract)`, async () => {
+    const leg: Record<string, unknown> = { ...COMPLETE_EXPRESS_LEG };
+    delete leg[field];
+    const toolInput = {
+      stake: 30,
+      selections: [leg, { ...COMPLETE_EXPRESS_LEG, event: "Inter vs Juventus", selection: "Juventus" }],
+    };
+    currentHandler = async () => anthropicToolUseResponse("extract_express_bet", toolInput);
+
+    const result = await parseBetSlipMessage("express text", "CHAT");
+
+    assert.equal(result.valid, false);
+  });
+}
+
+test("parseBetSlipMessage: extract_bet with all four new fields as explicit strings is accepted", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", COMPLETE_SINGLE_TOOL_INPUT);
+
+  const result = await parseBetSlipMessage("Arsenal to win, full game, over 2.5, 50 at 1.95", "CHAT");
+
+  assert.equal(result.valid, true);
+  if (!result.valid) return;
+  assert.equal(result.selections[0].market, "Match Winner");
+});
+
+test("parseBetSlipMessage: extract_bet with all four new fields as explicit null is accepted", async () => {
+  const toolInput = { ...COMPLETE_SINGLE_TOOL_INPUT, league: null, market: null, period: null, line: null };
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", toolInput);
+
+  const result = await parseBetSlipMessage("Arsenal to win, 50 at 1.95", "CHAT");
+
+  assert.equal(result.valid, true);
+  if (!result.valid) return;
+  assert.equal(result.selections[0].market, null);
+});
+
+// ---------------------------------------------------------------------
+// Post-review correction — legacy/Ollama compatibility boundary. Ollama's
+// own JSON response (per OLLAMA_SYSTEM_PROMPT) never includes league/
+// market/period/line at all; parseWithOllama must enrich the parsed result
+// with explicit nulls for those four keys before it satisfies the same
+// strict ParsedBet contract every other producer does, WITHOUT rejecting
+// an otherwise-valid Ollama bet.
+// ---------------------------------------------------------------------
+
+function ollamaChatResponse(content: unknown): Response {
+  return new Response(JSON.stringify({ message: { content: JSON.stringify(content) } }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+test("parseBetMessage (Ollama path): a raw Ollama JSON payload without league/market/period/line is enriched with nulls into a valid ParsedBet", async () => {
+  process.env.AI_PROVIDER = "ollama";
+  currentHandler = async () =>
+    ollamaChatResponse({
+      valid: true,
+      sport: "Football",
+      event: "Real Madrid vs Barcelona",
+      selection: "Real Madrid Win",
+      stake: 50,
+      odds: 1.9,
+    });
+
+  const result = await parseBetMessage("100 on Real Madrid to win", "player-1");
+
+  assert.equal(result.valid, true);
+  if (!result.valid) return;
+  assert.equal(result.league, null);
+  assert.equal(result.market, null);
+  assert.equal(result.period, null);
+  assert.equal(result.line, null);
+  assert.equal(result.sport, "Football");
+  assert.equal(result.event, "Real Madrid vs Barcelona");
+  assert.equal(result.selection, "Real Madrid Win");
+  assert.equal(result.stake, 50);
+  assert.equal(result.odds, 1.9);
+});
+
+test("parseBetSlipMessage (Ollama fallback): the enriched Ollama payload still produces today's exact ParsedBetSlip shape (market: null)", async () => {
+  process.env.AI_PROVIDER = "ollama";
+  currentHandler = async () =>
+    ollamaChatResponse({
+      valid: true,
+      sport: "Football",
+      event: "Real Madrid vs Barcelona",
+      selection: "Real Madrid Win",
+      stake: 50,
+      odds: 1.9,
+    });
+
+  const result = await parseBetSlipMessage("100 on Real Madrid to win");
+
+  assert.equal(result.valid, true);
+  if (!result.valid) return;
+  assert.deepEqual(result, {
+    valid: true,
+    type: "SINGLE",
+    stake: 50,
+    selections: [{ sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: 1.9 }],
+  });
 });
 
 // ---------------------------------------------------------------------
