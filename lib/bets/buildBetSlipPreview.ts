@@ -178,10 +178,14 @@ export async function buildBetSlipPreview(
   // lib/odds/oddsVerificationService.ts.
   const results = await oddsVerificationService.verifyMany(requests);
 
+  // Step 15H — no longer passes a submittedOdds argument: legacyOddsBridge's
+  // verificationResultToLegacyOddsCheck (lib/odds/legacyOddsBridge.ts) now
+  // derives submittedOdds entirely from the verification result itself, so
+  // the second positional argument it used to require is dead here. This
+  // was called out as deferred work in that file's own Step 15H comment.
   const reconstructedByIndex = new Map<number, ReconstructedOddsCheck>();
   verifiableIndices.forEach((selectionIndex, batchIndex) => {
-    const submittedOdds = slip.selections[selectionIndex].submittedOdds!;
-    reconstructedByIndex.set(selectionIndex, verificationResultToLegacyOddsCheck(results[batchIndex], submittedOdds));
+    reconstructedByIndex.set(selectionIndex, verificationResultToLegacyOddsCheck(results[batchIndex]));
   });
 
   const previewSelections: BetSlipPreviewSelection[] = slip.selections.map((selection, index) => {
