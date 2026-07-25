@@ -254,7 +254,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
       </button>
 
       <p className="mt-3 text-xl font-bold text-white">Place a bet</p>
-      <p className="mt-1 text-sm text-slate-400">Describe your bet in one message</p>
+      <p className="mt-1 text-sm text-slate-400">Describe your bet in one message — odds aren&apos;t required, we&apos;ll verify them for you</p>
 
       {showEditingBlock && (
         <div className="mt-4">
@@ -262,7 +262,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
             value={message}
             onChange={(event) => handleMessageChange(event.target.value)}
             maxLength={MESSAGE_MAX_LENGTH}
-            placeholder="Real Madrid win, stake 100, odds 2.10"
+            placeholder="Real Madrid win, stake 100"
             aria-label="Bet message"
             disabled={phase === "previewing"}
             className="w-full resize-none rounded-2xl p-3 text-base text-white placeholder:text-slate-500"

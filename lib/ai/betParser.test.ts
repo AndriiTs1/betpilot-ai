@@ -249,6 +249,19 @@ test("betParserPrompt: chatPrompt instructs the model not to invent league, mark
   assert.match(chatPrompt, /pass it as null/i);
 });
 
+// Players are never required to state odds in a text bet — the odds
+// provider always supplies and verifies the real price. A missing odds
+// value must never be treated as a reason to reject the message.
+test("betParserPrompt: chatPrompt explicitly states odds are never required from the player", () => {
+  assert.match(chatPrompt, /never required to state odds/i);
+  assert.match(chatPrompt, /never a reason to reject the message/i);
+});
+
+test("betParserPrompt: chatPrompt still tells the model to pass along real odds if the player did mention them", () => {
+  assert.match(chatPrompt, /if odds are mentioned, pass them exactly as stated/i);
+  assert.match(chatPrompt, /never invent, guess, or infer/i);
+});
+
 test("betParserPrompt: ocrPrompt retains its existing balance/payout/combined-odds safeguards", () => {
   assert.match(ocrPrompt, /account balance/i);
   assert.match(ocrPrompt, /potential payout/i);

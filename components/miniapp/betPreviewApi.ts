@@ -182,7 +182,11 @@ export function getBetPreviewErrorMessage(failure: BetPreviewFailure): string {
     case "INVALID_MESSAGE":
       return "Enter a valid bet message.";
     case "PARSE_FAILED":
-      return "We could not understand this bet. Try adding event, selection, stake and odds.";
+      // Odds deliberately not listed as something to add — they're never
+      // required from the player, only event/selection/stake are. See
+      // lib/ai/betParserPrompt.ts's chatPrompt for the matching parser-side
+      // policy this message must stay consistent with.
+      return "We could not understand this bet. Try including the event, selection, and stake.";
     case "INVALID_BET_SLIP":
       return "This bet doesn't have a valid number of selections. Please try again.";
     case "INVALID_JSON":

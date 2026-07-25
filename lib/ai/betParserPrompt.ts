@@ -18,7 +18,7 @@ Call "extract_bet" if the message describes exactly one selection.
 Call "extract_express_bet" if the message describes two or more selections (an accumulator/express bet) — list every leg you can identify, each with its own odds if mentioned.
 Call "reject_bet" if the message does not look like a bet request.
 
-If odds for a leg are not mentioned, pass odds as null — it will be verified separately.
+Players are never required to state odds — the odds provider always supplies and verifies the real price for each selection. A missing odds value is never a reason to reject the message; only a missing sport, event, selection, or stake is. If odds for a leg are not mentioned, pass odds as null. If odds ARE mentioned, pass them exactly as stated — never invent, guess, or infer an odds value that was not actually written in the message.
 
 Each selection also has four optional fields: league, market, period, and line. Extract each ONLY when it is explicitly stated in the message:
 - "league": the competition name, e.g. "Premier League", "La Liga" — never derive it from a team name or your own knowledge of which league a team plays in.

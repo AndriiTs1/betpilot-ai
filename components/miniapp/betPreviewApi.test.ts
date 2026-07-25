@@ -25,7 +25,15 @@ test("getBetPreviewErrorMessage: malformed and invalid_signature share the same 
 
 test("getBetPreviewErrorMessage: unrelated error codes keep their own unchanged messages", () => {
   assert.equal(getBetPreviewErrorMessage({ kind: "http", code: "PLAYER_NOT_FOUND" }), "Your player account was not found.");
-  assert.equal(getBetPreviewErrorMessage({ kind: "http", code: "PARSE_FAILED" }), "We could not understand this bet. Try adding event, selection, stake and odds.");
+});
+
+// Odds are never required from the player — the PARSE_FAILED recovery hint
+// must reflect that (event/selection/stake only), never nudge the player
+// toward typing odds. See lib/ai/betParserPrompt.ts's matching policy.
+test("getBetPreviewErrorMessage: PARSE_FAILED never suggests adding odds", () => {
+  const message = getBetPreviewErrorMessage({ kind: "http", code: "PARSE_FAILED" });
+  assert.equal(message, "We could not understand this bet. Try including the event, selection, and stake.");
+  assert.equal(message.toLowerCase().includes("odds"), false);
 });
 
 test("getBetPreviewErrorMessage: network/timeout/invalid_response keep their existing, unrelated messages", () => {

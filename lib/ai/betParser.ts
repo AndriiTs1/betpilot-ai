@@ -190,7 +190,7 @@ async function parseWithOllama(text: string): Promise<ParseBetResult> {
 
 const CLAUDE_SYSTEM_PROMPT = `You extract structured sports betting data from a WhatsApp message sent by a player to their bookmaker.
 
-Call "extract_bet" if the message is a bet request. If the player did not mention odds, pass odds as null — it will be verified separately.
+Call "extract_bet" if the message is a bet request. Players are never required to state odds — the odds provider always supplies and verifies the real price. If the player did not mention odds, pass odds as null; a missing odds value is never a reason to reject the message.
 
 Call "reject_bet" if the message does not look like a bet request.`;
 
