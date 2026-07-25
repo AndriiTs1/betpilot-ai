@@ -127,7 +127,8 @@ test("requestRateLimiter: window reset uses the injected clock, never real elaps
   assert.equal(limiter.checkAndRecord("user1").allowed, true);
 });
 
-/* E. Bounded memory / stale-entry cleanup                                 */
+/* E. Bounded memory / stale-entry cleanup (Step 13B baseline coverage —    */
+/* still valid, and still passing, under Step 13D's hard-capacity policy)  */
 
 test("requestRateLimiter: maxTrackedKeys bounds the map — expired entries are swept once the bound is exceeded", () => {
   let clock = 0;
@@ -175,6 +176,135 @@ test("requestRateLimiter: a live (unexpired) bucket is never swept merely becaus
   // advanced) — it must still be rejected, proving the sweep only removes
   // genuinely expired entries.
   assert.equal(limiter.checkAndRecord("keepMe").allowed, false);
+});
+
+/* E2. Step 13D — hard capacity boundary                                   */
+
+test("requestRateLimiter (capacity): a third distinct key at capacity is allowed but not tracked — active buckets keep their state, not evicted", () => {
+  let clock = 0;
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000, now: () => clock, maxTrackedKeys: 2 });
+
+  // Fill both tracked slots.
+  assert.equal(limiter.checkAndRecord("A").allowed, true);
+  assert.equal(limiter.checkAndRecord("B").allowed, true);
+
+  // A third, never-before-seen key arrives while capacity is full and
+  // nothing has expired (frozen clock) — admitted (fail-open) but never
+  // inserted into the tracked set.
+  assert.equal(limiter.checkAndRecord("C").allowed, true, "an untracked key at capacity is admitted (best-effort fail-open)");
+  // Proven, without any debug/size API: C succeeds again immediately —
+  // if it had been tracked (maxRequests: 1), this second call would be
+  // rejected. It isn't, because it was never stored.
+  assert.equal(limiter.checkAndRecord("C").allowed, true, "C was never tracked, so it is never subject to its own quota");
+
+  // A and B's own active buckets must be untouched by C's admission — both
+  // still rejected, proving neither was evicted to make room for C.
+  assert.equal(limiter.checkAndRecord("A").allowed, false, "A's tracked bucket must not have been evicted to admit C");
+  assert.equal(limiter.checkAndRecord("B").allowed, false, "B's tracked bucket must not have been evicted to admit C");
+});
+
+test("requestRateLimiter (capacity): capacity becomes available once tracked entries genuinely expire", () => {
+  let clock = 0;
+  const limiter = createRequestRateLimiter({ maxRequests: 2, windowMs: 100, now: () => clock, maxTrackedKeys: 2 });
+
+  assert.equal(limiter.checkAndRecord("A").allowed, true);
+  assert.equal(limiter.checkAndRecord("B").allowed, true);
+
+  // Still within the window — capacity remains full, C is admitted but
+  // untracked.
+  assert.equal(limiter.checkAndRecord("C").allowed, true);
+
+  // Advance the injected clock past A/B's window (resetAt = 100).
+  clock = 150;
+
+  // C arrives again — this time the sweep (triggered by the capacity check)
+  // finds A and B genuinely expired, frees both slots, and C becomes
+  // tracked for real.
+  assert.equal(limiter.checkAndRecord("C").allowed, true, "C's first call after expiry frees capacity and becomes tracked");
+  assert.equal(limiter.checkAndRecord("C").allowed, true, "C's second call is still within its own maxRequests: 2");
+  assert.equal(limiter.checkAndRecord("C").allowed, false, "C's third call exceeds its own configured limit now that it is tracked");
+});
+
+test("requestRateLimiter (capacity): buckets.size never exceeds maxTrackedKeys, proven behaviorally across many distinct overflow keys", () => {
+  let clock = 0;
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000, now: () => clock, maxTrackedKeys: 3 });
+
+  assert.equal(limiter.checkAndRecord("keep1").allowed, true);
+  assert.equal(limiter.checkAndRecord("keep2").allowed, true);
+  assert.equal(limiter.checkAndRecord("keep3").allowed, true);
+
+  // A large burst of distinct, never-repeated keys, all while the clock is
+  // frozen (nothing ever expires) — none of these can ever be tracked
+  // (capacity stays full, sweep always finds nothing expired), so every one
+  // of them must be allowed every time (fail-open, never subject to its own
+  // quota since it's never stored).
+  for (let i = 0; i < 5_000; i += 1) {
+    const decision = limiter.checkAndRecord(`overflow-${i}`);
+    assert.equal(decision.allowed, true, `overflow key ${i} must always be admitted while capacity is full and nothing has expired`);
+  }
+
+  // The three original tracked keys must retain exactly the quota state
+  // they had before the overflow burst — still rejected (maxRequests: 1,
+  // already consumed), proving none of the 5,000 overflow keys ever
+  // evicted or reset them.
+  assert.equal(limiter.checkAndRecord("keep1").allowed, false, "keep1's original bucket must have survived the overflow burst untouched");
+  assert.equal(limiter.checkAndRecord("keep2").allowed, false, "keep2's original bucket must have survived the overflow burst untouched");
+  assert.equal(limiter.checkAndRecord("keep3").allowed, false, "keep3's original bucket must have survived the overflow burst untouched");
+});
+
+/* E3. Step 13D — option validation                                        */
+
+test("requestRateLimiter (validation): maxRequests: 0 throws at construction", () => {
+  assert.throws(() => createRequestRateLimiter({ maxRequests: 0, windowMs: 60_000 }), /maxRequests must be a positive integer/);
+});
+
+test("requestRateLimiter (validation): maxRequests < 0 throws at construction", () => {
+  assert.throws(() => createRequestRateLimiter({ maxRequests: -5, windowMs: 60_000 }), /maxRequests must be a positive integer/);
+});
+
+test("requestRateLimiter (validation): non-integer maxRequests throws at construction", () => {
+  assert.throws(() => createRequestRateLimiter({ maxRequests: 1.5, windowMs: 60_000 }), /maxRequests must be a positive integer/);
+});
+
+test("requestRateLimiter (validation): windowMs: 0 throws at construction", () => {
+  assert.throws(() => createRequestRateLimiter({ maxRequests: 5, windowMs: 0 }), /windowMs must be a positive finite number/);
+});
+
+test("requestRateLimiter (validation): windowMs < 0 throws at construction", () => {
+  assert.throws(() => createRequestRateLimiter({ maxRequests: 5, windowMs: -100 }), /windowMs must be a positive finite number/);
+});
+
+test("requestRateLimiter (validation): windowMs: Infinity throws at construction", () => {
+  assert.throws(() => createRequestRateLimiter({ maxRequests: 5, windowMs: Infinity }), /windowMs must be a positive finite number/);
+});
+
+test("requestRateLimiter (validation): windowMs: NaN throws at construction", () => {
+  assert.throws(() => createRequestRateLimiter({ maxRequests: 5, windowMs: NaN }), /windowMs must be a positive finite number/);
+});
+
+test("requestRateLimiter (validation): maxTrackedKeys: 0 throws at construction", () => {
+  assert.throws(
+    () => createRequestRateLimiter({ maxRequests: 5, windowMs: 60_000, maxTrackedKeys: 0 }),
+    /maxTrackedKeys must be a positive integer/,
+  );
+});
+
+test("requestRateLimiter (validation): maxTrackedKeys < 0 throws at construction", () => {
+  assert.throws(
+    () => createRequestRateLimiter({ maxRequests: 5, windowMs: 60_000, maxTrackedKeys: -1 }),
+    /maxTrackedKeys must be a positive integer/,
+  );
+});
+
+test("requestRateLimiter (validation): non-integer maxTrackedKeys throws at construction", () => {
+  assert.throws(
+    () => createRequestRateLimiter({ maxRequests: 5, windowMs: 60_000, maxTrackedKeys: 2.5 }),
+    /maxTrackedKeys must be a positive integer/,
+  );
+});
+
+test("requestRateLimiter (validation): invalid options are not silently normalized — no limiter is returned", () => {
+  assert.throws(() => createRequestRateLimiter({ maxRequests: -1, windowMs: -1, maxTrackedKeys: -1 }));
 });
 
 /* F. No key-state leakage between tests (each test builds its own limiter) */

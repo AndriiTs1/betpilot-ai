@@ -1024,8 +1024,24 @@ test("screenshot preview: the request after the boundary returns 429 with matchi
 });
 
 test("screenshot preview: a rate-limited request performs no region detection, OCR, AI parse, or provider work", async () => {
+  // Step 13D correction — uses a genuinely large, full-screen-looking
+  // fixture (matching the "large image with a detected region" test
+  // elsewhere in this file) specifically so regionCalls is a meaningful
+  // assertion: the small 64x64 fixture used elsewhere in this file skips
+  // region detection unconditionally regardless of rate limiting, which
+  // would make a regionCalls === 0 assertion true for the wrong reason.
+  // Here, the first (non-limited) request genuinely exercises region
+  // detection (regionCalls reaches 1), so proving regionCalls stays at 1
+  // (not 2) after the rate-limited second request is a real proof, not a
+  // vacuous one.
   const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
   const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+
+  const largeBytes = new Uint8Array(
+    (await sharp({ create: { width: 1600, height: 1000, channels: 3, background: { r: 40, g: 40, b: 40 } } })
+      .jpeg()
+      .toBuffer()),
+  );
 
   let ocrCalls = 0;
   let regionCalls = 0;
@@ -1035,12 +1051,11 @@ test("screenshot preview: a rate-limited request performs no region detection, O
   const options = baseOptions({
     rateLimiter: limiter,
     ocrProvider: fakeOcrProvider(() => { ocrCalls += 1; return ocrSuccess("x"); }),
-    detectRegion: (async (...args: unknown[]) => {
+    detectRegion: (async () => {
       regionCalls += 1;
-      const real = (await import("@/lib/ocr/regionDetection")).detectBettingRegion;
-      return (real as (...a: unknown[]) => unknown)(...args);
+      return { kind: "NOT_FOUND", reason: "test", durationMs: 1 } as RegionDetectionOutcome;
     }) as typeof import("@/lib/ocr/regionDetection").detectBettingRegion,
-    parseBetSlip: (async (...args: Parameters<typeof import("@/lib/ai/betParser").parseBetSlipMessage>) => {
+    parseBetSlip: (async () => {
       parserCalls += 1;
       return singleSlip();
     }) as typeof import("@/lib/ai/betParser").parseBetSlipMessage,
@@ -1050,11 +1065,14 @@ test("screenshot preview: a rate-limited request performs no region detection, O
     },
   });
 
-  await handleScreenshotPreview(buildRequest(initData, jpegBytes(), "image/jpeg"), options);
+  const first = await handleScreenshotPreview(buildRequest(initData, largeBytes, "image/jpeg"), options);
+  assert.equal(first.status, 200);
+  assert.equal(regionCalls, 1, "the first, non-limited request must genuinely have reached region detection (large-image fixture)");
 
-  const limited = await handleScreenshotPreview(buildRequest(initData, jpegBytes(), "image/jpeg"), options);
+  const limited = await handleScreenshotPreview(buildRequest(initData, largeBytes, "image/jpeg"), options);
   assert.equal(limited.status, 429);
 
+  assert.equal(regionCalls, 1, "region detection must not run again for the rate-limited request");
   assert.equal(ocrCalls, 1, "OCR must only have run for the first, non-limited request");
   assert.equal(parserCalls, 1, "the bet parser must only have run for the first, non-limited request");
   assert.equal(providerCalls, 1, "the odds provider must only have run for the first, non-limited request");

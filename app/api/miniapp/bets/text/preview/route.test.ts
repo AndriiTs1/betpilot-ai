@@ -194,15 +194,36 @@ test("text preview: too-short message is unchanged and does not consume quota", 
   assert.equal(followUp.status, 200);
 });
 
-test("text preview: PLAYER_NOT_FOUND is unchanged and does not consume quota", async () => {
-  const initData = buildInitData(BOT_TOKEN, 999999999); // not registered
-  const request = buildRequest(initData, { message: "Real Madrid to win, 1.9, 50" });
+test("text preview: PLAYER_NOT_FOUND is unchanged and genuinely does not consume quota", async () => {
+  // Step 13D correction — the previous version of this test only asserted
+  // the 404 response and never proved the "does not consume quota" half of
+  // its own name. Since PLAYER_NOT_FOUND is returned before the rate
+  // limiter is ever reached, a request from the SAME (still-unregistered)
+  // Telegram user always returns 404 regardless of quota state, so that
+  // alone can't distinguish "quota consumed" from "quota untouched." This
+  // version proves it properly: the same Telegram user, the same limiter
+  // instance/key, but a different `db` between the two calls — first
+  // unregistered (404), then registered (should succeed only if the first
+  // call never consumed the only unit of quota).
+  const telegramId = 999999999;
+  const initData = buildInitData(BOT_TOKEN, telegramId);
   const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
 
-  const response = await handleTextPreview(request, baseOptions({ rateLimiter: limiter }));
-  assert.equal(response.status, 404);
-  const body = await response.json();
-  assert.equal(body.error, "PLAYER_NOT_FOUND");
+  const unregisteredDb = fakeDb([]);
+  const notFound = await handleTextPreview(
+    buildRequest(initData, { message: "Real Madrid to win, 1.9, 50" }),
+    baseOptions({ rateLimiter: limiter, db: unregisteredDb }),
+  );
+  assert.equal(notFound.status, 404);
+  const notFoundBody = await notFound.json();
+  assert.equal(notFoundBody.error, "PLAYER_NOT_FOUND");
+
+  const nowRegisteredDb = fakeDb([{ id: "player-now-registered", telegramId: String(telegramId) }]);
+  const followUp = await handleTextPreview(
+    buildRequest(initData, { message: "Real Madrid to win, 1.9, 50" }),
+    baseOptions({ rateLimiter: limiter, db: nowRegisteredDb }),
+  );
+  assert.equal(followUp.status, 200, "quota must not have been consumed by the PLAYER_NOT_FOUND rejection");
 });
 
 // ---------------------------------------------------------------------
