@@ -1084,7 +1084,14 @@ test("confirm route (rate limit): repeated refreshed-token submissions each cons
   const limiter = createRequestRateLimiter({ maxRequests: 2, windowMs: 60_000 });
   // Always reports ODDS_CHANGED for this event, on every call — deterministic,
   // not one-shot, so the refreshed token also triggers ODDS_CHANGED again.
-  const alwaysOddsChanged = async (input: OddsVerificationInput): Promise<OddsCheckResult> => oddsChangedResult(1.8, input.odds);
+  // This test's token always sets odds: 2.1 — real narrowing (not an
+  // assertion) since OddsVerificationInput.odds widened to
+  // `number | null` in Step 15G for an unrelated, not-yet-wired-in
+  // capability that doesn't affect this test's own fixture.
+  const alwaysOddsChanged = async (input: OddsVerificationInput): Promise<OddsCheckResult> => {
+    if (input.odds === null) throw new Error("test token always sets odds");
+    return oddsChangedResult(1.8, input.odds);
+  };
 
   const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
   const first = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { rateLimiter: limiter, verifyOddsFn: alwaysOddsChanged }));

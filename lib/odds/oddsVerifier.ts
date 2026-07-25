@@ -14,11 +14,20 @@ const ODDS_TOLERANCE_PERCENT = 3;
 // types/bet.ts (which has its own out-of-sync BetStatus and a
 // selection/outcome naming mismatch against the real Prisma Bet model).
 // Field names here intentionally match what betHandler.ts already builds.
+//
+// Step 15G — odds is nullable so this function can be called for a
+// selection the player never gave a price for, to support automatic
+// provider-price lookup. This is a domain-level primitive only: nothing
+// upstream (buildBetSlipPreview.ts, legacyOddsBridge.ts,
+// theOddsApiProvider.ts) calls verifyOdds with odds: null yet — every
+// existing production call site still always passes a real number, so this
+// widening has zero effect on any live code path today. See this
+// function's own null-branch comment below for the exact new behavior.
 export interface OddsVerificationInput {
   sport: string;
   event: string;
   selection: string;
-  odds: number;
+  odds: number | null;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -494,6 +503,32 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
       ...baseResult,
       bookmaker: bookmakerPick.bookmaker.title,
       note: `Could not match selection "${bet.selection}" to a bookmaker outcome`,
+    };
+  }
+
+  // Step 15G — no odds were submitted to compare price against: every
+  // branch above this point already returns before ever reaching here, so
+  // a price is only ever promoted once a real event+bookmaker+outcome
+  // match has genuinely succeeded — never fabricated on a failed lookup.
+  // The provider's own found price is adopted as both sourceOdds and
+  // submittedOdds, trivially "within tolerance" of itself (0% discrepancy,
+  // nothing to disagree with). This promoted submittedOdds is an internal
+  // compatibility value only — "the provider price proposed for player
+  // confirmation" — never a price the player actually typed, and this
+  // function has no caller yet that surfaces it as one (see this file's
+  // own OddsVerificationInput comment: nothing wires this into the live
+  // Mini App flow as of this step).
+  if (bet.odds === null) {
+    return {
+      matched: true,
+      withinTolerance: true,
+      sourceOdds: price,
+      submittedOdds: price,
+      discrepancyPercent: 0,
+      bookmaker: bookmakerPick.bookmaker.title,
+      note: bookmakerPick.isFallback
+        ? `Pinnacle odds unavailable — using ${bookmakerPick.bookmaker.title} instead`
+        : null,
     };
   }
 

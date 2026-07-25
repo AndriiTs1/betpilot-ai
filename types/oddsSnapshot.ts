@@ -7,7 +7,13 @@ export interface OddsCheckResult {
 
   sourceOdds: number | null;
 
-  submittedOdds: number;
+  // Step 15G — widened from `number` to accommodate lib/odds/oddsVerifier.ts's
+  // new odds:null lookup path: null exactly when no odds were submitted AND
+  // no provider price was found to promote in its place (a failed lookup
+  // never fabricates a value). Every existing production caller still
+  // always supplies a real number here — this widening has no effect on
+  // any live code path today (see oddsVerifier.ts's own comment).
+  submittedOdds: number | null;
 
   discrepancyPercent: number | null;
 

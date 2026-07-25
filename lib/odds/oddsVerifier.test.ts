@@ -316,3 +316,125 @@ test("verifyOdds: submitted odds far from the source price exceed tolerance (ODD
   assert.equal(result.matched, true);
   assert.equal(result.withinTolerance, false);
 });
+
+// ---------------------------------------------------------------------
+// Step 15G — odds: null (provider-price lookup, domain primitive only)
+// ---------------------------------------------------------------------
+
+test("verifyOdds: odds null + event found + selection found + price found promotes the provider price as both sourceOdds and submittedOdds", async () => {
+  mockEvents([h2hEvent("Manchester United", "Chelsea", standardOutcomes("Manchester United", "Chelsea", 2.15, 3.4))]);
+
+  const result = await verifyOdds(bet({ event: "Manchester United vs Chelsea", selection: "1", odds: null }));
+
+  assert.equal(result.matched, true);
+  assert.equal(result.withinTolerance, true);
+  assert.equal(result.sourceOdds, 2.15);
+  assert.equal(result.submittedOdds, 2.15);
+  assert.equal(result.discrepancyPercent, 0);
+  assert.equal(result.bookmaker, "Pinnacle");
+});
+
+test("verifyOdds: odds null + event not found leaves the selection unmatched, no promoted or fabricated price", async () => {
+  // No fixture at all matches this event string.
+  mockEvents([h2hEvent("Real Madrid", "Barcelona", standardOutcomes("Real Madrid", "Barcelona", 1.9, 4.1))]);
+
+  const result = await verifyOdds(bet({ event: "Manchester United vs Chelsea", selection: "1", odds: null }));
+
+  assert.equal(result.matched, false);
+  assert.equal(result.sourceOdds, null);
+  assert.equal(result.submittedOdds, null);
+  assert.equal(result.discrepancyPercent, null);
+  assert.match(result.note ?? "", /No matching event found/);
+});
+
+test("verifyOdds: odds null + selection not found leaves the selection unmatched, no promoted or fabricated price", async () => {
+  mockEvents([h2hEvent("Manchester United", "Chelsea", standardOutcomes("Manchester United", "Chelsea", 2.15, 3.4))]);
+
+  // A selection string that cannot be matched to any outcome (event/market
+  // are genuinely found — only the specific outcome lookup fails).
+  const result = await verifyOdds(
+    bet({ event: "Manchester United vs Chelsea", selection: "Some Completely Unrelated Outcome", odds: null }),
+  );
+
+  assert.equal(result.matched, false);
+  assert.equal(result.sourceOdds, null);
+  assert.equal(result.submittedOdds, null);
+  assert.equal(result.discrepancyPercent, null);
+  assert.match(result.note ?? "", /Could not match selection/);
+});
+
+test("verifyOdds: odds null + no bookmaker price leaves the selection unmatched, no promoted or fabricated price", async () => {
+  mockEvents([
+    {
+      id: "evt-1",
+      home_team: "Manchester United",
+      away_team: "Chelsea",
+      bookmakers: [], // event found, but no bookmaker offers odds on it at all
+    },
+  ]);
+
+  const result = await verifyOdds(bet({ event: "Manchester United vs Chelsea", selection: "1", odds: null }));
+
+  assert.equal(result.matched, false);
+  assert.equal(result.sourceOdds, null);
+  assert.equal(result.submittedOdds, null);
+  assert.equal(result.discrepancyPercent, null);
+  assert.match(result.note ?? "", /No bookmaker odds available/);
+});
+
+test("verifyOdds: odds null + provider fetch failure preserves the existing failure behavior unchanged", async () => {
+  currentHandler = async () => new Response("boom", { status: 500 });
+
+  const result = await verifyOdds(bet({ event: "Manchester United vs Chelsea", selection: "1", odds: null }));
+
+  assert.equal(result.matched, false);
+  assert.equal(result.sourceOdds, null);
+  assert.equal(result.submittedOdds, null);
+  assert.equal(result.discrepancyPercent, null);
+  assert.match(result.note ?? "", /The Odds API request failed with status 500/);
+});
+
+test("verifyOdds: odds null + unmapped sport preserves the existing failure behavior unchanged (no provider call at all)", async () => {
+  const result = await verifyOdds(bet({ sport: "curling", event: "Team A vs Team B", selection: "1", odds: null }));
+
+  assert.equal(result.matched, false);
+  assert.equal(result.sourceOdds, null);
+  assert.equal(result.submittedOdds, null);
+  assert.match(result.note ?? "", /is not mapped to a The Odds API sport_key/);
+});
+
+// ---------------------------------------------------------------------
+// Step 15G — numeric-odds regression proof (byte-for-byte, full shape)
+// ---------------------------------------------------------------------
+
+test("verifyOdds: numeric odds within tolerance — full result shape unchanged (VERIFIED)", async () => {
+  mockEvents([h2hEvent("Manchester United", "Chelsea", standardOutcomes("Manchester United", "Chelsea", 2.15, 3.4))]);
+
+  const result = await verifyOdds(bet({ event: "Manchester United vs Chelsea", selection: "1", odds: 2.15 }));
+
+  assert.deepEqual(result, {
+    matched: true,
+    withinTolerance: true,
+    sourceOdds: 2.15,
+    submittedOdds: 2.15,
+    discrepancyPercent: 0,
+    bookmaker: "Pinnacle",
+    note: null,
+  });
+});
+
+test("verifyOdds: numeric odds outside tolerance — full result shape unchanged (ODDS_CHANGED)", async () => {
+  mockEvents([h2hEvent("Manchester United", "Chelsea", standardOutcomes("Manchester United", "Chelsea", 2.15, 3.4))]);
+
+  const result = await verifyOdds(bet({ event: "Manchester United vs Chelsea", selection: "1", odds: 2.5 }));
+
+  assert.deepEqual(result, {
+    matched: true,
+    withinTolerance: false,
+    sourceOdds: 2.15,
+    submittedOdds: 2.5,
+    discrepancyPercent: 16.28,
+    bookmaker: "Pinnacle",
+    note: null,
+  });
+});

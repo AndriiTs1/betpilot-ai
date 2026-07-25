@@ -826,6 +826,11 @@ test("Step 7A parity: an EXPRESS mixing generic football and a specific league s
   const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
     verifyOddsFn: async (input) => {
       capturedSports.push(input.sport);
+      // This test's slip always sets submittedOdds — real narrowing (not an
+      // assertion) since OddsVerificationInput.odds widened to
+      // `number | null` in Step 15G for an unrelated, not-yet-wired-in
+      // capability that doesn't affect this test's own fixtures.
+      if (input.odds === null) throw new Error("test slip always sets submittedOdds");
       return verified(input.odds, input.odds);
     },
   });
