@@ -150,17 +150,27 @@ export async function buildBetSlipPreview(
 
   const oddsVerificationService = resolveOddsVerificationService(options);
 
-  // Selections with no submitted odds are never sent to the provider —
-  // there is nothing to verify against, mirroring the exact call-gating
-  // this function has always had (previously: Promise.resolve(null)
+  // Selections with no submitted odds are, by default, never sent to the
+  // provider — there is nothing to verify against, mirroring the exact
+  // call-gating this function has always had (previously: Promise.resolve(null)
   // instead of calling verifyOddsFn). `verifiableIndices[batchIndex]` maps
   // each verifyMany() result back to its original position in
   // slip.selections, since the two arrays are no longer the same length.
+  //
+  // Step 15I — SINGLE-only exception: a null-submittedOdds SINGLE selection
+  // is still sent for provider verification, since Step 15G/15H's
+  // nullable-aware pipeline can promote a real, live provider price for it
+  // (see the reconstruction loop and previewSelections mapping below for
+  // where that promoted price actually surfaces). EXPRESS keeps the exact
+  // original, unchanged behavior — a null-odds leg is never sent to the
+  // provider at all; this feature is deliberately SINGLE-only in this step.
   const verifiableIndices: number[] = [];
   const requests: VerifySelectionRequest[] = [];
 
   slip.selections.forEach((selection, index) => {
-    if (selection.submittedOdds === null) return;
+    const includeForVerification = selection.submittedOdds !== null || slip.type === "SINGLE";
+    if (!includeForVerification) return;
+
     verifiableIndices.push(index);
     requests.push(
       legacySelectionToCanonicalRequest({
@@ -178,11 +188,13 @@ export async function buildBetSlipPreview(
   // lib/odds/oddsVerificationService.ts.
   const results = await oddsVerificationService.verifyMany(requests);
 
-  // Step 15H — no longer passes a submittedOdds argument: legacyOddsBridge's
-  // verificationResultToLegacyOddsCheck (lib/odds/legacyOddsBridge.ts) now
-  // derives submittedOdds entirely from the verification result itself, so
-  // the second positional argument it used to require is dead here. This
-  // was called out as deferred work in that file's own Step 15H comment.
+  // Step 15I — no longer passes a submittedOdds argument: Step 15H made
+  // verificationResultToLegacyOddsCheck derive submittedOdds entirely from
+  // the verification result itself (correctly promoted for a successful
+  // SINGLE null-input lookup, unchanged for a real numeric submission).
+  // Passing the original slip.selections[...].submittedOdds here would
+  // require a non-null assertion for exactly the new SINGLE-null-input
+  // case this step introduces — removed rather than forced.
   const reconstructedByIndex = new Map<number, ReconstructedOddsCheck>();
   verifiableIndices.forEach((selectionIndex, batchIndex) => {
     reconstructedByIndex.set(selectionIndex, verificationResultToLegacyOddsCheck(results[batchIndex]));
@@ -217,12 +229,22 @@ export async function buildBetSlipPreview(
       logScreenshotPipelineEvent("odds_check_rejected", { selectionIndex: index });
     }
 
+    // Step 15I — when the player submitted no odds but SINGLE auto-lookup
+    // (see the request-construction block above) found and verified a real
+    // provider price, oddsCheck.submittedOdds already holds that promoted
+    // price (Step 15G's own promotion, carried through by Step 15H's
+    // bridge). For every other case — a real player submission, an
+    // EXPRESS null-odds leg (oddsCheck stays null, never sent to the
+    // provider), or a SINGLE lookup that failed to find anything to
+    // promote — this is exactly the original value, unchanged.
+    const effectiveSubmittedOdds = selection.submittedOdds ?? oddsCheck?.submittedOdds ?? null;
+
     return {
       sport: selection.sport,
       event: selection.event,
       market: selection.market,
       selection: selection.selection,
-      submittedOdds: selection.submittedOdds,
+      submittedOdds: effectiveSubmittedOdds,
       currentOdds: oddsCheck?.sourceOdds ?? null,
       oddsStatus: mapOddsCheckToSelectionStatus(oddsCheck),
       bookmaker: oddsCheck?.bookmaker ?? null,
@@ -235,7 +257,13 @@ export async function buildBetSlipPreview(
   // where potentialWin was already nullable when odds was null. This
   // function's job is to decide *when* it's safe to call the strict
   // computeTotalOdds/computePotentialWin, not to duplicate their math.
-  const allOddsKnown = slip.selections.every((selection) => selection.submittedOdds !== null);
+  //
+  // Step 15I — reads previewSelections (the EFFECTIVE, possibly
+  // auto-lookup-promoted odds), not the original slip.selections: a SINGLE
+  // selection that started with submittedOdds:null but was successfully
+  // auto-looked-up now has a real effective value here, and must count as
+  // "known" for totalOdds/potentialWin to be computed from it.
+  const allOddsKnown = previewSelections.every((selection) => selection.submittedOdds !== null);
 
   // Kept as a Decimal (not re-derived from the number a second time below)
   // so the EXPRESS branch's stake string comes from the exact same
@@ -246,7 +274,11 @@ export async function buildBetSlipPreview(
   let potentialWin: Prisma.Decimal | null = null;
 
   if (allOddsKnown) {
-    totalOdds = computeTotalOdds(slip.selections.map((selection) => new Prisma.Decimal(selection.submittedOdds!)));
+    // Step 15I — reads previewSelections (effective odds), matching
+    // allOddsKnown above; same non-null-assertion shape this line already
+    // had before this step (now proven correct against the array
+    // allOddsKnown itself was just computed from, not a different one).
+    totalOdds = computeTotalOdds(previewSelections.map((selection) => new Prisma.Decimal(selection.submittedOdds!)));
     potentialWin = computePotentialWin(stakeDecimal, totalOdds);
   }
 

@@ -839,3 +839,102 @@ test("Step 7A parity: an EXPRESS mixing generic football and a specific league s
   assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
   assert.equal(result.preview.selections[1].oddsStatus, "VERIFIED");
 });
+
+// ---------------------------------------------------------------------
+// Step 15I — automatic provider odds lookup for SINGLE, activated only
+// when the player submitted no odds at all (submittedOdds: null).
+// ---------------------------------------------------------------------
+
+test("Step 15I (A): SINGLE + null odds + provider success — provider is called, submittedOdds is promoted, status VERIFIED, token carries the promoted odds, totalOdds equals the promoted odds", async () => {
+  const slip = singleSlip(null);
+
+  let providerCallCount = 0;
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async (input) => {
+      providerCallCount += 1;
+      assert.equal(input.odds, null, "the SINGLE null-odds selection must reach the provider with odds:null, not a fabricated value");
+      return verified(2.1, 2.1);
+    },
+  });
+
+  assert.equal(providerCallCount, 1, "provider lookup must run exactly once for the null-odds SINGLE selection");
+  assert.equal(result.preview.selections[0].submittedOdds, 2.1, "submittedOdds must be promoted to the provider's price, not stay null");
+  assert.equal(result.preview.selections[0].currentOdds, 2.1);
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.totalOdds, 2.1, "totalOdds must be computed from the promoted odds, not stay null");
+  assert.equal(result.preview.potentialWin, 157.5); // 75 * 2.1
+
+  assert.ok(result.previewToken !== null);
+  const verified_ = verifyPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verified_.ok, true);
+  if (!verified_.ok) return;
+  assert.equal(verified_.payload.odds, 2.1, "the signed token's odds must be the promoted provider price, not null");
+  assert.equal(verified_.payload.totalOdds, 2.1);
+});
+
+test("Step 15I (B): SINGLE + null odds + provider failure — no odds are fabricated, submittedOdds stays null, existing failure status is preserved", async () => {
+  const slip = singleSlip(null);
+
+  let providerCallCount = 0;
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async (input) => {
+      providerCallCount += 1;
+      assert.equal(input.odds, null);
+      // A real Step 15G verifyOdds() failed lookup (event/selection/market
+      // not found, provider unavailable, etc.) reports submittedOdds: null
+      // too — it never fabricates a price just because matching failed.
+      return { matched: false, withinTolerance: null, sourceOdds: null, submittedOdds: null, discrepancyPercent: null, bookmaker: null, note: "No matching event found" };
+    },
+  });
+
+  assert.equal(providerCallCount, 1);
+  assert.equal(result.preview.selections[0].submittedOdds, null, "a failed lookup must never fabricate a submittedOdds value");
+  assert.equal(result.preview.selections[0].oddsStatus, "NOT_FOUND");
+  assert.equal(result.preview.totalOdds, null);
+  assert.equal(result.preview.potentialWin, null);
+});
+
+test("Step 15I (C): SINGLE + real numeric odds — unchanged, byte-for-byte regression", async () => {
+  const slip = singleSlip(1.95);
+
+  let providerCallCount = 0;
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async (input) => {
+      providerCallCount += 1;
+      assert.equal(input.odds, 1.95, "a real player-submitted number must reach the provider unchanged, exactly as before this step");
+      return verified(1.95, 1.95);
+    },
+  });
+
+  assert.equal(providerCallCount, 1);
+  assert.equal(result.preview.selections[0].submittedOdds, 1.95);
+  assert.equal(result.preview.totalOdds, 1.95);
+  assert.equal(result.preview.potentialWin, 146.25);
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+});
+
+test("Step 15I (D): non-SINGLE (EXPRESS) + null odds — provider lookup is NOT activated for the null-odds leg", async () => {
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 40,
+    selections: [
+      { sport: "Football", event: "Known Odds", market: null, selection: "A Win", submittedOdds: 2.0 },
+      { sport: "Football", event: "Unknown Odds", market: null, selection: "B Win", submittedOdds: null },
+    ],
+  };
+
+  const calledEvents: string[] = [];
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async (input) => {
+      calledEvents.push(input.event);
+      if (input.odds === null) throw new Error("EXPRESS must never send a null-odds leg to the provider");
+      return verified(input.odds, input.odds);
+    },
+  });
+
+  assert.deepEqual(calledEvents, ["Known Odds"], "only the selection with real submitted odds may reach the provider; the null-odds EXPRESS leg must not");
+  assert.equal(result.preview.selections[1].submittedOdds, null);
+  assert.equal(result.preview.selections[1].oddsStatus, "UNAVAILABLE");
+  assert.equal(result.preview.totalOdds, null);
+  assert.equal(result.preview.potentialWin, null);
+});

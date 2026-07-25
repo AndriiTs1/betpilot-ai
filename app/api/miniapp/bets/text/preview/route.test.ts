@@ -6,6 +6,7 @@ import type { PrismaClient } from "@/lib/generated/prisma/client";
 import { handleTextPreview } from "./route";
 import type { ParseBetSlipResult } from "@/lib/ai/betParser";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
+import type { OddsVerificationInput } from "@/lib/odds/oddsVerifier";
 import { createRequestRateLimiter, type RequestRateLimiter } from "@/lib/rateLimit/requestRateLimiter";
 
 // Step 13B — this route previously had no test file and no DI seam at all
@@ -362,4 +363,38 @@ test("text preview: exhausting screenshot/preview's quota does not affect text/p
     baseOptions({ rateLimiter: textPreviewLimiter }),
   );
   assert.equal(response.status, 200, "text/preview's own limiter is untouched by a different route's limiter instance");
+});
+
+// ---------------------------------------------------------------------
+// Step 15I — SINGLE auto-lookup when the player supplied no odds
+// ---------------------------------------------------------------------
+
+test("text preview (Step 15I): a SINGLE message with no odds mentioned returns the provider price and a usable preview token", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const noOddsSlip = singleSlip({ selections: [
+    { sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: null },
+  ] });
+
+  let providerCallCount = 0;
+  const response = await handleTextPreview(
+    buildRequest(initData, { message: "Real Madrid to win vs Barcelona, stake 50" }),
+    baseOptions({
+      parseBetSlip: fakeParseBetSlip(noOddsSlip),
+      verifyOddsFn: async (input: OddsVerificationInput) => {
+        providerCallCount += 1;
+        assert.equal(input.odds, null, "the route's own pipeline must pass odds:null through to the provider, never inventing a value client-side");
+        return { matched: true, withinTolerance: true, sourceOdds: 2.15, submittedOdds: 2.15, discrepancyPercent: 0, bookmaker: "test-bookmaker", note: null };
+      },
+    }),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(providerCallCount, 1, "provider lookup must be attempted exactly once for the no-odds SINGLE selection");
+
+  const body = await response.json();
+  assert.equal(body.preview.selections[0].submittedOdds, 2.15, "the response must show the real provider price, not null");
+  assert.equal(body.preview.selections[0].currentOdds, 2.15);
+  assert.equal(body.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(typeof body.previewToken, "string");
+  assert.ok(body.previewToken.length > 0, "a usable, non-empty preview token must be issued");
 });

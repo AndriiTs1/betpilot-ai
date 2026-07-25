@@ -8,6 +8,8 @@ import { signPreviewToken, signExpressPreviewToken, type PreviewTokenInput, type
 import type { OddsVerificationInput } from "@/lib/odds/oddsVerifier";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { createRequestRateLimiter, type RequestRateLimiter } from "@/lib/rateLimit/requestRateLimiter";
+import { buildBetSlipPreview } from "@/lib/bets/buildBetSlipPreview";
+import type { ParsedBetSlip } from "@/lib/bets/betSlip";
 
 // ---------------------------------------------------------------------
 // Test-only crypto material — self-consistent, never the real production
@@ -160,13 +162,18 @@ function createFakeDb(options: { players?: Record<string, string> } = {}) {
     return { ...bet, selections: newSelections };
   }
 
+  let oddsSnapshotCreateCount = 0;
+
   const tx = {
     bet: {
       findUnique: async ({ where }: { where: { previewId: string } }) => readBet(where.previewId),
       create: async ({ data }: { data: Parameters<typeof insertBet>[0] }) => insertBet(data),
     },
     oddsSnapshot: {
-      create: async ({ data }: { data: Record<string, unknown> }) => ({ id: `snap-${Date.now()}`, checkedAt: new Date(), ...data }),
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        oddsSnapshotCreateCount += 1;
+        return { id: `snap-${Date.now()}`, checkedAt: new Date(), ...data };
+      },
     },
   };
 
@@ -183,6 +190,7 @@ function createFakeDb(options: { players?: Record<string, string> } = {}) {
     _debug: {
       betCount: () => bets.size,
       createCallCount: () => createCallCount,
+      oddsSnapshotCreateCount: () => oddsSnapshotCreateCount,
     },
   };
 }
@@ -1182,3 +1190,98 @@ test("confirm route (rate limit): SINGLE and EXPRESS confirmations share one per
   );
   assert.equal(otherRes.status, 200, "a different Telegram user must not share the exhausted user's quota");
 });
+
+// ---------------------------------------------------------------------
+// Step 15I — end-to-end: a SINGLE preview built from a null-odds selection
+// (auto-looked-up provider price) flows unmodified through the existing,
+// untouched verifyPreviewFreshness/createBetFromPreview confirmation
+// pipeline. These tests build the previewToken via the real
+// buildBetSlipPreview() (the auto-lookup pipeline itself), not a
+// hand-built singleTokenInput(), specifically to prove the token that
+// pipeline now produces for a null-odds SINGLE is a normal, fully
+// confirmable token — nothing about confirm.ts needed to change.
+// ---------------------------------------------------------------------
+
+function autoLookupSlip(): ParsedBetSlip {
+  return {
+    type: "SINGLE",
+    stake: 100,
+    selections: [
+      { sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: null },
+    ],
+  };
+}
+
+test("Step 15I (F): a preview built from auto-looked-up odds confirms normally — freshness runs, Bet.odds equals the provider odds, an OddsSnapshot is created", async () => {
+  const preview = await buildBetSlipPreview(autoLookupSlip(), PLAYER_ID, PREVIEW_SECRET, {
+    verifyOddsFn: async () => ({
+      matched: true, withinTolerance: true, sourceOdds: 2.1, submittedOdds: 2.1, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null,
+    }),
+  });
+  assert.equal(preview.preview.selections[0].submittedOdds, 2.1, "sanity: the preview itself must already carry the promoted provider odds");
+  assert.ok(preview.previewToken);
+
+  const db = createFakeDb();
+
+  let freshnessCallCount = 0;
+  const res = await handleBetConfirm(
+    confirmRequest(preview.previewToken),
+    fakeOptions(db, {
+      verifyOddsFn: async (input) => {
+        freshnessCallCount += 1;
+        assert.equal(input.odds, 2.1, "reconfirmation must check freshness against the promoted odds now baked into the token, not null");
+        return { matched: true, withinTolerance: true, sourceOdds: 2.1, submittedOdds: 2.1, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null };
+      },
+    }),
+  );
+
+  assert.equal(freshnessCallCount, 1, "confirmation must run freshness verification, unmodified");
+  assert.equal(res.status, 200);
+  const body = (await json(res)) as { bet: Record<string, unknown>; idempotent: boolean };
+  assert.equal(body.idempotent, false);
+  assert.equal(body.bet.odds, 2.1, "Bet.odds must equal the provider odds promoted at preview time");
+  assert.equal(db._debug.betCount(), 1);
+  assert.equal(db._debug.oddsSnapshotCreateCount(), 1, "an OddsSnapshot must be created for the confirmed bet");
+});
+
+test("Step 15I (G): the provider price moves between preview and confirm — 409 ODDS_CHANGED_RECONFIRM_REQUIRED, the refreshed preview carries the updated provider odds, and no Bet is created until a second confirmation", async () => {
+  const preview = await buildBetSlipPreview(autoLookupSlip(), PLAYER_ID, PREVIEW_SECRET, {
+    verifyOddsFn: async () => ({
+      matched: true, withinTolerance: true, sourceOdds: 2.1, submittedOdds: 2.1, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null,
+    }),
+  });
+  assert.ok(preview.previewToken);
+
+  const db = createFakeDb();
+  const res = await handleBetConfirm(
+    confirmRequest(preview.previewToken),
+    fakeOptions(db, {
+      verifyOddsFn: fakeVerifyOddsFnByEvent({ "Real Madrid vs Barcelona": oddsChangedResult(1.85, 2.1) }),
+    }),
+  );
+
+  assert.equal(res.status, 409);
+  const body = (await json(res)) as { error: string; refreshedPreview: { selections: Array<{ currentOdds: number | null }> }; refreshedPreviewToken: string | null };
+  assert.equal(body.error, "ODDS_CHANGED_RECONFIRM_REQUIRED");
+  assert.equal(body.refreshedPreview.selections[0].currentOdds, 1.85, "the refreshed preview must carry the provider's new, moved price");
+  assert.equal(typeof body.refreshedPreviewToken, "string");
+  assert.equal(db._debug.betCount(), 0, "no Bet may be created before the player reconfirms against the refreshed price");
+
+  // The refreshedPreviewToken still quotes the player's ORIGINAL 2.1 (a
+  // reconfirm, not a silent acceptance of the moved price — see
+  // buildBetSlipPreview's signPreviewToken call: `odds: single.submittedOdds`
+  // is the selection's own already-known price, never the just-observed
+  // currentOdds). A second confirmation only succeeds once the market is
+  // back within tolerance of that same 2.1.
+  const secondRes = await handleBetConfirm(
+    confirmRequest(body.refreshedPreviewToken),
+    fakeOptions(db, {
+      verifyOddsFn: fakeVerifyOddsFnByEvent({ "Real Madrid vs Barcelona": { matched: true, withinTolerance: true, sourceOdds: 2.1, submittedOdds: 2.1, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null } }),
+    }),
+  );
+  assert.equal(secondRes.status, 200);
+  const secondBody = (await json(secondRes)) as { bet: Record<string, unknown> };
+  assert.equal(secondBody.bet.odds, 2.1);
+  assert.equal(db._debug.betCount(), 1);
+});
+
