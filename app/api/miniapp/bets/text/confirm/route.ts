@@ -359,6 +359,36 @@ export async function handleBetConfirm(
       return NextResponse.json({ bet: serializeSingleBet(existingSingle), idempotent: true });
     }
 
+    // Step 15J — a SINGLE token with odds:null means either the player
+    // never had a price at all, or (Step 15I's new SINGLE auto-lookup path)
+    // the provider lookup for a no-odds text bet never resolved to a real
+    // price (event not found, market unsupported, provider unavailable).
+    // Either way there is no verified number to bet at, and
+    // verifyPreviewFreshness has no signal to check freshness against for
+    // this selection (it structurally skips a null-original-odds selection
+    // from its rank computation — see that file's own comment — so it
+    // would otherwise ACCEPT unconditionally). Blocked here, before any
+    // provider call or rate-limit consumption, rather than silently
+    // creating a Bet with odds:null and no OddsSnapshot. Deliberately not
+    // narrowed to "text-originated" tokens: buildBetSlipPreview.ts (and
+    // therefore this exact PreviewTokenPayload shape and this exact confirm
+    // route) is shared byte-for-byte by the screenshot/OCR preview route
+    // too, with no field anywhere in the token recording which route
+    // produced it — there is no way to distinguish them here, and nothing
+    // in the app today (client-side canConfirmBetSlip only checks
+    // previewToken !== null; canSubmitBetSlip's operator-review odds-status
+    // allowance is defined but has zero live call sites) actually depends
+    // on a null-odds SINGLE confirm succeeding for either origin.
+    if (payload.odds === null) {
+      return NextResponse.json(
+        {
+          error: "ODDS_REQUIRED_BEFORE_CONFIRMATION",
+          message: "Odds could not be verified for this bet. Request a new preview or provide odds manually before confirming.",
+        },
+        { status: 422 },
+      );
+    }
+
     // Step 13B / Step 13A-R — see the identical comment in the EXPRESS
     // branch above: consulted only after the idempotency lookup has already
     // proven no Bet exists yet, so an idempotent retry never consumes

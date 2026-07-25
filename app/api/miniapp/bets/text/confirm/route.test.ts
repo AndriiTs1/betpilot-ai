@@ -1285,3 +1285,156 @@ test("Step 15I (G): the provider price moves between preview and confirm — 409
   assert.equal(db._debug.betCount(), 1);
 });
 
+// ---------------------------------------------------------------------
+// Step 15J — a SINGLE token whose odds never resolved (submittedOdds was
+// null and the Step 15I auto-lookup either failed or never ran) must never
+// be confirmable: no Bet, no OddsSnapshot, no wallet mutation. Blocked
+// before verifyPreviewFreshness/createBetFromPreview are ever reached —
+// those two files are untouched by this step, exactly as required.
+// ---------------------------------------------------------------------
+
+function unresolvedOddsSingleToken(): string {
+  // The exact shape buildBetSlipPreview.ts's SINGLE branch produces for a
+  // null-submittedOdds selection whose provider lookup never resolved to a
+  // price: odds/totalOdds both null, oddsCheck reflects the failed check
+  // (matched:false) — never signPreviewToken called with a fabricated
+  // number. Built directly with signPreviewToken (rather than via
+  // buildBetSlipPreview) only because this test targets the confirm route's
+  // own gate in isolation; Step 15I (A)/(B) in buildBetSlipPreview.test.ts
+  // already prove buildBetSlipPreview itself never fabricates this token's
+  // odds field.
+  return signPreviewToken(
+    singleTokenInput({
+      odds: null,
+      totalOdds: null,
+      oddsCheck: { matched: false, withinTolerance: null, sourceOdds: null, bookmaker: null },
+    }),
+    PREVIEW_SECRET,
+  );
+}
+
+test("Step 15J (A): text SINGLE + null odds + provider failure (event/selection not found) — confirm is blocked with 422 ODDS_REQUIRED_BEFORE_CONFIRMATION, no Bet, no OddsSnapshot", async () => {
+  const db = createFakeDb();
+  const token = unresolvedOddsSingleToken();
+
+  let verifyOddsFnCallCount = 0;
+  const res = await handleBetConfirm(
+    confirmRequest(token),
+    fakeOptions(db, {
+      verifyOddsFn: async () => {
+        verifyOddsFnCallCount += 1;
+        throw new Error("must never be called — a null-odds SINGLE must be rejected before any freshness/provider call");
+      },
+    }),
+  );
+
+  assert.equal(res.status, 422);
+  const body = (await json(res)) as { error: string; message?: string };
+  assert.equal(body.error, "ODDS_REQUIRED_BEFORE_CONFIRMATION");
+  assert.equal(typeof body.message, "string");
+  assert.ok(body.message && body.message.length > 0, "response must clearly state odds could not be verified and a new preview or manual odds are required");
+  assert.equal(verifyOddsFnCallCount, 0, "verifyPreviewFreshness/the odds provider must never be reached for an unresolved-odds SINGLE");
+  assert.equal(db._debug.betCount(), 0, "no Bet may be created");
+  assert.equal(db._debug.createCallCount(), 0, "no persistence transaction may run");
+  assert.equal(db._debug.oddsSnapshotCreateCount(), 0, "no OddsSnapshot may be created");
+});
+
+test("Step 15J (B): text SINGLE + null odds + provider unavailable — same blocking behavior, no side effects", async () => {
+  // Provider-unavailable at PREVIEW time (not confirm time) also always
+  // leaves odds:null on the token — there is no separate token shape for
+  // "not found" vs "unavailable"; both collapse to the same
+  // odds:null/oddsCheck.matched:false shape (see mapOddsCheckToSelectionStatus
+  // and legacyOddsBridge.ts's own NOT_FOUND/UNAVAILABLE handling), so the
+  // confirm-route gate (payload.odds === null) is identical for both.
+  const db = createFakeDb();
+  const token = unresolvedOddsSingleToken();
+
+  const res = await handleBetConfirm(confirmRequest(token), fakeOptions(db));
+
+  assert.equal(res.status, 422);
+  const body = (await json(res)) as { error: string };
+  assert.equal(body.error, "ODDS_REQUIRED_BEFORE_CONFIRMATION");
+  assert.equal(db._debug.betCount(), 0);
+  assert.equal(db._debug.createCallCount(), 0);
+  assert.equal(db._debug.oddsSnapshotCreateCount(), 0);
+});
+
+test("Step 15J (C): text SINGLE + provider success — Step 15I's auto-lookup confirm success remains green (unblocked)", async () => {
+  const preview = await buildBetSlipPreview(autoLookupSlip(), PLAYER_ID, PREVIEW_SECRET, {
+    verifyOddsFn: async () => ({
+      matched: true, withinTolerance: true, sourceOdds: 2.1, submittedOdds: 2.1, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null,
+    }),
+  });
+  assert.ok(preview.previewToken);
+
+  const db = createFakeDb();
+  const res = await handleBetConfirm(
+    confirmRequest(preview.previewToken),
+    fakeOptions(db, {
+      verifyOddsFn: async () => ({ matched: true, withinTolerance: true, sourceOdds: 2.1, submittedOdds: 2.1, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null }),
+    }),
+  );
+
+  assert.equal(res.status, 200);
+  const body = (await json(res)) as { bet: Record<string, unknown> };
+  assert.equal(body.bet.odds, 2.1);
+  assert.equal(db._debug.betCount(), 1);
+  assert.equal(db._debug.oddsSnapshotCreateCount(), 1);
+});
+
+test("Step 15J (D): numeric SINGLE — unchanged, never touches the new odds:null gate", async () => {
+  const db = createFakeDb();
+  const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+
+  const res = await handleBetConfirm(confirmRequest(token), fakeOptions(db));
+
+  assert.equal(res.status, 200);
+  const body = (await json(res)) as { bet: Record<string, unknown>; idempotent: boolean };
+  assert.equal(body.idempotent, false);
+  assert.equal(body.bet.odds, 2.1);
+  assert.equal(db._debug.betCount(), 1);
+});
+
+test("Step 15J (E): a screenshot/OCR-originated SINGLE token is structurally identical to a text one — there is no route-origin field to preserve, so the same unresolved-odds block necessarily (and correctly) applies to both", async () => {
+  // Proves the scope-audit finding directly: buildBetSlipPreview.ts (used
+  // verbatim by both app/api/miniapp/bets/text/preview/route.ts and
+  // app/api/miniapp/bets/screenshot/preview/route.ts) produces the exact
+  // same PreviewTokenPayload shape via the exact same signPreviewToken,
+  // confirmed by the exact same handleBetConfirm — there is no separate
+  // screenshot confirm route and no origin field anywhere in the token.
+  // A screenshot/OCR preview that failed to read odds therefore produces a
+  // token indistinguishable from this test's own unresolvedOddsSingleToken()
+  // fixture (used verbatim, not a special-cased "screenshot" builder,
+  // because none could be built any differently). No existing test in this
+  // codebase (confirm route or screenshot preview route) ever asserted that
+  // such a token must remain confirmable, so this is not a regression
+  // against any previously-guaranteed behavior — it closes an unintentional
+  // gap uniformly for both origins, exactly as the Step 15I audit flagged.
+  const db = createFakeDb();
+  const token = unresolvedOddsSingleToken();
+
+  const res = await handleBetConfirm(confirmRequest(token), fakeOptions(db));
+
+  assert.equal(res.status, 422);
+  const body = (await json(res)) as { error: string };
+  assert.equal(body.error, "ODDS_REQUIRED_BEFORE_CONFIRMATION");
+  assert.equal(db._debug.betCount(), 0);
+});
+
+test("Step 15J (F): odds-changed 409 reconfirmation flow is unaffected by the new odds:null gate (payload.odds is a real number throughout)", async () => {
+  const db = createFakeDb();
+  const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+
+  const res = await handleBetConfirm(
+    confirmRequest(token),
+    fakeOptions(db, { verifyOddsFn: fakeVerifyOddsFnByEvent({ "Real Madrid vs Barcelona": oddsChangedResult(1.9, 2.1) }) }),
+  );
+
+  assert.equal(res.status, 409);
+  const body = (await json(res)) as { error: string; refreshedPreview: unknown; refreshedPreviewToken: string | null };
+  assert.equal(body.error, "ODDS_CHANGED_RECONFIRM_REQUIRED");
+  assert.ok(body.refreshedPreview);
+  assert.equal(typeof body.refreshedPreviewToken, "string");
+  assert.equal(db._debug.betCount(), 0);
+  assert.equal(db._debug.createCallCount(), 0);
+});
