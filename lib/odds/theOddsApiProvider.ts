@@ -17,7 +17,6 @@ import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { validateCanonicalSelection, type CanonicalSelection, type Sport } from "./domain";
 import {
   createFailedResult,
-  createNotCheckedResult,
   createOddsChangedResult,
   createVerifiedResult,
   type VerificationReasonCode,
@@ -292,9 +291,13 @@ export class TheOddsApiProvider implements OddsProvider {
     const submittedOdds = request.submittedOdds ?? selection.submittedOdds ?? null;
     const checkedAtFor = () => new Date().toISOString();
 
-    if (submittedOdds === null) {
-      return createNotCheckedResult({ submittedOdds: null, provider: PROVIDER_NAME, checkedAt: checkedAtFor() });
-    }
+    // Step 15H — a null submittedOdds no longer stops event/market/
+    // selection/bookmaker/price lookup here. It used to return
+    // NOT_CHECKED immediately (see this file's git history); that early
+    // return is removed so a selection with no submitted price still
+    // reaches the nullable-aware verifyOddsFn below, which is the sole
+    // place (Step 15G) a provider price may ever be promoted into
+    // submittedOdds. This adapter itself never invents a price.
 
     const structural = validateCanonicalSelection(selection);
     if (!structural.ok) {
@@ -334,15 +337,22 @@ export class TheOddsApiProvider implements OddsProvider {
         ? resolveLegacyFootballSport(selection.league?.name)
         : SPORT_TO_LEGACY_STRING[selection.sport];
 
-    const submittedOddsNumber = Number(submittedOdds);
-    if (!Number.isFinite(submittedOddsNumber) || submittedOddsNumber <= 0) {
-      return createFailedResult({
-        submittedOdds,
-        provider: PROVIDER_NAME,
-        checkedAt: checkedAtFor(),
-        reasonCode: "INVALID_INPUT",
-        diagnosticCode: "SUBMITTED_ODDS_NOT_A_POSITIVE_DECIMAL",
-      });
+    // Step 15H — this format/positivity check only applies when a value was
+    // actually submitted; there is nothing to validate the shape of when
+    // nothing was given. submittedOddsNumber stays null in that case and is
+    // passed straight through to the nullable-aware verifyOddsFn below.
+    let submittedOddsNumber: number | null = null;
+    if (submittedOdds !== null) {
+      submittedOddsNumber = Number(submittedOdds);
+      if (!Number.isFinite(submittedOddsNumber) || submittedOddsNumber <= 0) {
+        return createFailedResult({
+          submittedOdds,
+          provider: PROVIDER_NAME,
+          checkedAt: checkedAtFor(),
+          reasonCode: "INVALID_INPUT",
+          diagnosticCode: "SUBMITTED_ODDS_NOT_A_POSITIVE_DECIMAL",
+        });
+      }
     }
 
     const legacyEvent = selection.event.name.trim();
@@ -384,6 +394,21 @@ export class TheOddsApiProvider implements OddsProvider {
     // of data the legacy verifier already returned, not fabrication.
     const bookmaker = legacyResult.bookmaker ?? undefined;
 
+    // Step 15H — the submittedOdds reported from this point on. For a real
+    // player-submitted value, this is the exact original request string,
+    // completely unchanged (never round-tripped through Number/String,
+    // which could otherwise reformat e.g. "2.10" -> "2.1" and change this
+    // adapter's existing output). For a null-input lookup, this is
+    // whichever value verifyOddsFn (Step 15G) actually returned: the
+    // provider's found price when promotion succeeded, or still null when
+    // nothing could be promoted (failed lookup) — never fabricated here.
+    const effectiveSubmittedOdds: string | null =
+      submittedOdds !== null
+        ? submittedOdds
+        : legacyResult.submittedOdds !== null
+          ? String(legacyResult.submittedOdds)
+          : null;
+
     if (legacyResult.matched) {
       const currentOdds = String(legacyResult.sourceOdds);
       const differencePercentage =
@@ -391,7 +416,7 @@ export class TheOddsApiProvider implements OddsProvider {
 
       if (legacyResult.withinTolerance === true) {
         return createVerifiedResult({
-          submittedOdds,
+          submittedOdds: effectiveSubmittedOdds,
           currentOdds,
           differencePercentage,
           provider: PROVIDER_NAME,
@@ -401,7 +426,7 @@ export class TheOddsApiProvider implements OddsProvider {
       }
 
       return createOddsChangedResult({
-        submittedOdds,
+        submittedOdds: effectiveSubmittedOdds,
         currentOdds,
         differencePercentage,
         provider: PROVIDER_NAME,
@@ -418,7 +443,7 @@ export class TheOddsApiProvider implements OddsProvider {
     const { reasonCode, diagnosticCode } = classifyLegacyFailureNote(legacyResult.note ?? "");
 
     return createFailedResult({
-      submittedOdds,
+      submittedOdds: effectiveSubmittedOdds,
       provider: PROVIDER_NAME,
       checkedAt,
       reasonCode,

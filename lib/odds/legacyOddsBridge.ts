@@ -184,16 +184,18 @@ function legacyEventToCanonical(sport: Sport, eventName: string, league: Canonic
 /* Legacy request -> VerifySelectionRequest                                   */
 /* -------------------------------------------------------------------------- */
 
-// The narrower shape buildBetSlipPreview.ts actually has in hand once it
-// has already filtered out selections with no submitted odds — deliberately
-// not the full (nullable-odds) BetSlipSelectionInput, so this function's
-// contract never has to decide what "no odds" means; that decision stays
-// with the caller, exactly like today.
+// Step 15H — submittedOdds is nullable: this is now also the shape a
+// selection with no player-submitted odds takes, to support provider-price
+// lookup (Step 15G's nullable-aware verifyOdds). Still deliberately not the
+// full BetSlipSelectionInput — this function's contract still never has to
+// decide what "no odds" MEANS (permissive submission vs. lookup vs.
+// something else), only how to pass it through honestly; that decision
+// stays with the caller.
 export interface LegacyVerifiableSelection {
   readonly sport: string;
   readonly event: string;
   readonly selection: string;
-  readonly submittedOdds: number;
+  readonly submittedOdds: number | null;
 }
 
 // league/provider IDs/acceptedOdds/currentOdds are never set here — league
@@ -220,7 +222,11 @@ export function legacySelectionToCanonicalRequest(selection: LegacyVerifiableSel
       period: "FULL_GAME",
       selectionType: classified.selectionType,
       participant: classified.participant,
-      submittedOdds: String(selection.submittedOdds),
+      // Step 15H — omitted (undefined) rather than serialized as the
+      // literal string "null" when nothing was submitted. No unsafe
+      // assertion: a plain, real null check, matching
+      // CanonicalSelection.submittedOdds's own already-optional shape.
+      submittedOdds: selection.submittedOdds !== null ? String(selection.submittedOdds) : undefined,
     },
   };
 }
@@ -252,11 +258,27 @@ const UNEXPECTED_ERROR_DIAGNOSTIC_CODE = "ODDS_PROVIDER_UNEXPECTED_ERROR";
 
 export function verificationResultToLegacyOddsCheck(
   result: VerificationResult,
-  submittedOdds: number,
+  // Step 15H — no longer read: the authoritative submittedOdds now always
+  // comes from result.submittedOdds itself (derived just below), which
+  // Step 15G's verifyOdds already computes correctly for every case —
+  // unchanged for a real player-submitted number, promoted to the
+  // provider's found price for a successful null-input lookup, or still
+  // null when nothing could be promoted. Kept as an accepted-but-unused
+  // optional parameter purely so lib/bets/buildBetSlipPreview.ts (out of
+  // scope for this step, still calling this with two positional arguments)
+  // keeps compiling unchanged until that file is wired up in a later step.
+  _legacySubmittedOdds?: number,
 ): ReconstructedOddsCheck {
   if (result.status === "FAILED" && result.diagnosticCode === UNEXPECTED_ERROR_DIAGNOSTIC_CODE) {
     return { oddsCheck: null, wasExceptionMapped: true };
   }
+
+  // Failed lookup with null input stays null here (result.submittedOdds is
+  // null in that case, per verifyOdds — nothing was ever promoted).
+  // Successful auto-lookup carries the provider-promoted price. Numeric
+  // player-submitted odds pass straight through unchanged — no non-null
+  // assertion anywhere in this derivation.
+  const submittedOdds = result.submittedOdds !== null ? Number(result.submittedOdds) : null;
 
   switch (result.status) {
     case "VERIFIED":

@@ -269,16 +269,19 @@ test("adapter mapping: an unrecognized legacy note falls back to the conservativ
   assert.equal(result.diagnosticCode, "LEGACY_UNCLASSIFIED_FAILURE");
 });
 
-test("adapter mapping: no submittedOdds anywhere yields NOT_CHECKED/NOT_CHECKED without calling verifyOdds", async () => {
+// Step 15H — replaces the old NOT_CHECKED-short-circuit test: a null
+// submittedOdds must now reach verifyOddsFn (lookup attempted) instead of
+// short-circuiting before ever calling it. See the dedicated Step 15H
+// section below for the full set of null-input behaviors (A-D).
+test("adapter mapping: no submittedOdds anywhere now reaches verifyOddsFn instead of short-circuiting to NOT_CHECKED", async () => {
   const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({}));
   const provider = new TheOddsApiProvider(fn);
 
   const result = await provider.verifySelection({ selection: moneyline3Way({ submittedOdds: undefined }) });
 
-  assert.equal(result.status, "NOT_CHECKED");
-  assert.equal(result.reasonCode, "NOT_CHECKED");
-  assert.equal(result.acceptedOdds, null);
-  assert.equal(calls.length, 0, "the legacy verifier must not be called when there is nothing to check");
+  assert.equal(calls.length, 1, "the legacy verifier must now be called even with nothing submitted to check against");
+  assert.equal(calls[0].odds, null, "the adapter must pass odds:null through untouched, never inventing a value");
+  assert.notEqual(result.status, "NOT_CHECKED", "NOT_CHECKED is no longer produced for a null submittedOdds");
 });
 
 test("adapter mapping: request-level submittedOdds overrides selection.submittedOdds", async () => {
@@ -520,4 +523,97 @@ test("football league resolution: no provider sport_key is ever emitted — only
     await provider.verifySelection({ selection: moneyline3Way({ league: { name: league } }) });
     assert.doesNotMatch(calls[0].sport, /^soccer_/, "must never be a raw The Odds API sport_key");
   }
+});
+
+/* -------------------------------------------------------------------------- */
+/* Step 15H — submittedOdds: null (provider-price lookup, adapter wiring)     */
+/* -------------------------------------------------------------------------- */
+
+test("Step 15H: submittedOdds:null + successful lookup returns a VERIFIED result carrying the provider-promoted price", async () => {
+  const { fn, calls } = capturingVerifyOddsFn(
+    baseLegacyResult({
+      matched: true,
+      withinTolerance: true,
+      sourceOdds: 2.15,
+      submittedOdds: 2.15, // Step 15G's own promotion: price adopted as submittedOdds
+      discrepancyPercent: 0,
+      bookmaker: "Pinnacle",
+    }),
+  );
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way({ submittedOdds: undefined }) });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].odds, null);
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(result.currentOdds, "2.15");
+  assert.equal(result.submittedOdds, "2.15", "the promoted provider price, not the original null request value");
+  assert.equal(result.acceptedOdds, "2.15");
+  assert.equal(result.bookmaker, "Pinnacle");
+});
+
+test("Step 15H: submittedOdds:null + event not found preserves null submitted odds (no fabricated value)", async () => {
+  const { fn } = capturingVerifyOddsFn(
+    baseLegacyResult({
+      matched: false,
+      submittedOdds: null, // Step 15G: nothing to promote on a failed lookup
+      note: `No matching event found for "Manchester United vs Chelsea" in soccer_epl`,
+    }),
+  );
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way({ submittedOdds: undefined }) });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "EVENT_NOT_FOUND");
+  assert.equal(result.submittedOdds, null);
+});
+
+test("Step 15H: submittedOdds:null + selection not found preserves null submitted odds (no fabricated value)", async () => {
+  const { fn } = capturingVerifyOddsFn(
+    baseLegacyResult({
+      matched: false,
+      submittedOdds: null,
+      bookmaker: "Pinnacle",
+      note: `Could not match selection "1" to a bookmaker outcome`,
+    }),
+  );
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way({ submittedOdds: undefined }) });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "SELECTION_NOT_FOUND");
+  assert.equal(result.submittedOdds, null);
+});
+
+test("Step 15H: submittedOdds:null + provider unavailable preserves the existing provider failure result", async () => {
+  const { fn } = capturingVerifyOddsFn(
+    baseLegacyResult({
+      matched: false,
+      submittedOdds: null,
+      note: "ODDS_API_KEY is not configured",
+    }),
+  );
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way({ submittedOdds: undefined }) });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "PROVIDER_UNAVAILABLE");
+  assert.equal(result.submittedOdds, null);
+});
+
+test("Step 15H: numeric submittedOdds is never round-tripped through Number/String — original request string preserved exactly", async () => {
+  const { fn } = capturingVerifyOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.1, submittedOdds: 2.1, discrepancyPercent: 0 }),
+  );
+  const provider = new TheOddsApiProvider(fn);
+
+  // "2.10" would lose its trailing zero if re-stringified from a parsed
+  // Number (2.1) instead of being passed through as the original string.
+  const result = await provider.verifySelection({ selection: moneyline3Way({ submittedOdds: "2.10" }) });
+
+  assert.equal(result.submittedOdds, "2.10");
 });

@@ -335,3 +335,89 @@ test("result mapping: note is always reconstructed as null (fetched-but-never-re
   assert.equal(verified.oddsCheck?.note, null);
   assert.equal(failed.oddsCheck?.note, null);
 });
+
+/* -------------------------------------------------------------------------- */
+/* Step 15H — submittedOdds: null (provider-price lookup, bridge wiring)      */
+/* -------------------------------------------------------------------------- */
+
+test("request mapping: legacySelectionToCanonicalRequest accepts submittedOdds:null without throwing, and omits it rather than serializing 'null'", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Real Madrid vs Barcelona",
+    selection: "1",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.submittedOdds, undefined);
+});
+
+test("request mapping: submittedOdds:null still produces the same event/selection classification as a numeric request", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Real Madrid vs Barcelona",
+    selection: "1",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.marketType, "MONEYLINE_3WAY");
+  assert.equal(request.selection.selectionType, "HOME");
+  assert.deepEqual(request.selection.event.participants, [{ name: "Real Madrid" }, { name: "Barcelona" }]);
+});
+
+test("result mapping: a successful null-input lookup (VERIFIED) reconstructs submittedOdds from the verifier's own promoted result, not a caller-supplied value", () => {
+  // The verifier (Step 15G) promoted the found price (2.15) into
+  // submittedOdds — the bridge must report that promoted value, never a
+  // stale or unrelated second argument.
+  const result = createVerifiedResult({
+    submittedOdds: "2.15",
+    currentOdds: "2.15",
+    differencePercentage: "0",
+    bookmaker: "Pinnacle",
+    provider: "THE_ODDS_API",
+    checkedAt: CHECKED_AT,
+  });
+
+  const { oddsCheck } = verificationResultToLegacyOddsCheck(result);
+
+  assert.deepEqual(oddsCheck, {
+    matched: true,
+    withinTolerance: true,
+    sourceOdds: 2.15,
+    submittedOdds: 2.15,
+    discrepancyPercent: 0,
+    bookmaker: "Pinnacle",
+    note: null,
+  });
+});
+
+test("result mapping: an unsuccessful null-input lookup preserves submittedOdds:null, never fabricating a value", () => {
+  const result = createFailedResult({
+    submittedOdds: null,
+    provider: "THE_ODDS_API",
+    checkedAt: CHECKED_AT,
+    reasonCode: "EVENT_NOT_FOUND",
+  });
+
+  const { oddsCheck, wasExceptionMapped } = verificationResultToLegacyOddsCheck(result);
+
+  assert.equal(wasExceptionMapped, false);
+  assert.equal(oddsCheck?.matched, false);
+  assert.equal(oddsCheck?.submittedOdds, null);
+});
+
+test("result mapping: the (now-unused) second parameter, if supplied, never overrides the result's own submittedOdds", () => {
+  // A caller (e.g. lib/bets/buildBetSlipPreview.ts, unmodified in this
+  // step) may still pass a second positional argument — it must be fully
+  // ignored, proving the derivation genuinely comes from result.submittedOdds
+  // and not silently from this parameter.
+  const result = createVerifiedResult({
+    submittedOdds: "2.15",
+    currentOdds: "2.15",
+    provider: "THE_ODDS_API",
+    checkedAt: CHECKED_AT,
+  });
+
+  const { oddsCheck } = verificationResultToLegacyOddsCheck(result, 999);
+
+  assert.equal(oddsCheck?.submittedOdds, 2.15, "must reflect the result's own submittedOdds, not the ignored 999 argument");
+});
