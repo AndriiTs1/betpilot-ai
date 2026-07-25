@@ -246,51 +246,67 @@ function BannerScreen({
 
   return (
     <div
-      className="flex flex-col items-center justify-center min-[480px]:justify-start min-[480px]:pt-16"
+      className="flex flex-col items-center justify-center px-5 pb-10 min-[480px]:justify-start min-[480px]:pt-14"
       style={{ minHeight: containerHeight }}
     >
-      {/* object-cover crops the sides instead of stretching. Above ~480px
-          the box is capped at max-w-[420px] so it keeps cropping the
-          sides only, not the logo/tagline at the top/bottom. */}
-      <div
-        className="relative w-full overflow-hidden min-[480px]:mx-auto min-[480px]:max-w-[420px]"
-        style={{ height: 288 }}
-      >
+      {/* betpilotshow.png is the full visual banner (logo, robot, info
+          panels, bottom slogan) at a 35/24 aspect ratio — object-contain,
+          not object-cover, so nothing is ever cropped; the wrapper's own
+          matching aspect-[35/24] means the sub-1% ratio difference between
+          the asset (1.4572) and 35/24 (1.4583) only ever produces a
+          negligible letterbox sliver, which bg-[#07111F] (matching
+          MiniAppBackground's own top color) blends away. No gradient here
+          — the slogan sits right at the image's bottom edge, and the
+          asset's own near-black background already blends into the page
+          without one; keeping it would have darkened/covered real banner
+          content.
+
+          Design pass: inset from the screen edge (px-5 on the outer
+          container) + rounded corners + a soft dark shadow and a hairline
+          ring turn this from an edge-to-edge website hero into a single
+          elevated card — the same treatment Telegram uses for media
+          previews and Stripe uses for hero visuals, so it reads as native
+          app chrome rather than a banner bleeding off the screen. */}
+      <div className="relative w-full aspect-[35/24] overflow-hidden rounded-[28px] bg-[#07111F] shadow-[0_20px_50px_-12px_rgba(0,0,0,0.65)] ring-1 ring-white/[0.08] min-[480px]:mx-auto min-[480px]:max-w-[420px]">
         <Image
-          src="/miniapp/banner.jpg"
+          src="/miniapp/betpilotshow.png"
           alt="BetPilot AI — AI Betting Assistant"
           fill
           priority
-          className="object-cover object-center"
-        />
-
-        {/* Fades into #07111F — MiniAppBackground's own top color — to
-            blend the banner's bottom edge into the page background. */}
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-x-0 bottom-0"
-          style={{
-            height: 48,
-            background: "linear-gradient(180deg, rgba(7,17,31,0) 0%, #07111F 100%)",
-          }}
+          className="object-contain object-center"
+          sizes="(max-width: 479px) 100vw, 420px"
         />
       </div>
 
-      <div className="mt-4 flex flex-col items-center px-6 text-center">
-        <h2 className="text-2xl font-bold text-white">
+      {/* Headline sits close under the card (tight coupling, mt-7) so it
+          reads as this card's own caption rather than a separate section;
+          the feature row is pushed further down (mt-8) to create one clear
+          break in the rhythm instead of three evenly-spaced blocks. */}
+      <div className="mt-7 flex flex-col items-center px-4 text-center">
+        <h2 className="text-[26px] font-bold leading-[1.15] tracking-[-0.01em] text-white">
           Ваш AI-ассистент
           <br />
           для ставок на спорт
         </h2>
 
-        <ul className="mt-6 flex flex-col items-center gap-3 text-sm text-slate-300">
-          <li>📷 Отправьте купон или текст</li>
-          <li>🔍 Проверка коэффициентов</li>
-          <li>✅ Быстрое подтверждение</li>
-        </ul>
+        <div className="mt-8 flex flex-wrap items-center justify-center gap-2">
+          {[
+            { icon: "📷", label: "Отправьте купон или текст" },
+            { icon: "🔍", label: "Проверка коэффициентов" },
+            { icon: "✅", label: "Быстрое подтверждение" },
+          ].map(({ icon, label }) => (
+            <span
+              key={label}
+              className="flex items-center gap-1.5 rounded-full bg-white/[0.06] px-3.5 py-2 text-[13px] font-medium text-slate-200 ring-1 ring-white/[0.08]"
+            >
+              <span aria-hidden="true">{icon}</span>
+              {label}
+            </span>
+          ))}
+        </div>
       </div>
 
-      {!ready && <p className="mt-6 text-sm text-slate-500">Загрузка...</p>}
+      {!ready && <p className="mt-8 text-sm text-slate-500">Загрузка...</p>}
     </div>
   );
 }
