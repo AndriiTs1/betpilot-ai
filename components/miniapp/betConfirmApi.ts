@@ -1,4 +1,5 @@
 import { isTelegramAuthErrorReason, getTelegramAuthErrorMessage } from "./telegramAuthError";
+import { isBetPreview, type BetPreview, type BetPreviewSuccess } from "./betPreviewApi";
 
 const REQUEST_TIMEOUT_MS = 15000;
 
@@ -70,14 +71,35 @@ export type BetConfirmErrorCode =
   | "INVALID_REQUEST"
   | "PREVIEW_INVALID"
   | "PREVIEW_EXPIRED"
+  // Step 15B — listed here for completeness/documentation of every code the
+  // server can send, but this one is never surfaced through the generic
+  // `{kind:"http", code}` path: fetchBetConfirm below intercepts it and
+  // returns the dedicated `{kind:"odds_changed", ...}` failure instead,
+  // since (unlike every other code) it carries data the caller must act on,
+  // not just a message to display.
+  | "ODDS_CHANGED_RECONFIRM_REQUIRED"
   | "INTERNAL_ERROR";
+
+// Step 15B — a distinct failure kind, not a `{kind:"http", code}` variant,
+// specifically because this one carries a payload the caller needs
+// (refreshedPreview/refreshedPreviewToken), not just a display message.
+// Only ever constructed after both fields have been runtime-validated
+// (isBetPreview + non-empty string) — see fetchBetConfirm below. A 409 body
+// that fails that validation falls back to the safe, dataless
+// `invalid_response` failure instead, never a partially-trusted payload.
+export interface BetConfirmOddsChangedFailure {
+  kind: "odds_changed";
+  refreshedPreview: BetPreview;
+  refreshedPreviewToken: string;
+}
 
 export type BetConfirmFailure =
   | { kind: "http"; code: BetConfirmErrorCode | "UNKNOWN" }
   | { kind: "network" }
   | { kind: "timeout" }
   | { kind: "aborted" }
-  | { kind: "invalid_response" };
+  | { kind: "invalid_response" }
+  | BetConfirmOddsChangedFailure;
 
 export type BetConfirmResult =
   | { ok: true; data: BetConfirmSuccess }
@@ -206,6 +228,28 @@ export async function fetchBetConfirm(
         ? ((body as { error: string }).error as BetConfirmErrorCode | "UNKNOWN")
         : "UNKNOWN";
 
+    // Step 15B — the one response code that carries data the caller must
+    // act on (a fresh preview + token to reconfirm against), not just a
+    // message. Both fields are runtime-validated before being trusted at
+    // all: a malformed/incomplete 409 body (wrong shape, empty token, odds
+    // API response was tampered with in transit, etc.) falls back to the
+    // safe, dataless `invalid_response` failure instead of ever handing the
+    // caller a half-valid payload it might act on unsafely.
+    if (code === "ODDS_CHANGED_RECONFIRM_REQUIRED" && typeof body === "object" && body !== null) {
+      const refreshedPreview = (body as { refreshedPreview?: unknown }).refreshedPreview;
+      const refreshedPreviewToken = (body as { refreshedPreviewToken?: unknown }).refreshedPreviewToken;
+
+      if (
+        isBetPreview(refreshedPreview) &&
+        typeof refreshedPreviewToken === "string" &&
+        refreshedPreviewToken.length > 0
+      ) {
+        return { ok: false, failure: { kind: "odds_changed", refreshedPreview, refreshedPreviewToken } };
+      }
+
+      return { ok: false, failure: { kind: "invalid_response" } };
+    }
+
     return { ok: false, failure: { kind: "http", code } };
   }
 
@@ -223,6 +267,13 @@ export function getBetConfirmErrorMessage(failure: BetConfirmFailure): string {
   if (failure.kind === "timeout") return "The request took too long. Please try again.";
   if (failure.kind === "invalid_response") return "Something went wrong. Please try again.";
   if (failure.kind === "aborted") return "";
+  // Step 15B — defensive only: BetTextForm/BetScreenshotForm intercept
+  // `kind: "odds_changed"` before ever calling this function (it needs the
+  // refreshedPreview/refreshedPreviewToken payload, which a plain message
+  // string can't carry) — see buildOddsChangedReconfirm below. This exists
+  // so the function stays total or a future caller that forgets to
+  // intercept it still gets a sane message instead of a crash.
+  if (failure.kind === "odds_changed") return "Odds have changed. Please review and confirm again.";
 
   if (isTelegramAuthErrorReason(failure.code)) {
     return getTelegramAuthErrorMessage(failure.code);
@@ -245,6 +296,49 @@ export function getBetConfirmErrorMessage(failure: BetConfirmFailure): string {
     default:
       return "Something went wrong. Please try again.";
   }
+}
+
+function formatOdds(value: number | null): string {
+  return value !== null ? value.toFixed(2) : "—";
+}
+
+export interface OddsChangedReconfirmUpdate {
+  // Always a real, non-null previewToken (validated by fetchBetConfirm
+  // before this is ever called) — a form can hand this straight to
+  // canConfirmBetSlip/fetchBetConfirm exactly like any other preview.
+  preview: BetPreviewSuccess;
+  message: string;
+}
+
+// Step 15B — the one piece of logic both BetTextForm and BetScreenshotForm
+// need identically when a confirm attempt comes back as
+// ODDS_CHANGED_RECONFIRM_REQUIRED: build the new preview/token pair to
+// stage (never auto-submitted — the caller still requires an explicit
+// Confirm tap) and a message showing old vs. new odds per selection.
+// `stalePreview` is the preview the player was just looking at (still in
+// the form's own state at the moment the confirm response comes back) —
+// used only to read the odds they last saw, never resubmitted anywhere;
+// the returned `preview` is built entirely from the server's fresh
+// refreshedPreview/refreshedPreviewToken, never mixed with anything stale.
+export function buildOddsChangedReconfirm(
+  stalePreview: BetPreviewSuccess | null,
+  failure: BetConfirmOddsChangedFailure,
+): OddsChangedReconfirmUpdate {
+  const staleSelections = stalePreview?.preview.selections ?? [];
+
+  const lines = failure.refreshedPreview.selections.map((selection, index) => {
+    const staleOdds = staleSelections[index]?.submittedOdds ?? null;
+    return `${selection.event}: ${formatOdds(staleOdds)} → ${formatOdds(selection.currentOdds)}`;
+  });
+
+  const message =
+    `⚠️ Odds have changed since you last checked.\n\n${lines.join("\n")}` +
+    `\n\nPlease review and confirm again.`;
+
+  return {
+    preview: { preview: failure.refreshedPreview, previewToken: failure.refreshedPreviewToken },
+    message,
+  };
 }
 
 // Whether previewToken/preview data should be discarded after this failure.

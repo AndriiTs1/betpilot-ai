@@ -11,6 +11,7 @@ import {
   fetchBetConfirm,
   getBetConfirmErrorMessage,
   shouldResetPreviewAfterConfirmFailure,
+  buildOddsChangedReconfirm,
   type AnyConfirmedBet,
 } from "./betConfirmApi";
 import { OddsStatus, PreviewCard } from "./BetPreviewCard";
@@ -241,6 +242,21 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
 
     if (!result.ok) {
       if (result.failure.kind === "aborted") return;
+
+      // Step 15B — odds changed since the preview was generated: never
+      // reuse the stale token, never auto-submit. Stage the server's fresh
+      // refreshedPreview/refreshedPreviewToken and return to the ready
+      // state (the recognized image/preview stays exactly as shown — only
+      // the odds data updates) so the existing "Confirm bet" button is what
+      // the player must explicitly tap again.
+      if (result.failure.kind === "odds_changed") {
+        const { preview: refreshedPreview, message } = buildOddsChangedReconfirm(preview, result.failure);
+        setPreview(refreshedPreview);
+        setPhase("ready");
+        setError(message);
+        triggerHaptic("warning-light");
+        return;
+      }
 
       if (shouldResetPreviewAfterConfirmFailure(result.failure)) {
         setPreview(null);

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fetchBetConfirm, getBetConfirmErrorMessage } from "./betConfirmApi";
+import { fetchBetConfirm, getBetConfirmErrorMessage, buildOddsChangedReconfirm } from "./betConfirmApi";
 
 // Stubs the global fetch this module calls internally — no new dependency,
 // Node's native fetch/Response are already used throughout this project.
@@ -173,4 +173,244 @@ test("getBetConfirmErrorMessage: network/timeout/aborted/invalid_response keep t
   assert.equal(getBetConfirmErrorMessage({ kind: "timeout" }), "The request took too long. Please try again.");
   assert.equal(getBetConfirmErrorMessage({ kind: "aborted" }), "");
   assert.equal(getBetConfirmErrorMessage({ kind: "invalid_response" }), "Something went wrong. Please try again.");
+});
+
+// ---------------------------------------------------------------------
+// Step 15B — 409 ODDS_CHANGED_RECONFIRM_REQUIRED
+// ---------------------------------------------------------------------
+
+function refreshedSinglePreviewBody() {
+  return {
+    type: "SINGLE",
+    stake: 100,
+    totalOdds: 1.95,
+    potentialWin: 195,
+    selections: [
+      {
+        sport: "Football",
+        event: "Real Madrid vs Barcelona",
+        market: null,
+        selection: "Real Madrid Win",
+        submittedOdds: 2.1,
+        currentOdds: 1.95,
+        oddsStatus: "ODDS_CHANGED",
+        bookmaker: "Bet365",
+        discrepancyPercent: -7.14,
+      },
+    ],
+  };
+}
+
+function stalePreviewSuccess(): import("./betPreviewApi").BetPreviewSuccess {
+  return {
+    preview: {
+      type: "SINGLE",
+      stake: 100,
+      totalOdds: 2.1,
+      potentialWin: 210,
+      selections: [
+        {
+          sport: "Football",
+          event: "Real Madrid vs Barcelona",
+          market: null,
+          selection: "Real Madrid Win",
+          submittedOdds: 2.1,
+          currentOdds: 2.1,
+          oddsStatus: "VERIFIED",
+          bookmaker: "Bet365",
+          discrepancyPercent: 0,
+        },
+      ],
+    },
+    previewToken: "stale-token-abc",
+  };
+}
+
+test("fetchBetConfirm: a valid ODDS_CHANGED_RECONFIRM_REQUIRED 409 is parsed into the dedicated odds_changed failure", async () => {
+  const restore = stubFetch({
+    status: 409,
+    body: {
+      error: "ODDS_CHANGED_RECONFIRM_REQUIRED",
+      refreshedPreview: refreshedSinglePreviewBody(),
+      refreshedPreviewToken: "fresh-token-xyz",
+    },
+  });
+  try {
+    const result = await fetchBetConfirm("fake-init-data", "stale-token-abc");
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.failure.kind, "odds_changed");
+    if (result.failure.kind !== "odds_changed") return;
+    assert.equal(result.failure.refreshedPreviewToken, "fresh-token-xyz");
+    assert.equal(result.failure.refreshedPreview.selections[0].currentOdds, 1.95);
+  } finally {
+    restore();
+  }
+});
+
+test("fetchBetConfirm: refreshedPreview/refreshedPreviewToken are handed to the UI layer unmodified", async () => {
+  const body = {
+    error: "ODDS_CHANGED_RECONFIRM_REQUIRED",
+    refreshedPreview: refreshedSinglePreviewBody(),
+    refreshedPreviewToken: "fresh-token-xyz",
+  };
+  const restore = stubFetch({ status: 409, body });
+  try {
+    const result = await fetchBetConfirm("fake-init-data", "stale-token-abc");
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.failure.kind, "odds_changed");
+    if (result.failure.kind !== "odds_changed") return;
+    assert.deepEqual(result.failure.refreshedPreview, body.refreshedPreview);
+  } finally {
+    restore();
+  }
+});
+
+test("fetchBetConfirm: missing refreshedPreview on a 409 falls back to the safe invalid_response failure", async () => {
+  const restore = stubFetch({
+    status: 409,
+    body: { error: "ODDS_CHANGED_RECONFIRM_REQUIRED", refreshedPreviewToken: "fresh-token-xyz" },
+  });
+  try {
+    const result = await fetchBetConfirm("fake-init-data", "stale-token-abc");
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.failure.kind, "invalid_response");
+  } finally {
+    restore();
+  }
+});
+
+test("fetchBetConfirm: missing refreshedPreviewToken on a 409 falls back to the safe invalid_response failure", async () => {
+  const restore = stubFetch({
+    status: 409,
+    body: { error: "ODDS_CHANGED_RECONFIRM_REQUIRED", refreshedPreview: refreshedSinglePreviewBody() },
+  });
+  try {
+    const result = await fetchBetConfirm("fake-init-data", "stale-token-abc");
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.failure.kind, "invalid_response");
+  } finally {
+    restore();
+  }
+});
+
+test("fetchBetConfirm: an empty-string refreshedPreviewToken on a 409 falls back to the safe invalid_response failure", async () => {
+  const restore = stubFetch({
+    status: 409,
+    body: {
+      error: "ODDS_CHANGED_RECONFIRM_REQUIRED",
+      refreshedPreview: refreshedSinglePreviewBody(),
+      refreshedPreviewToken: "",
+    },
+  });
+  try {
+    const result = await fetchBetConfirm("fake-init-data", "stale-token-abc");
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.failure.kind, "invalid_response");
+  } finally {
+    restore();
+  }
+});
+
+test("fetchBetConfirm: a structurally invalid refreshedPreview (missing selections) on a 409 falls back to invalid_response", async () => {
+  const malformedPreview: Record<string, unknown> = refreshedSinglePreviewBody();
+  delete malformedPreview.selections;
+  const restore = stubFetch({
+    status: 409,
+    body: {
+      error: "ODDS_CHANGED_RECONFIRM_REQUIRED",
+      refreshedPreview: malformedPreview,
+      refreshedPreviewToken: "fresh-token-xyz",
+    },
+  });
+  try {
+    const result = await fetchBetConfirm("fake-init-data", "stale-token-abc");
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.failure.kind, "invalid_response");
+  } finally {
+    restore();
+  }
+});
+
+test("fetchBetConfirm: a non-object refreshedPreview on a 409 falls back to invalid_response", async () => {
+  const restore = stubFetch({
+    status: 409,
+    body: {
+      error: "ODDS_CHANGED_RECONFIRM_REQUIRED",
+      refreshedPreview: "not-an-object",
+      refreshedPreviewToken: "fresh-token-xyz",
+    },
+  });
+  try {
+    const result = await fetchBetConfirm("fake-init-data", "stale-token-abc");
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.failure.kind, "invalid_response");
+  } finally {
+    restore();
+  }
+});
+
+// ---------------------------------------------------------------------
+// Step 15B — buildOddsChangedReconfirm (shared pure helper)
+// ---------------------------------------------------------------------
+
+test("buildOddsChangedReconfirm: the returned preview carries the fresh token, never the stale one", () => {
+  const stale = stalePreviewSuccess();
+  const failure: import("./betConfirmApi").BetConfirmOddsChangedFailure = {
+    kind: "odds_changed",
+    refreshedPreview: refreshedSinglePreviewBody() as import("./betPreviewApi").BetPreview,
+    refreshedPreviewToken: "fresh-token-xyz",
+  };
+
+  const result = buildOddsChangedReconfirm(stale, failure);
+
+  assert.equal(result.preview.previewToken, "fresh-token-xyz");
+  assert.notEqual(result.preview.previewToken, stale.previewToken);
+  assert.deepEqual(result.preview.preview, failure.refreshedPreview);
+});
+
+test("buildOddsChangedReconfirm: the message shows both the old submitted odds and the new current odds", () => {
+  const stale = stalePreviewSuccess(); // submittedOdds 2.1
+  const failure: import("./betConfirmApi").BetConfirmOddsChangedFailure = {
+    kind: "odds_changed",
+    refreshedPreview: refreshedSinglePreviewBody() as import("./betPreviewApi").BetPreview, // currentOdds 1.95
+    refreshedPreviewToken: "fresh-token-xyz",
+  };
+
+  const result = buildOddsChangedReconfirm(stale, failure);
+
+  assert.match(result.message, /2\.10/);
+  assert.match(result.message, /1\.95/);
+  assert.match(result.message, /Real Madrid vs Barcelona/);
+});
+
+test("buildOddsChangedReconfirm: a null stale preview (no prior preview in state) still produces a safe message, old odds shown as unknown", () => {
+  const failure: import("./betConfirmApi").BetConfirmOddsChangedFailure = {
+    kind: "odds_changed",
+    refreshedPreview: refreshedSinglePreviewBody() as import("./betPreviewApi").BetPreview,
+    refreshedPreviewToken: "fresh-token-xyz",
+  };
+
+  const result = buildOddsChangedReconfirm(null, failure);
+
+  assert.equal(result.preview.previewToken, "fresh-token-xyz");
+  assert.match(result.message, /—/); // unknown old odds rendered as em dash, not a crash
+  assert.match(result.message, /1\.95/);
+});
+
+test("getBetConfirmErrorMessage: odds_changed has a defensive fallback message even though forms intercept it first", () => {
+  const failure: import("./betConfirmApi").BetConfirmOddsChangedFailure = {
+    kind: "odds_changed",
+    refreshedPreview: refreshedSinglePreviewBody() as import("./betPreviewApi").BetPreview,
+    refreshedPreviewToken: "fresh-token-xyz",
+  };
+  const message = getBetConfirmErrorMessage(failure);
+  assert.equal(typeof message, "string");
+  assert.ok(message.length > 0);
 });

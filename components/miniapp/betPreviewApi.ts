@@ -79,6 +79,27 @@ function isBetPreviewSelection(value: unknown): value is BetPreviewSelection {
   );
 }
 
+// Minimal structural check before trusting a bare preview object (no
+// previewToken wrapper) — the shape POST .../text/confirm's own
+// `refreshedPreview` field (409 ODDS_CHANGED_RECONFIRM_REQUIRED, Step 15B)
+// uses. Exported so betConfirmApi.ts can validate that field against the
+// exact same runtime shape as every other preview in this app, rather than
+// a second parallel implementation.
+export function isBetPreview(value: unknown): value is BetPreview {
+  if (typeof value !== "object" || value === null) return false;
+
+  const p = value as Record<string, unknown>;
+  return (
+    (p.type === "SINGLE" || p.type === "EXPRESS") &&
+    typeof p.stake === "number" &&
+    (p.totalOdds === null || typeof p.totalOdds === "number") &&
+    (p.potentialWin === null || typeof p.potentialWin === "number") &&
+    Array.isArray(p.selections) &&
+    p.selections.length > 0 &&
+    p.selections.every(isBetPreviewSelection)
+  );
+}
+
 // Minimal structural check before trusting the response shape — no blind
 // `as BetPreviewSuccess` cast. Doesn't validate every nested field
 // exhaustively, just enough to catch a genuinely malformed/unexpected body.
@@ -99,19 +120,7 @@ export function isBetPreviewSuccess(value: unknown): value is BetPreviewSuccess 
   const previewToken = (value as { previewToken: unknown }).previewToken;
   if (previewToken !== null && typeof previewToken !== "string") return false;
 
-  const preview = (value as { preview: unknown }).preview;
-  if (typeof preview !== "object" || preview === null) return false;
-
-  const p = preview as Record<string, unknown>;
-  return (
-    (p.type === "SINGLE" || p.type === "EXPRESS") &&
-    typeof p.stake === "number" &&
-    (p.totalOdds === null || typeof p.totalOdds === "number") &&
-    (p.potentialWin === null || typeof p.potentialWin === "number") &&
-    Array.isArray(p.selections) &&
-    p.selections.length > 0 &&
-    p.selections.every(isBetPreviewSelection)
-  );
+  return isBetPreview((value as { preview: unknown }).preview);
 }
 
 export async function fetchBetPreview(initData: string, message: string): Promise<BetPreviewResult> {
