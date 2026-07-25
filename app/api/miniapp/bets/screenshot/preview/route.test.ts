@@ -9,6 +9,7 @@ import type { ParseBetSlipResult } from "@/lib/ai/betParser";
 import type { OcrProvider, OcrResult } from "@/lib/ocr/ocrTypes";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import type { RegionDetectionOutcome } from "@/lib/ocr/regionDetection";
+import { createRequestRateLimiter, type RequestRateLimiter } from "@/lib/rateLimit/requestRateLimiter";
 
 // Stage 14.3 — this route now runs upload validation -> OCR
 // (recognizeScreenshot, injectable) -> bet parsing (parseBetSlipMessage in
@@ -147,6 +148,13 @@ function buildRequest(initData: string, fileBytes: Uint8Array, mimeType: string,
   });
 }
 
+// Step 13B — a generous-ceiling limiter by default so none of the existing
+// (pre-Step-13B) tests below are affected by rate limiting; individual
+// rate-limit-specific tests override this explicitly with a tight limiter.
+function freshLimiter(): RequestRateLimiter {
+  return createRequestRateLimiter({ maxRequests: 1000, windowMs: 60_000 });
+}
+
 function baseOptions(overrides: Record<string, unknown> = {}) {
   return {
     db: registeredDb(),
@@ -155,6 +163,7 @@ function baseOptions(overrides: Record<string, unknown> = {}) {
     ocrProvider: fakeOcrProvider(() => ocrSuccess("Real Madrid vs Barcelona\nReal Madrid Win\nOdds 1.9\nStake 50")),
     parseBetSlip: fakeParseBetSlip(singleSlip()),
     verifyOddsFn: fakeVerifyOddsFn,
+    rateLimiter: freshLimiter(),
     ...overrides,
   };
 }
@@ -966,4 +975,182 @@ test("screenshot preview: no logged event ever contains OCR text, event/selectio
       );
     }
   }
+});
+
+// ---------------------------------------------------------------------
+// Step 13B — rate limiting
+// ---------------------------------------------------------------------
+
+test("screenshot preview: a normal request below the limit remains unchanged", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  const response = await handleScreenshotPreview(request, baseOptions());
+  assert.equal(response.status, 200);
+});
+
+test("screenshot preview: the configured boundary number of requests is allowed", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const limiter = createRequestRateLimiter({ maxRequests: 3, windowMs: 60_000 });
+
+  for (let i = 0; i < 3; i += 1) {
+    const response = await handleScreenshotPreview(
+      buildRequest(initData, jpegBytes(), "image/jpeg"),
+      baseOptions({ rateLimiter: limiter }),
+    );
+    assert.equal(response.status, 200, `request ${i + 1} of 3 must succeed`);
+  }
+});
+
+test("screenshot preview: the request after the boundary returns 429 with matching Retry-After and body", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+
+  const first = await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ rateLimiter: limiter }),
+  );
+  assert.equal(first.status, 200);
+
+  const second = await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ rateLimiter: limiter }),
+  );
+  assert.equal(second.status, 429);
+  const body = await second.json();
+  assert.equal(body.error, "RATE_LIMITED");
+  assert.equal(typeof body.retryAfterSeconds, "number");
+  assert.equal(second.headers.get("Retry-After"), String(body.retryAfterSeconds));
+});
+
+test("screenshot preview: a rate-limited request performs no region detection, OCR, AI parse, or provider work", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+
+  let ocrCalls = 0;
+  let regionCalls = 0;
+  let parserCalls = 0;
+  let providerCalls = 0;
+
+  const options = baseOptions({
+    rateLimiter: limiter,
+    ocrProvider: fakeOcrProvider(() => { ocrCalls += 1; return ocrSuccess("x"); }),
+    detectRegion: (async (...args: unknown[]) => {
+      regionCalls += 1;
+      const real = (await import("@/lib/ocr/regionDetection")).detectBettingRegion;
+      return (real as (...a: unknown[]) => unknown)(...args);
+    }) as typeof import("@/lib/ocr/regionDetection").detectBettingRegion,
+    parseBetSlip: (async (...args: Parameters<typeof import("@/lib/ai/betParser").parseBetSlipMessage>) => {
+      parserCalls += 1;
+      return singleSlip();
+    }) as typeof import("@/lib/ai/betParser").parseBetSlipMessage,
+    verifyOddsFn: async () => {
+      providerCalls += 1;
+      return { matched: true, withinTolerance: true, sourceOdds: 1.9, submittedOdds: 1.9, discrepancyPercent: 0, bookmaker: "test-bookmaker", note: null };
+    },
+  });
+
+  await handleScreenshotPreview(buildRequest(initData, jpegBytes(), "image/jpeg"), options);
+
+  const limited = await handleScreenshotPreview(buildRequest(initData, jpegBytes(), "image/jpeg"), options);
+  assert.equal(limited.status, 429);
+
+  assert.equal(ocrCalls, 1, "OCR must only have run for the first, non-limited request");
+  assert.equal(parserCalls, 1, "the bet parser must only have run for the first, non-limited request");
+  assert.equal(providerCalls, 1, "the odds provider must only have run for the first, non-limited request");
+});
+
+test("screenshot preview: different Telegram users do not share quota", async () => {
+  const otherDb = fakeDb([
+    { id: PLAYER_ID, telegramId: String(PLAYER_TELEGRAM_ID) },
+    { id: "player-synthetic-screenshot-2", telegramId: "800000004" },
+  ]);
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+
+  const initDataA = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const initDataB = buildInitData(BOT_TOKEN, 800000004);
+
+  const first = await handleScreenshotPreview(
+    buildRequest(initDataA, jpegBytes(), "image/jpeg"),
+    baseOptions({ rateLimiter: limiter, db: otherDb }),
+  );
+  assert.equal(first.status, 200);
+
+  const secondB = await handleScreenshotPreview(
+    buildRequest(initDataB, jpegBytes(), "image/jpeg"),
+    baseOptions({ rateLimiter: limiter, db: otherDb }),
+  );
+  assert.equal(secondB.status, 200, "a different Telegram user must not be affected by user A's quota");
+});
+
+test("screenshot preview: text/preview's quota is a separate limiter instance and does not affect this route", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const screenshotLimiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+  const unrelatedTextPreviewLimiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+
+  unrelatedTextPreviewLimiter.checkAndRecord(String(PLAYER_TELEGRAM_ID));
+  unrelatedTextPreviewLimiter.checkAndRecord(String(PLAYER_TELEGRAM_ID));
+
+  const response = await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ rateLimiter: screenshotLimiter }),
+  );
+  assert.equal(response.status, 200, "screenshot/preview's own limiter is untouched by a different route's limiter instance");
+});
+
+test("screenshot preview: FILE_TOO_LARGE is unchanged and does not consume quota", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+
+  const oversized = new Uint8Array(11 * 1024 * 1024);
+  oversized.set([0xff, 0xd8, 0xff, 0xe0], 0);
+
+  const response = await handleScreenshotPreview(
+    buildRequest(initData, oversized, "image/jpeg"),
+    baseOptions({ rateLimiter: limiter }),
+  );
+  assert.equal(response.status, 413);
+  assert.deepEqual(await response.json(), { error: "FILE_TOO_LARGE" });
+
+  const followUp = await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ rateLimiter: limiter }),
+  );
+  assert.equal(followUp.status, 200, "quota must not have been consumed by the oversized-file rejection");
+});
+
+test("screenshot preview: UNSUPPORTED_FILE_TYPE is unchanged and does not consume quota", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+
+  const response = await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "application/pdf", "slip.pdf"),
+    baseOptions({ rateLimiter: limiter }),
+  );
+  assert.equal(response.status, 415);
+  assert.deepEqual(await response.json(), { error: "UNSUPPORTED_FILE_TYPE" });
+
+  const followUp = await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ rateLimiter: limiter }),
+  );
+  assert.equal(followUp.status, 200, "quota must not have been consumed by the unsupported-type rejection");
+});
+
+test("screenshot preview: INVALID_IMAGE_SIGNATURE is unchanged and does not consume quota", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+
+  const response = await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/png", "slip.png"),
+    baseOptions({ rateLimiter: limiter }),
+  );
+  assert.equal(response.status, 415);
+  assert.deepEqual(await response.json(), { error: "INVALID_IMAGE_SIGNATURE" });
+
+  const followUp = await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ rateLimiter: limiter }),
+  );
+  assert.equal(followUp.status, 200, "quota must not have been consumed by the invalid-signature rejection");
 });

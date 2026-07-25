@@ -10,6 +10,8 @@ import {
 import { createBetFromPreview } from "@/lib/bets/createBetFromPreview";
 import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
 import { verifyPreviewFreshness, type VerifyPreviewFreshnessOptions } from "@/lib/bets/verifyPreviewFreshness";
+import { createRequestRateLimiter, safeCheckAndRecord, type RequestRateLimiter } from "@/lib/rateLimit/requestRateLimiter";
+import { rateLimitedResponse } from "@/lib/rateLimit/rateLimitResponse";
 
 // Requires node:crypto (verifyInitData/verifyPreviewToken) and Prisma —
 // neither runs on the Edge runtime.
@@ -18,6 +20,29 @@ export const runtime = "nodejs";
 // A real token is ~500-600 chars (measured in production); this is a
 // generous upper bound against an oversized body, not a tight budget.
 const PREVIEW_TOKEN_MAX_LENGTH = 2048;
+
+// Step 13B — PROVISIONAL MVP CONFIGURATION VALUE (Step 13A Section 9).
+// Higher than either preview route's: a cheap-to-reject invalid/expired
+// token never reaches this limiter at all (see Step 13A-R's approved
+// ordering below), so this budget only needs to bound genuinely fresh
+// confirm attempts (each triggering one verifyPreviewFreshness/odds-provider
+// call), not cheap-reject traffic. Not derived from a documented
+// AI/odds-provider quota (none is published in this repository).
+const TEXT_CONFIRM_RATE_LIMIT_MAX_REQUESTS = 10;
+const TEXT_CONFIRM_RATE_LIMIT_WINDOW_MS = 60_000;
+
+// One shared module-level instance for BOTH the SINGLE and EXPRESS branches
+// below — Step 13A Section 9 / Step 13A-R Section 8 both require SINGLE and
+// EXPRESS confirmation to share one per-user quota bucket, not two separate
+// ones; a player confirming an EXPRESS bet must count against the same
+// budget as one confirming a SINGLE bet. In-memory, process-local, resets
+// on cold start — see lib/rateLimit/requestRateLimiter.ts's file header.
+// Production always uses this default; tests inject their own isolated
+// instance via options below.
+const defaultTextConfirmRateLimiter = createRequestRateLimiter({
+  maxRequests: TEXT_CONFIRM_RATE_LIMIT_MAX_REQUESTS,
+  windowMs: TEXT_CONFIRM_RATE_LIMIT_WINDOW_MS,
+});
 
 // Same header-parsing shape as the preview route and GET /api/miniapp/me.
 // Duplicated rather than shared for the same reason as there — it's a 6-line
@@ -162,6 +187,7 @@ export interface HandleBetConfirmOptions {
   // preview creation already does.
   verifyOddsFn?: VerifyPreviewFreshnessOptions["verifyOddsFn"];
   oddsVerificationService?: VerifyPreviewFreshnessOptions["oddsVerificationService"];
+  rateLimiter?: RequestRateLimiter;
 }
 
 export async function handleBetConfirm(
@@ -262,6 +288,21 @@ export async function handleBetConfirm(
         return NextResponse.json({ bet: serializeExpressBet(existingExpress), idempotent: true });
       }
 
+      // Step 13B / Step 13A-R — the rate limiter is consulted only here,
+      // strictly after the idempotency lookup above has already proven no
+      // Bet exists yet for this previewId. An idempotent retry therefore
+      // never reaches this check and never consumes quota (Step 13A-R
+      // Section 9's core guarantee); only a genuinely fresh confirm
+      // attempt — the one about to trigger verifyPreviewFreshness's
+      // odds-provider call — is gated here. Shared with the SINGLE branch's
+      // identical check below via one module-level limiter instance, so
+      // SINGLE and EXPRESS confirmations draw from the same per-user budget.
+      const expressRateLimiter = options.rateLimiter ?? defaultTextConfirmRateLimiter;
+      const expressRateLimitDecision = safeCheckAndRecord(expressRateLimiter, String(verification.user.id), "text_confirm");
+      if (!expressRateLimitDecision.allowed) {
+        return rateLimitedResponse(expressRateLimitDecision.retryAfterSeconds);
+      }
+
       const expressFreshness = await verifyPreviewFreshness(payload, previewTokenSecret, {
         verifyOddsFn: options.verifyOddsFn,
         oddsVerificationService: options.oddsVerificationService,
@@ -316,6 +357,17 @@ export async function handleBetConfirm(
     const existingSingle = await db.bet.findUnique({ where: { previewId: payload.previewId } });
     if (existingSingle) {
       return NextResponse.json({ bet: serializeSingleBet(existingSingle), idempotent: true });
+    }
+
+    // Step 13B / Step 13A-R — see the identical comment in the EXPRESS
+    // branch above: consulted only after the idempotency lookup has already
+    // proven no Bet exists yet, so an idempotent retry never consumes
+    // quota. Shares defaultTextConfirmRateLimiter (or the injected test
+    // override) with the EXPRESS branch — one per-user budget for both.
+    const singleRateLimiter = options.rateLimiter ?? defaultTextConfirmRateLimiter;
+    const singleRateLimitDecision = safeCheckAndRecord(singleRateLimiter, String(verification.user.id), "text_confirm");
+    if (!singleRateLimitDecision.allowed) {
+      return rateLimitedResponse(singleRateLimitDecision.retryAfterSeconds);
     }
 
     // Step 11B — confirmation-time odds freshness verification. The one and

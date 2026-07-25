@@ -11,6 +11,8 @@ import { detectBettingRegion } from "@/lib/ocr/regionDetection";
 import type { OcrFailure, OcrProvider } from "@/lib/ocr/ocrTypes";
 import { ALLOWED_MIME_TYPES, MAX_FILE_SIZE_BYTES, detectImageSignature, type AllowedMimeType } from "@/lib/uploads/imageValidation";
 import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
+import { createRequestRateLimiter, safeCheckAndRecord, type RequestRateLimiter } from "@/lib/rateLimit/requestRateLimiter";
+import { rateLimitedResponse } from "@/lib/rateLimit/rateLimitResponse";
 
 // Stage 4.5B built server-side upload validation only. Stage 4.5C added a
 // pipeline that read the image and extracted structured bet fields in one
@@ -57,6 +59,25 @@ import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
 // (base64 conversion), and the Anthropic SDK — none of these run on the
 // Edge runtime.
 export const runtime = "nodejs";
+
+// Step 13B — PROVISIONAL MVP CONFIGURATION VALUE (Step 13A Section 9). Lower
+// than text/preview's 5/60s: this route's per-request cost is strictly
+// higher (image decode, optional region-crop, up to three Claude/OCR calls
+// vs. text preview's one). Not derived from a documented AI/odds-provider
+// quota (none is published for either provider in this repository).
+const SCREENSHOT_PREVIEW_RATE_LIMIT_MAX_REQUESTS = 3;
+const SCREENSHOT_PREVIEW_RATE_LIMIT_WINDOW_MS = 60_000;
+
+// Module-level singleton, own independent instance from text/preview's and
+// text/confirm's — quota is never shared between route categories (Step 13A
+// Section 9). In-memory, process-local, resets on cold start; see
+// lib/rateLimit/requestRateLimiter.ts's file header for the full
+// best-effort-only explanation. Production always uses this default; tests
+// inject their own isolated instance via options below.
+const defaultScreenshotPreviewRateLimiter = createRequestRateLimiter({
+  maxRequests: SCREENSHOT_PREVIEW_RATE_LIMIT_MAX_REQUESTS,
+  windowMs: SCREENSHOT_PREVIEW_RATE_LIMIT_WINDOW_MS,
+});
 
 // Same header-parsing shape as the text preview/confirm routes and
 // GET /api/miniapp/me. Duplicated rather than shared for the same reason as
@@ -152,6 +173,7 @@ export interface HandleScreenshotPreviewOptions {
   // detection (found/not-found/invalid/timeout/error) without a real
   // Claude call. Defaults to the real detectBettingRegion.
   detectRegion?: typeof detectBettingRegion;
+  rateLimiter?: RequestRateLimiter;
 }
 
 // Injectable so tests can supply a fake db/OCR provider/bet parser/odds
@@ -255,6 +277,17 @@ export async function handleScreenshotPreview(
     const detectedType = detectImageSignature(bytes);
     if (detectedType === null || detectedType !== mimeType) {
       return NextResponse.json({ error: "INVALID_IMAGE_SIGNATURE" }, { status: 415 });
+    }
+
+    // Step 13B — the one and only rate-limit check in this route, placed
+    // immediately before the first expensive operation (region detection /
+    // OCR) and only after auth, player resolution, and every cheap upload
+    // validation (existence, size, MIME allow-list, byte signature) have
+    // already passed — none of those cheap-reject paths ever consumes quota.
+    const rateLimiter = options.rateLimiter ?? defaultScreenshotPreviewRateLimiter;
+    const rateLimitDecision = safeCheckAndRecord(rateLimiter, String(verification.user.id), "screenshot_preview");
+    if (!rateLimitDecision.allowed) {
+      return rateLimitedResponse(rateLimitDecision.retryAfterSeconds);
     }
 
     const ocrProvider = options.ocrProvider ?? createClaudeOcrProvider();

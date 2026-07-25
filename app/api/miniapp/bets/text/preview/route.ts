@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
+import type { PrismaClient } from "@/lib/generated/prisma/client";
 import { verifyInitData } from "@/lib/telegram/verifyInitData";
 import { parseBetSlipMessage } from "@/lib/ai/betParser";
-import { buildBetSlipPreview, BetSlipValidationError } from "@/lib/bets/buildBetSlipPreview";
+import { buildBetSlipPreview, BetSlipValidationError, type BuildBetSlipPreviewOptions } from "@/lib/bets/buildBetSlipPreview";
+import { createRequestRateLimiter, safeCheckAndRecord, type RequestRateLimiter } from "@/lib/rateLimit/requestRateLimiter";
+import { rateLimitedResponse } from "@/lib/rateLimit/rateLimitResponse";
 
 // Preview-only: parses a free-text bet (SINGLE or EXPRESS, Stage 12 Phase 3)
 // and checks each selection's odds against the live market, but never
@@ -12,6 +15,25 @@ import { buildBetSlipPreview, BetSlipValidationError } from "@/lib/bets/buildBet
 
 const MESSAGE_MIN_LENGTH = 3;
 const MESSAGE_MAX_LENGTH = 2000;
+
+// Step 13B — PROVISIONAL MVP CONFIGURATION VALUE (Step 13A Section 9). Not
+// derived from a documented AI/odds-provider quota (none is published for
+// either provider in this repository) — derived instead from the existing
+// Telegram /odds cooldown precedent (lib/telegram/oddsCommand.ts) and normal
+// single-player usage (one preview at a time, not bursts).
+const TEXT_PREVIEW_RATE_LIMIT_MAX_REQUESTS = 5;
+const TEXT_PREVIEW_RATE_LIMIT_WINDOW_MS = 60_000;
+
+// Module-level singleton — one instance for the life of this warm serverless
+// instance, exactly like defaultOddsVerificationService elsewhere in this
+// codebase. In-memory, process-local, resets on cold start; never shared
+// across concurrent instances or regions (see the module's own file header
+// for the full best-effort-only explanation). Production code always uses
+// this default; tests inject their own isolated instance via options below.
+const defaultTextPreviewRateLimiter = createRequestRateLimiter({
+  maxRequests: TEXT_PREVIEW_RATE_LIMIT_MAX_REQUESTS,
+  windowMs: TEXT_PREVIEW_RATE_LIMIT_WINDOW_MS,
+});
 
 // Same header-parsing shape as GET /api/miniapp/me. Duplicated rather than
 // extracted into a shared helper — it's a 6-line Authorization-header parse,
@@ -28,19 +50,38 @@ function extractInitData(request: NextRequest): string | null {
   return value;
 }
 
-export async function POST(request: NextRequest) {
+// Injectable so tests can supply a fake db/rate limiter/bet parser/odds
+// verifier instead of a real database connection, a real Claude call, or a
+// real Odds API call — same DI shape as handleScreenshotPreview/
+// handleBetConfirm elsewhere in this codebase. POST always calls this with
+// no overrides, so production behavior is unchanged.
+export interface HandleTextPreviewOptions {
+  db?: PrismaClient;
+  botToken?: string;
+  previewTokenSecret?: string;
+  parseBetSlip?: typeof parseBetSlipMessage;
+  verifyOddsFn?: BuildBetSlipPreviewOptions["verifyOddsFn"];
+  rateLimiter?: RequestRateLimiter;
+}
+
+export async function handleTextPreview(
+  request: NextRequest,
+  options: HandleTextPreviewOptions = {},
+): Promise<NextResponse> {
+  const db = options.db ?? prisma;
+
   const initData = extractInitData(request);
   if (!initData) {
     return NextResponse.json({ error: "malformed" }, { status: 401 });
   }
 
-  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  const botToken = options.botToken ?? process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) {
     console.error("POST /api/miniapp/bets/text/preview: TELEGRAM_BOT_TOKEN is not set");
     return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
   }
 
-  const previewTokenSecret = process.env.BET_PREVIEW_TOKEN_SECRET;
+  const previewTokenSecret = options.previewTokenSecret ?? process.env.BET_PREVIEW_TOKEN_SECRET;
   if (!previewTokenSecret) {
     console.error("POST /api/miniapp/bets/text/preview: BET_PREVIEW_TOKEN_SECRET is not set");
     return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
@@ -76,7 +117,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const player = await prisma.player.findUnique({
+    const player = await db.player.findUnique({
       where: { telegramId: String(verification.user.id) },
       select: { id: true },
     });
@@ -85,7 +126,19 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "PLAYER_NOT_FOUND" }, { status: 404 });
     }
 
-    const parsed = await parseBetSlipMessage(message);
+    // Step 13B — the one and only rate-limit check in this route, placed
+    // immediately before the first expensive operation (the AI parse call)
+    // and only after auth, body validation, and player resolution have all
+    // already succeeded — a malformed/unauthenticated/unresolvable request
+    // never reaches, and never consumes, this quota.
+    const rateLimiter = options.rateLimiter ?? defaultTextPreviewRateLimiter;
+    const rateLimitDecision = safeCheckAndRecord(rateLimiter, String(verification.user.id), "text_preview");
+    if (!rateLimitDecision.allowed) {
+      return rateLimitedResponse(rateLimitDecision.retryAfterSeconds);
+    }
+
+    const parseBetSlip = options.parseBetSlip ?? parseBetSlipMessage;
+    const parsed = await parseBetSlip(message);
 
     if (!parsed.valid) {
       // parsed.error can contain provider/model/timeout/SDK detail — log it
@@ -100,7 +153,9 @@ export async function POST(request: NextRequest) {
 
     let result;
     try {
-      result = await buildBetSlipPreview(parsed, player.id, previewTokenSecret);
+      result = await buildBetSlipPreview(parsed, player.id, previewTokenSecret, {
+        verifyOddsFn: options.verifyOddsFn,
+      });
     } catch (err) {
       if (err instanceof BetSlipValidationError) {
         console.error("POST /api/miniapp/bets/text/preview: invalid bet slip:", err.code, err.message);
@@ -114,4 +169,8 @@ export async function POST(request: NextRequest) {
     console.error("POST /api/miniapp/bets/text/preview failed:", err);
     return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
   }
+}
+
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  return handleTextPreview(request);
 }

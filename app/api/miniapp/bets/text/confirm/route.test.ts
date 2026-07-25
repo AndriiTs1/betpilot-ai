@@ -7,6 +7,7 @@ import { Prisma, type PrismaClient } from "@/lib/generated/prisma/client";
 import { signPreviewToken, signExpressPreviewToken, type PreviewTokenInput, type ExpressPreviewTokenInput } from "@/lib/betPreview/previewToken";
 import type { OddsVerificationInput } from "@/lib/odds/oddsVerifier";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
+import { createRequestRateLimiter, type RequestRateLimiter } from "@/lib/rateLimit/requestRateLimiter";
 
 // ---------------------------------------------------------------------
 // Test-only crypto material — self-consistent, never the real production
@@ -206,12 +207,20 @@ function alwaysVerifiedOddsFn() {
   });
 }
 
+// Step 13B — a generous-ceiling limiter by default so none of the existing
+// (pre-Step-13B) tests below are affected by rate limiting; individual
+// rate-limit-specific tests override this explicitly with a tight limiter.
+function freshLimiter(): RequestRateLimiter {
+  return createRequestRateLimiter({ maxRequests: 1000, windowMs: 60_000 });
+}
+
 function fakeOptions(db: ReturnType<typeof createFakeDb>, overrides: Partial<HandleBetConfirmOptions> = {}): HandleBetConfirmOptions {
   return {
     db: db as unknown as PrismaClient,
     botToken: BOT_TOKEN,
     previewTokenSecret: PREVIEW_SECRET,
     verifyOddsFn: alwaysVerifiedOddsFn(),
+    rateLimiter: freshLimiter(),
     ...overrides,
   };
 }
@@ -855,4 +864,314 @@ test("confirm route: an already-confirmed EXPRESS preview is returned idempotent
   assert.equal(secondBody.bet.selections.length, 2);
   assert.equal(providerCallCount, 0, "the odds provider must never be called for an already-confirmed preview");
   assert.equal(db._debug.createCallCount(), 1);
+});
+
+// ---------------------------------------------------------------------
+// Step 13B / Step 13A-R — rate limiting
+// ---------------------------------------------------------------------
+
+const OTHER_TELEGRAM_ID = 555000222;
+const OTHER_PLAYER_ID = "player-2";
+
+function twoPlayerDb() {
+  return createFakeDb({ players: { [TELEGRAM_ID.toString()]: PLAYER_ID, [OTHER_TELEGRAM_ID.toString()]: OTHER_PLAYER_ID } });
+}
+
+test("confirm route (rate limit): a normal fresh confirmation below the limit preserves the Step 11 flow", async () => {
+  const db = createFakeDb();
+  const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+  const limiter = createRequestRateLimiter({ maxRequests: 5, windowMs: 60_000 });
+
+  const res = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(res.status, 200);
+  const body = (await json(res)) as { idempotent: boolean };
+  assert.equal(body.idempotent, false);
+});
+
+test("confirm route (rate limit): an over-limit user with a new valid preview receives 429 RATE_LIMITED with matching Retry-After", async () => {
+  const db = createFakeDb();
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+
+  const tokenA = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+  const first = await handleBetConfirm(confirmRequest(tokenA), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(first.status, 200);
+
+  const tokenB = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET); // distinct previewId — a new, not-yet-confirmed preview
+  const second = await handleBetConfirm(confirmRequest(tokenB), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(second.status, 429);
+  const body = (await json(second)) as { error: string; retryAfterSeconds: number };
+  assert.equal(body.error, "RATE_LIMITED");
+  assert.equal(typeof body.retryAfterSeconds, "number");
+  assert.equal(second.headers.get("Retry-After"), String(body.retryAfterSeconds));
+});
+
+test("confirm route (rate limit): a rate-limited fresh confirmation never calls verifyPreviewFreshness or createBetFromPreview, and creates no Bet", async () => {
+  const db = createFakeDb();
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+  let providerCallCount = 0;
+  const countingOddsFn = async (input: OddsVerificationInput): Promise<OddsCheckResult> => {
+    providerCallCount += 1;
+    return { matched: true, withinTolerance: true, sourceOdds: input.odds, submittedOdds: input.odds, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null };
+  };
+
+  const tokenA = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+  await handleBetConfirm(confirmRequest(tokenA), fakeOptions(db, { rateLimiter: limiter, verifyOddsFn: countingOddsFn }));
+  assert.equal(providerCallCount, 1);
+  assert.equal(db._debug.createCallCount(), 1);
+
+  const tokenB = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+  const limited = await handleBetConfirm(confirmRequest(tokenB), fakeOptions(db, { rateLimiter: limiter, verifyOddsFn: countingOddsFn }));
+  assert.equal(limited.status, 429);
+  assert.equal(providerCallCount, 1, "verifyPreviewFreshness must never have run for the rate-limited request");
+  assert.equal(db._debug.createCallCount(), 1, "createBetFromPreview must never have run for the rate-limited request, no new Bet created");
+});
+
+test("confirm route (rate limit): an over-limit user with an already-existing SINGLE Bet still receives it (200, idempotent: true)", async () => {
+  const db = createFakeDb();
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+  const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+
+  const first = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(first.status, 200); // this fresh confirm consumed the only quota unit
+
+  // Retrying the exact same (now-confirmed) token must still succeed even
+  // though the limiter is fully exhausted — the idempotency lookup returns
+  // before the limiter is ever consulted (Step 13A-R Section 8/10).
+  const retry = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(retry.status, 200);
+  const retryBody = (await json(retry)) as { idempotent: boolean };
+  assert.equal(retryBody.idempotent, true);
+});
+
+test("confirm route (rate limit): an over-limit user with an already-existing EXPRESS Bet still receives it (200, idempotent: true)", async () => {
+  const db = createFakeDb();
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+  const token = signExpressPreviewToken(expressTokenInput(), PREVIEW_SECRET);
+
+  const first = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(first.status, 200);
+
+  const retry = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(retry.status, 200);
+  const retryBody = (await json(retry)) as { idempotent: boolean };
+  assert.equal(retryBody.idempotent, true);
+});
+
+test("confirm route (rate limit): more than the configured quota's worth of idempotent retries never returns 429, never consumes quota, never calls freshness or createBetFromPreview again", async () => {
+  const db = createFakeDb();
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+  let providerCallCount = 0;
+  const countingOddsFn = async (input: OddsVerificationInput): Promise<OddsCheckResult> => {
+    providerCallCount += 1;
+    return { matched: true, withinTolerance: true, sourceOdds: input.odds, submittedOdds: input.odds, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null };
+  };
+  const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+
+  await handleBetConfirm(confirmRequest(token), fakeOptions(db, { rateLimiter: limiter, verifyOddsFn: countingOddsFn }));
+  assert.equal(providerCallCount, 1);
+
+  for (let i = 0; i < 5; i += 1) {
+    const retry = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { rateLimiter: limiter, verifyOddsFn: countingOddsFn }));
+    assert.equal(retry.status, 200, `idempotent retry ${i + 1} must never be 429`);
+    const retryBody = (await json(retry)) as { idempotent: boolean };
+    assert.equal(retryBody.idempotent, true);
+  }
+
+  assert.equal(providerCallCount, 1, "verifyPreviewFreshness must never run again for any idempotent retry");
+  assert.equal(db._debug.createCallCount(), 1, "createBetFromPreview must never run again for any idempotent retry");
+});
+
+test("confirm route (rate limit): an invalid previewToken preserves its existing response and does not consume quota", async () => {
+  const db = createFakeDb();
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+
+  const invalid = await handleBetConfirm(confirmRequest("not-a-real-token"), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(invalid.status, 422);
+  const invalidBody = (await json(invalid)) as { error: string };
+  assert.equal(invalidBody.error, "PREVIEW_INVALID");
+
+  // Quota untouched — a genuinely fresh, valid confirm afterward must still
+  // succeed against the same (still-full) limiter.
+  const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+  const valid = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(valid.status, 200);
+});
+
+test("confirm route (rate limit): an expired previewToken preserves its existing response and does not consume quota", async () => {
+  const db = createFakeDb();
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+
+  const originalNow = Date.now;
+  let expiredToken: string;
+  try {
+    Date.now = () => new Date("2020-01-01T00:00:00Z").getTime();
+    expiredToken = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+  } finally {
+    Date.now = originalNow;
+  }
+
+  const expiredRes = await handleBetConfirm(confirmRequest(expiredToken), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(expiredRes.status, 410);
+  const expiredBody = (await json(expiredRes)) as { error: string };
+  assert.equal(expiredBody.error, "PREVIEW_EXPIRED");
+
+  const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+  const valid = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(valid.status, 200, "quota must not have been consumed by the expired-token rejection");
+});
+
+test("confirm route (rate limit): a wrong-owner token preserves PREVIEW_INVALID, does not consume quota, and never even looks up previewId existence", async () => {
+  const db = createFakeDb();
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+
+  let findUniqueCalls = 0;
+  const probingDb = {
+    ...db,
+    bet: {
+      ...db.bet,
+      findUnique: async (...args: Parameters<typeof db.bet.findUnique>) => {
+        findUniqueCalls += 1;
+        return db.bet.findUnique(...args);
+      },
+    },
+  };
+
+  // Token signed for a player that is NOT the authenticated (TELEGRAM_ID ->
+  // PLAYER_ID) player.
+  const wrongOwnerToken = signPreviewToken(singleTokenInput({ playerId: "someone-elses-player-id", odds: 2.1 }), PREVIEW_SECRET);
+
+  const res = await handleBetConfirm(
+    confirmRequest(wrongOwnerToken),
+    fakeOptions(probingDb as unknown as ReturnType<typeof createFakeDb>, { rateLimiter: limiter }),
+  );
+  assert.equal(res.status, 422);
+  const body = (await json(res)) as { error: string };
+  assert.equal(body.error, "PREVIEW_INVALID");
+  assert.equal(findUniqueCalls, 0, "a wrong-owner token must be rejected before any previewId lookup — it can never reveal whether that previewId exists");
+
+  // Quota untouched.
+  const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+  const valid = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(valid.status, 200);
+});
+
+test("confirm route (rate limit): an ODDS_CHANGED outcome consumes quota and preserves its existing 409 response, no Bet created", async () => {
+  const db = createFakeDb();
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+  const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+
+  const first = await handleBetConfirm(
+    confirmRequest(token),
+    fakeOptions(db, {
+      rateLimiter: limiter,
+      verifyOddsFn: fakeVerifyOddsFnByEvent({ "Real Madrid vs Barcelona": oddsChangedResult(1.8, 2.1) }),
+    }),
+  );
+  assert.equal(first.status, 409);
+  const firstBody = (await json(first)) as { error: string };
+  assert.equal(firstBody.error, "ODDS_CHANGED_RECONFIRM_REQUIRED");
+  assert.equal(db._debug.betCount(), 0, "no Bet may be created for an ODDS_CHANGED outcome");
+
+  // Quota was consumed by the ODDS_CHANGED attempt itself — a second,
+  // otherwise-valid fresh confirm must now be 429.
+  const tokenB = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+  const second = await handleBetConfirm(confirmRequest(tokenB), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(second.status, 429);
+});
+
+test("confirm route (rate limit): repeated refreshed-token submissions each consume confirm quota", async () => {
+  const db = createFakeDb();
+  const limiter = createRequestRateLimiter({ maxRequests: 2, windowMs: 60_000 });
+  // Always reports ODDS_CHANGED for this event, on every call — deterministic,
+  // not one-shot, so the refreshed token also triggers ODDS_CHANGED again.
+  const alwaysOddsChanged = async (input: OddsVerificationInput): Promise<OddsCheckResult> => oddsChangedResult(1.8, input.odds);
+
+  const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+  const first = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { rateLimiter: limiter, verifyOddsFn: alwaysOddsChanged }));
+  assert.equal(first.status, 409); // consumes quota unit 1 of 2
+  const firstBody = (await json(first)) as { refreshedPreviewToken: string };
+
+  const second = await handleBetConfirm(
+    confirmRequest(firstBody.refreshedPreviewToken),
+    fakeOptions(db, { rateLimiter: limiter, verifyOddsFn: alwaysOddsChanged }),
+  );
+  assert.equal(second.status, 409); // consumes quota unit 2 of 2
+
+  const secondBody = (await json(second)) as { refreshedPreviewToken: string };
+  const third = await handleBetConfirm(
+    confirmRequest(secondBody.refreshedPreviewToken),
+    fakeOptions(db, { rateLimiter: limiter, verifyOddsFn: alwaysOddsChanged }),
+  );
+  assert.equal(third.status, 429, "the third resubmission (of a refreshed token) must be rate-limited — each resubmission is its own confirm attempt");
+});
+
+test("confirm route (rate limit): SELECTION_UNAVAILABLE also consumes quota (any request reaching verifyPreviewFreshness does)", async () => {
+  const db = createFakeDb();
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+  const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+
+  const first = await handleBetConfirm(
+    confirmRequest(token),
+    fakeOptions(db, { rateLimiter: limiter, verifyOddsFn: fakeVerifyOddsFnByEvent({ "Real Madrid vs Barcelona": notFoundResult(2.1) }) }),
+  );
+  assert.equal(first.status, 422);
+  const firstBody = (await json(first)) as { error: string };
+  assert.equal(firstBody.error, "SELECTION_UNAVAILABLE");
+
+  const tokenB = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+  const second = await handleBetConfirm(confirmRequest(tokenB), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(second.status, 429);
+});
+
+test("confirm route (rate limit): a throwing rate limiter fails open — a fresh confirm still succeeds instead of 500", async () => {
+  const db = createFakeDb();
+  const throwingLimiter: RequestRateLimiter = {
+    checkAndRecord() {
+      throw new Error("simulated limiter backend failure");
+    },
+  };
+  const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+
+  const res = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { rateLimiter: throwingLimiter }));
+  assert.equal(res.status, 200, "an optional protection failing must never turn into a 500 for the underlying confirm flow");
+});
+
+test("confirm route (rate limit): a throwing rate limiter never affects the already-confirmed idempotent fast-path (the limiter is never even called on that path)", async () => {
+  const db = createFakeDb();
+  const limiter = createRequestRateLimiter({ maxRequests: 1000, windowMs: 60_000 });
+  const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+
+  const first = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(first.status, 200);
+
+  const throwingLimiter: RequestRateLimiter = {
+    checkAndRecord() {
+      throw new Error("simulated limiter backend failure — must never be reached for an idempotent retry");
+    },
+  };
+  const retry = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { rateLimiter: throwingLimiter }));
+  assert.equal(retry.status, 200);
+  const retryBody = (await json(retry)) as { idempotent: boolean };
+  assert.equal(retryBody.idempotent, true);
+});
+
+test("confirm route (rate limit): SINGLE and EXPRESS confirmations share one per-user confirm bucket", async () => {
+  const db = twoPlayerDb();
+  const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
+
+  const singleToken = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+  const singleRes = await handleBetConfirm(confirmRequest(singleToken), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(singleRes.status, 200); // consumes the user's only quota unit via SINGLE
+
+  const expressToken = signExpressPreviewToken(expressTokenInput(), PREVIEW_SECRET);
+  const expressRes = await handleBetConfirm(confirmRequest(expressToken), fakeOptions(db, { rateLimiter: limiter }));
+  assert.equal(expressRes.status, 429, "EXPRESS must draw from the same bucket a prior SINGLE confirm already consumed for this user");
+
+  // A different Telegram user's EXPRESS confirm must be unaffected.
+  const otherExpressToken = signExpressPreviewToken(expressTokenInput({ playerId: OTHER_PLAYER_ID }), PREVIEW_SECRET);
+  const otherRes = await handleBetConfirm(
+    confirmRequest(otherExpressToken, signInitData(OTHER_TELEGRAM_ID)),
+    fakeOptions(db, { rateLimiter: limiter }),
+  );
+  assert.equal(otherRes.status, 200, "a different Telegram user must not share the exhausted user's quota");
 });
