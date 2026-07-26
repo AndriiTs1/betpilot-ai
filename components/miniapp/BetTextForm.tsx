@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { fetchBetPreview, getBetPreviewErrorMessage, type BetPreviewSuccess } from "./betPreviewApi";
+import { fetchBetPreview, getBetPreviewErrorMessage, isAiTimeoutFailure, type BetPreviewSuccess } from "./betPreviewApi";
 import {
   fetchBetConfirm,
   getBetConfirmErrorMessage,
@@ -64,6 +64,14 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
   // timeout) so a retry doesn't require re-previewing.
   const [preview, setPreview] = useState<BetPreviewSuccess | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Step 15J.3 — true only for a preview failure specifically caused by an
+  // AI-provider timeout (AI_TIMEOUT), so the editing block can swap its
+  // generic red error line for the dedicated "AI service timed out / Try
+  // again" treatment. Never derived from `error`'s string content — always
+  // set from isAiTimeoutFailure(result.failure), the same structured check
+  // betPreviewApi.ts itself exports. Reset everywhere `error` is reset, so
+  // it can never outlive the failure that set it.
+  const [isTimeoutError, setIsTimeoutError] = useState(false);
 
   // inFlightRef guards against a double click firing two requests: React
   // state updates aren't guaranteed to be visible to a second synchronous
@@ -119,6 +127,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
 
     setPhase("previewing");
     setError(null);
+    setIsTimeoutError(false);
 
     const result = await fetchBetPreview(tg.initData, message.trim());
 
@@ -126,7 +135,15 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     if (!isMountedRef.current || requestTokenRef.current !== myRequest) return;
 
     if (!result.ok) {
+      // Step 15J.3 — the original text is never cleared/touched here (only
+      // `phase`/`error`/`isTimeoutError` change), no preview/token is ever
+      // created on this path, and `canSubmitPreview` (phase === "editing")
+      // is what makes tapping the button again — now labeled "Try again"
+      // for this specific failure — a genuine retry of the same message,
+      // guarded by the same inFlightRef/canSubmitPreview double-submit
+      // protection every other preview attempt already has.
       setPhase("editing");
+      setIsTimeoutError(isAiTimeoutFailure(result.failure));
       setError(getBetPreviewErrorMessage(result.failure));
       triggerHaptic("error");
       return;
@@ -150,6 +167,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     setPreview(null);
     setPhase("editing");
     setError(null);
+    setIsTimeoutError(false);
   }
 
   async function handleConfirm() {
@@ -184,6 +202,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
 
     setPhase("confirming");
     setError(null);
+    setIsTimeoutError(false);
 
     let result;
     try {
@@ -281,20 +300,41 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
             type="button"
             onClick={handlePreviewSubmit}
             disabled={!canSubmitPreview}
-            aria-label="Preview bet"
+            aria-label={isTimeoutError ? "Try again" : "Preview bet"}
             className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
             style={{
               background: "#60E84A",
               color: "#04170C",
             }}
           >
-            {phase === "previewing" ? "Checking bet..." : "Preview bet"}
+            {phase === "previewing" ? "Checking bet..." : isTimeoutError ? "Try again" : "Preview bet"}
           </button>
 
-          {error && (
-            <p role="alert" className="mt-3 whitespace-pre-line text-sm text-red-400">
-              {error}
-            </p>
+          {/* Step 15J.3 — a dedicated, non-alarming block for AI_TIMEOUT:
+              the message was fine, nothing was rejected, the player just
+              needs to tap the (now "Try again"-labeled) button above once
+              more. Message text is left exactly as typed — this block
+              never clears or touches it, and the button above resubmits
+              that same, still-editable text. */}
+          {isTimeoutError ? (
+            <div
+              role="alert"
+              className="mt-3 rounded-2xl p-4"
+              style={{ background: "rgba(255,255,255,0.03)", border: "1px solid #E8B84A33" }}
+            >
+              <p className="text-sm font-semibold" style={{ color: "#E8B84A" }}>
+                AI service timed out
+              </p>
+              <p className="mt-1 text-xs leading-relaxed text-slate-400">
+                Your bet was not rejected. The analysis took too long. Please try again.
+              </p>
+            </div>
+          ) : (
+            error && (
+              <p role="alert" className="mt-3 whitespace-pre-line text-sm text-red-400">
+                {error}
+              </p>
+            )
           )}
         </div>
       )}

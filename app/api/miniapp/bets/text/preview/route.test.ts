@@ -398,3 +398,68 @@ test("text preview (Step 15I): a SINGLE message with no odds mentioned returns t
   assert.equal(typeof body.previewToken, "string");
   assert.ok(body.previewToken.length > 0, "a usable, non-empty preview token must be issued");
 });
+
+// ---------------------------------------------------------------------
+// Step 15J.3 — a parser-layer timeout (parsed.code === "timeout") must be
+// reported as its own AI_TIMEOUT/504, mirroring the screenshot preview
+// route's identical distinction, never collapsed into the generic
+// PARSE_FAILED/422 "we couldn't understand this bet" response.
+// ---------------------------------------------------------------------
+
+test("Step 15J.3 (A): a parser timeout returns 504 AI_TIMEOUT, with no raw SDK error text in the response", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const response = await handleTextPreview(
+    buildRequest(initData, { message: "Real Madrid win, stake 100" }),
+    baseOptions({
+      parseBetSlip: fakeParseBetSlip({ valid: false, error: "Request timed out.", code: "timeout" }),
+    }),
+  );
+
+  assert.equal(response.status, 504);
+  const body = await response.json();
+  assert.deepEqual(body, { error: "AI_TIMEOUT" }, "the body must be exactly this safe, minimal shape — no detail field, no raw Anthropic error text");
+  const bodyText = JSON.stringify(body);
+  assert.equal(bodyText.includes("Request timed out"), false, "the raw SDK error message must never reach the client");
+});
+
+test("Step 15J.3 (B): a genuine parser rejection (reject_bet, no code) still returns 422 PARSE_FAILED, unchanged", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const response = await handleTextPreview(
+    buildRequest(initData, { message: "hello there" }),
+    baseOptions({
+      parseBetSlip: fakeParseBetSlip({ valid: false, error: "Message does not appear to be a bet request" }),
+    }),
+  );
+
+  assert.equal(response.status, 422);
+  const body = await response.json();
+  assert.deepEqual(body, { error: "PARSE_FAILED", detail: "Unable to understand the bet message" });
+});
+
+test("Step 15J.3 (C): a Zod/schema validation failure (no code field) also returns 422 PARSE_FAILED, not AI_TIMEOUT", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const response = await handleTextPreview(
+    buildRequest(initData, { message: "Real Madrid win, stake -5" }),
+    baseOptions({
+      // Shape a real betFieldsSchema.safeParse failure would produce:
+      // valid:false, a Zod error message, and no `code` at all (only a
+      // genuine Anthropic.APIConnectionTimeoutError sets code:"timeout" —
+      // see lib/ai/betParser.ts's parseTextSlipWithClaude).
+      parseBetSlip: fakeParseBetSlip({ valid: false, error: "stake: Number must be greater than 0" }),
+    }),
+  );
+
+  assert.equal(response.status, 422);
+  const body = await response.json();
+  assert.deepEqual(body, { error: "PARSE_FAILED", detail: "Unable to understand the bet message" });
+});
+
+test("Step 15J.3 (F): a successful preview is completely unaffected by the new timeout branch", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const response = await handleTextPreview(buildRequest(initData, { message: "Real Madrid win, stake 100, odds 1.90" }), baseOptions());
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.preview.type, "SINGLE");
+  assert.equal(typeof body.previewToken, "string");
+});

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getBetPreviewErrorMessage } from "./betPreviewApi";
+import { getBetPreviewErrorMessage, isAiTimeoutFailure } from "./betPreviewApi";
 
 // Focused coverage for the client-side error-message mapping — the actual
 // fetchBetPreview() network/parsing logic is exercised indirectly by the
@@ -40,4 +40,33 @@ test("getBetPreviewErrorMessage: network/timeout/invalid_response keep their exi
   assert.equal(getBetPreviewErrorMessage({ kind: "network" }), "Unable to connect. Check your internet connection.");
   assert.equal(getBetPreviewErrorMessage({ kind: "timeout" }), "The request took too long. Please try again.");
   assert.equal(getBetPreviewErrorMessage({ kind: "invalid_response" }), "Something went wrong. Please try again.");
+});
+
+// ---------------------------------------------------------------------
+// Step 15J.3 — AI_TIMEOUT is a parser-layer timeout, distinguished from
+// PARSE_FAILED so BetTextForm can show its own dedicated "AI service timed
+// out / Try again" UI instead of the misleading "we couldn't understand
+// this bet" message.
+// ---------------------------------------------------------------------
+
+test("getBetPreviewErrorMessage: AI_TIMEOUT has its own honest message, distinct from PARSE_FAILED, and never claims the bet was rejected", () => {
+  const message = getBetPreviewErrorMessage({ kind: "http", code: "AI_TIMEOUT" });
+  assert.equal(message, "Your bet was not rejected. The analysis took too long. Please try again.");
+  assert.notEqual(message, getBetPreviewErrorMessage({ kind: "http", code: "PARSE_FAILED" }));
+});
+
+test("isAiTimeoutFailure: true only for kind:http code:AI_TIMEOUT", () => {
+  assert.equal(isAiTimeoutFailure({ kind: "http", code: "AI_TIMEOUT" }), true);
+});
+
+test("isAiTimeoutFailure: false for PARSE_FAILED and every other http code", () => {
+  assert.equal(isAiTimeoutFailure({ kind: "http", code: "PARSE_FAILED" }), false);
+  assert.equal(isAiTimeoutFailure({ kind: "http", code: "PLAYER_NOT_FOUND" }), false);
+  assert.equal(isAiTimeoutFailure({ kind: "http", code: "UNKNOWN" }), false);
+});
+
+test("isAiTimeoutFailure: false for non-http failure kinds (network/timeout/invalid_response)", () => {
+  assert.equal(isAiTimeoutFailure({ kind: "network" }), false);
+  assert.equal(isAiTimeoutFailure({ kind: "timeout" }), false);
+  assert.equal(isAiTimeoutFailure({ kind: "invalid_response" }), false);
 });

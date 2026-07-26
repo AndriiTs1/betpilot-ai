@@ -145,6 +145,18 @@ export async function handleTextPreview(
       // server-side only, never in the response. Doesn't include the
       // player's message or any auth material.
       console.error("POST /api/miniapp/bets/text/preview: parse failed:", parsed.error);
+
+      // Step 15J.3 — a parser-layer timeout gets its own honest response,
+      // never folded into PARSE_FAILED's "we couldn't understand this bet"
+      // (the message was perfectly understandable; Claude just never
+      // finished in time). Mirrors the screenshot preview route's own
+      // identical distinction (app/api/miniapp/bets/screenshot/preview/route.ts's
+      // `if (parsed.code === "timeout")` branch) byte-for-byte — same
+      // machine code, same status, same safe (raw-error-free) body shape.
+      if (parsed.code === "timeout") {
+        return NextResponse.json({ error: "AI_TIMEOUT" }, { status: 504 });
+      }
+
       return NextResponse.json(
         { error: "PARSE_FAILED", detail: "Unable to understand the bet message" },
         { status: 422 },

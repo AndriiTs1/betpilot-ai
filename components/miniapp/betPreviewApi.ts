@@ -43,6 +43,13 @@ export type BetPreviewErrorCode =
   | "INVALID_JSON"
   | "INVALID_MESSAGE"
   | "PARSE_FAILED"
+  // Step 15J.3 — a parser-layer timeout, distinguished from PARSE_FAILED:
+  // the message was understandable, Claude just didn't respond in time.
+  // Mirrors betScreenshotApi.ts's own identical code for the exact same
+  // condition (app/api/miniapp/bets/text/preview/route.ts's
+  // `parsed.code === "timeout"` branch), though the two error-code unions
+  // remain separate types, never merged into one shared union.
+  | "AI_TIMEOUT"
   | "INVALID_BET_SLIP"
   | "INTERNAL_ERROR";
 
@@ -167,6 +174,14 @@ export async function fetchBetPreview(initData: string, message: string): Promis
   return { ok: true, data: body };
 }
 
+// Step 15J.3 — the one place BetTextForm derives whether a preview failure
+// was specifically an AI timeout, so its dedicated "AI service timed out /
+// Try again" UI is never driven by string-matching getBetPreviewErrorMessage's
+// output. Structured field only (failure.kind/code), never message text.
+export function isAiTimeoutFailure(failure: BetPreviewFailure): boolean {
+  return failure.kind === "http" && failure.code === "AI_TIMEOUT";
+}
+
 export function getBetPreviewErrorMessage(failure: BetPreviewFailure): string {
   if (failure.kind === "network") return "Unable to connect. Check your internet connection.";
   if (failure.kind === "timeout") return "The request took too long. Please try again.";
@@ -187,6 +202,14 @@ export function getBetPreviewErrorMessage(failure: BetPreviewFailure): string {
       // lib/ai/betParserPrompt.ts's chatPrompt for the matching parser-side
       // policy this message must stay consistent with.
       return "We could not understand this bet. Try including the event, selection, and stake.";
+    // Step 15J.3 — fallback text only (used if this failure ever reaches a
+    // caller with just a single message slot, no dedicated UI). BetTextForm
+    // itself never calls this for an AI_TIMEOUT failure — it renders its own
+    // Title/Body/CTA block instead, gated on isAiTimeoutFailure above — but
+    // this case still exists so the switch stays exhaustive-in-spirit and
+    // this code never silently falls through to the generic default.
+    case "AI_TIMEOUT":
+      return "Your bet was not rejected. The analysis took too long. Please try again.";
     case "INVALID_BET_SLIP":
       return "This bet doesn't have a valid number of selections. Please try again.";
     case "INVALID_JSON":
