@@ -10,7 +10,7 @@ import {
   type AnyConfirmedBet,
 } from "./betConfirmApi";
 import { OddsStatus, PreviewCard } from "./BetPreviewCard";
-import { canConfirmBetSlip } from "./canConfirmBetSlip";
+import { canConfirmBetSlip, getConfirmButtonLabel } from "./canConfirmBetSlip";
 
 interface BetTextFormProps {
   onBack: () => void;
@@ -321,7 +321,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
               color: "#04170C",
             }}
           >
-            {phase === "confirming" ? "Confirming..." : "Confirm bet"}
+            {getConfirmButtonLabel(phase === "confirming", preview)}
           </button>
 
           <button

@@ -16,7 +16,7 @@ import {
 } from "./betConfirmApi";
 import { OddsStatus, PreviewCard } from "./BetPreviewCard";
 import type { BetPreviewSuccess } from "./betPreviewApi";
-import { canConfirmBetSlip } from "./canConfirmBetSlip";
+import { canConfirmBetSlip, getConfirmButtonLabel } from "./canConfirmBetSlip";
 
 interface BetScreenshotFormProps {
   onBack: () => void;
@@ -445,7 +445,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
                 color: "#04170C",
               }}
             >
-              {phase === "confirming" ? "Confirming..." : "Confirm bet"}
+              {getConfirmButtonLabel(phase === "confirming", preview)}
             </button>
 
             <button

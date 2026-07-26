@@ -149,12 +149,22 @@ export function OddsStatus({ preview }: { preview: BetPreview }) {
 
   const selection = preview.selections[0];
 
+  // Step 15J.1 — the backend now blocks confirmation outright whenever this
+  // is null (app/api/miniapp/bets/text/confirm/route.ts's
+  // ODDS_REQUIRED_BEFORE_CONFIRMATION), so this can no longer say "add odds
+  // to verify" (odds are optional; the provider is expected to supply and
+  // verify them automatically) or otherwise imply the bet is still
+  // submittable — see components/miniapp/canConfirmBetSlip.ts's
+  // hasUnresolvedSingleOdds, which gates the Confirm button off this exact
+  // same condition. Deliberately not more specific about *why* the lookup
+  // didn't resolve (event not found vs. provider unavailable vs. mapping
+  // failure, etc.) — that distinction is server-side only.
   if (selection.submittedOdds === null) {
     return (
       <StatusBox
-        tone="neutral"
-        label="Odds not provided"
-        description="Add odds to verify them against the bookmaker feed."
+        tone="warning"
+        label="Odds unavailable"
+        description="This bet cannot be confirmed because current odds are unavailable. Try again later or edit your bet."
       />
     );
   }
