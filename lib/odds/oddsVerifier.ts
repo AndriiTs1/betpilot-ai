@@ -200,6 +200,10 @@ interface OddsApiBookmaker {
 
 interface OddsApiEvent {
   id: string;
+  // Step 16B — The Odds API already sends this on every event; not read
+  // until now. Used only for semantic dedup's tolerant time-window check
+  // below (never for matching/scoring itself).
+  commence_time?: string;
   home_team: string;
   away_team: string;
   bookmakers: OddsApiBookmaker[];
@@ -256,6 +260,63 @@ function findMatchingEvent(events: OddsApiEvent[], betEvent: string): EventMatch
   if (!best) return { kind: "NOT_FOUND" };
   if (tiedWithBest) return { kind: "AMBIGUOUS" };
   return { kind: "FOUND", event: best.event };
+}
+
+// Step 16B — real-world provider data quality issue, confirmed live: The
+// Odds API can list the exact same real-world fixture twice under two
+// DIFFERENT event ids within a single competition response (observed for
+// Serie A's "Torino vs AC Milan" — same two teams, ~30 hours apart in
+// stated kickoff time, evidently a not-yet-finalized/inconsistently
+// re-quoted schedule slot rather than two genuinely separate meetings).
+// findMatchingEvent()'s id-based dedup (Array.from(new Map(...))) cannot
+// catch this — the ids really are different — so this runs first and
+// collapses same-team-pairing entries whose kickoff times are close enough
+// to plausibly be the same match, before ambiguity detection ever sees
+// them. A genuine same-season home-and-away rematch (kickoffs typically
+// months apart) is far outside SAME_FIXTURE_TIME_WINDOW_MS and is
+// correctly left as two separate events.
+const SAME_FIXTURE_TIME_WINDOW_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+
+function isSameFixture(a: OddsApiEvent, b: OddsApiEvent): boolean {
+  if (normalizeTeamName(a.home_team) !== normalizeTeamName(b.home_team)) return false;
+  if (normalizeTeamName(a.away_team) !== normalizeTeamName(b.away_team)) return false;
+
+  // Neither/either side missing a kickoff time — team pairing alone is the
+  // only signal available; a competition genuinely rematching the same two
+  // teams within one fetch's near-term window is not a realistic case this
+  // codebase's supported leagues produce.
+  if (!a.commence_time || !b.commence_time) return true;
+
+  const aTime = Date.parse(a.commence_time);
+  const bTime = Date.parse(b.commence_time);
+  if (Number.isNaN(aTime) || Number.isNaN(bTime)) return true;
+
+  return Math.abs(aTime - bTime) <= SAME_FIXTURE_TIME_WINDOW_MS;
+}
+
+// Merges bookmakers from every record recognized as the same fixture —
+// never silently drops a real bookmaker price (e.g. Pinnacle) just because
+// it happened to be listed under whichever duplicate record processed
+// second. Order of first appearance is preserved for which "event" survives
+// (id, commence_time, team name casing all come from whichever record was
+// encountered first) — matching semantics only, never used to invent a
+// canonical id.
+function dedupeEventsSemantically(events: readonly OddsApiEvent[]): OddsApiEvent[] {
+  const merged: OddsApiEvent[] = [];
+
+  for (const event of events) {
+    const existingIndex = merged.findIndex((kept) => isSameFixture(kept, event));
+    if (existingIndex === -1) {
+      merged.push(event);
+    } else {
+      merged[existingIndex] = {
+        ...merged[existingIndex],
+        bookmakers: [...merged[existingIndex].bookmakers, ...event.bookmakers],
+      };
+    }
+  }
+
+  return merged;
 }
 
 function pickBookmaker(
@@ -538,7 +599,15 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
   // fixture must never be double-counted (which would otherwise make
   // findMatchingEvent's own ambiguity tie-break fire for what is actually
   // one single event seen twice, not two different ones).
-  const dedupedEvents = Array.from(new Map(events.map((event) => [event.id, event])).values());
+  const dedupedById = Array.from(new Map(events.map((event) => [event.id, event])).values());
+
+  // Step 16B — dedupe by SEMANTIC fixture identity next: id-based dedup
+  // alone does not catch The Odds API's own confirmed real-world quirk of
+  // relisting the exact same match under a genuinely different id (see
+  // dedupeEventsSemantically's own comment). Runs after id-based dedup,
+  // before matching/ambiguity detection, so a duplicate provider record
+  // never produces a false AMBIGUOUS_EVENT.
+  const dedupedEvents = dedupeEventsSemantically(dedupedById);
 
   const matchResult = findMatchingEvent(dedupedEvents, bet.event);
 

@@ -448,9 +448,16 @@ test("verifyOdds: numeric odds outside tolerance — full result shape unchanged
 // competitions were actually queried.
 // ---------------------------------------------------------------------
 
-function h2hEventWithId(id: string, homeTeam: string, awayTeam: string, outcomes: OutcomeFixture[]): unknown {
+function h2hEventWithId(
+  id: string,
+  homeTeam: string,
+  awayTeam: string,
+  outcomes: OutcomeFixture[],
+  commenceTime?: string,
+): unknown {
   return {
     id,
+    commence_time: commenceTime,
     home_team: homeTeam,
     away_team: awayTeam,
     bookmakers: [{ key: "pinnacle", title: "Pinnacle", markets: [{ key: "h2h", outcomes }] }],
@@ -597,23 +604,100 @@ test("Step 16A: the same fixture returned by more than one merged competition is
   assert.doesNotMatch(result.note ?? "", /Ambiguous/);
 });
 
-test("Step 16A: two genuinely different events tied at the same best score across leagues return an ambiguity result, never an arbitrary pick", async () => {
-  // Two DIFFERENT ids, identical team names, in two different competitions
-  // (a plausible real scenario: a club and its reserve/B-team both
-  // registered similarly, or duplicate test-data-shaped listings) — neither
-  // may be silently preferred by league order.
+test("Step 16A/16B: two genuinely different events tied at the same best score, kickoffs months apart, return an ambiguity result, never an arbitrary pick", async () => {
+  // Two DIFFERENT ids, identical team names, in two different competitions,
+  // with kickoff times MONTHS apart (a plausible real scenario: a genuine
+  // home-and-away rematch, or a club and its reserve/B-team both registered
+  // similarly) — far outside Step 16B's semantic-dedup time window, so
+  // these must NOT be merged; neither may be silently preferred by league
+  // order either.
   mockEventsBySportKey({
-    soccer_epl: [h2hEventWithId("evt-a", "Sporting FC", "Athletic FC", standardOutcomes("Sporting FC", "Athletic FC", 2.0, 3.0))],
+    soccer_epl: [
+      h2hEventWithId("evt-a", "Sporting FC", "Athletic FC", standardOutcomes("Sporting FC", "Athletic FC", 2.0, 3.0), "2026-03-01T15:00:00Z"),
+    ],
     soccer_spain_la_liga: [],
     soccer_italy_serie_a: [],
     soccer_germany_bundesliga: [],
     soccer_france_ligue_one: [],
-    soccer_uefa_champs_league: [h2hEventWithId("evt-b", "Sporting FC", "Athletic FC", standardOutcomes("Sporting FC", "Athletic FC", 2.2, 2.8))],
+    soccer_uefa_champs_league: [
+      h2hEventWithId("evt-b", "Sporting FC", "Athletic FC", standardOutcomes("Sporting FC", "Athletic FC", 2.2, 2.8), "2026-09-01T15:00:00Z"),
+    ],
   });
 
   const result = await verifyOdds(bet({ sport: "football", event: "Sporting FC vs Athletic FC", selection: "Sporting FC", odds: 2.0 }));
 
   assert.equal(result.matched, false);
   assert.equal(result.sourceOdds, null, "an ambiguous match must never fabricate a source price from either candidate");
+  assert.match(result.note ?? "", /Ambiguous event match/);
+});
+
+// ---------------------------------------------------------------------
+// Step 16B — semantic dedup: the same real fixture can be listed twice by
+// the provider under two DIFFERENT event ids (confirmed live: The Odds
+// API's own Serie A feed listed "Torino vs AC Milan" twice, ~30 hours apart
+// in stated kickoff time). Id-based dedup alone cannot catch this — must be
+// collapsed before ambiguity detection, or a real, correctly-routed bet
+// falsely reports AMBIGUOUS_EVENT/NOT_FOUND instead of the actual price.
+// ---------------------------------------------------------------------
+
+test("Step 16B: the same fixture listed twice under different ids, kickoffs close together, is treated as one event — no false AMBIGUOUS_EVENT", async () => {
+  const { requestedSportKeys } = mockEventsBySportKey({
+    soccer_italy_serie_a: [
+      h2hEventWithId("evt-dup-a", "Torino", "AC Milan", standardOutcomes("Torino", "AC Milan", 4.2, 1.78), "2026-08-22T13:00:00Z"),
+      h2hEventWithId("evt-dup-b", "Torino", "AC Milan", standardOutcomes("Torino", "AC Milan", 4.2, 1.78), "2026-08-23T18:45:00Z"),
+    ],
+  });
+
+  const result = await verifyOdds(bet({ sport: "serie a", event: "Torino vs AC Milan", selection: "AC Milan Win", odds: null }));
+
+  assert.deepEqual(requestedSportKeys, ["soccer_italy_serie_a"]);
+  assert.equal(result.matched, true, "a same-fixture duplicate must never produce a false AMBIGUOUS_EVENT/NOT_FOUND");
+  assert.equal(result.sourceOdds, 1.78);
+  assert.doesNotMatch(result.note ?? "", /Ambiguous/);
+});
+
+test("Step 16B: bookmakers from both duplicate records are merged — a price present only on the second listing is still usable", async () => {
+  mockEventsBySportKey({
+    soccer_italy_serie_a: [
+      {
+        id: "evt-dup-c",
+        commence_time: "2026-08-22T13:00:00Z",
+        home_team: "Torino",
+        away_team: "AC Milan",
+        bookmakers: [{ key: "unibet_se", title: "Unibet", markets: [{ key: "h2h", outcomes: standardOutcomes("Torino", "AC Milan", 4.0, 1.9) }] }],
+      },
+      {
+        id: "evt-dup-d",
+        commence_time: "2026-08-23T18:45:00Z",
+        home_team: "Torino",
+        away_team: "AC Milan",
+        // Pinnacle is only present on this second duplicate record.
+        bookmakers: [{ key: "pinnacle", title: "Pinnacle", markets: [{ key: "h2h", outcomes: standardOutcomes("Torino", "AC Milan", 4.2, 1.78) }] }],
+      },
+    ],
+  });
+
+  const result = await verifyOdds(bet({ sport: "serie a", event: "Torino vs AC Milan", selection: "AC Milan Win", odds: null }));
+
+  assert.equal(result.matched, true);
+  assert.equal(result.bookmaker, "Pinnacle", "Pinnacle must still be picked even though it only appeared on the second duplicate record");
+  assert.equal(result.sourceOdds, 1.78);
+});
+
+test("Step 16B: a genuine same-teams rematch (kickoffs months apart) is NOT semantically deduped", async () => {
+  const { requestedSportKeys } = mockEventsBySportKey({
+    soccer_italy_serie_a: [
+      h2hEventWithId("evt-rematch-1", "Torino", "AC Milan", standardOutcomes("Torino", "AC Milan", 4.2, 1.78), "2026-03-01T13:00:00Z"),
+      h2hEventWithId("evt-rematch-2", "AC Milan", "Torino", standardOutcomes("AC Milan", "Torino", 1.6, 5.5), "2026-09-01T13:00:00Z"),
+    ],
+  });
+
+  const result = await verifyOdds(bet({ sport: "serie a", event: "Torino vs AC Milan", selection: "AC Milan Win", odds: null }));
+
+  assert.deepEqual(requestedSportKeys, ["soccer_italy_serie_a"]);
+  // Both are plausible matches for "Torino vs AC Milan" text (forward and
+  // reversed order both score confidently) but are genuinely different
+  // fixtures months apart — never merged, and never silently arbitrated.
+  assert.equal(result.matched, false);
   assert.match(result.note ?? "", /Ambiguous event match/);
 });
