@@ -938,3 +938,71 @@ test("Step 15I (D): non-SINGLE (EXPRESS) + null odds — provider lookup is NOT 
   assert.equal(result.preview.totalOdds, null);
   assert.equal(result.preview.potentialWin, null);
 });
+
+// ---------------------------------------------------------------------
+// Step 16A (10, 11) — full-pipeline integration for the exact production
+// scenario the league-routing/selection-normalization fix targets:
+// "Inter Milan vs Juventus / Inter to win / Stake 10", with an explicit
+// league so the request routes correctly regardless of provider data
+// availability at any given moment (see Step 16's own root-cause report).
+// ---------------------------------------------------------------------
+
+function interVsJuventusSlip(): ParsedBetSlip {
+  return {
+    type: "SINGLE",
+    stake: 10,
+    selections: [
+      { sport: "Football", league: "Serie A", event: "Inter Milan vs Juventus", market: null, selection: "Inter to win", submittedOdds: null },
+    ],
+  };
+}
+
+test("Step 16A (10): Inter Milan vs Juventus / Inter to win / Stake 10 — provider match produces a confirmable preview with matched odds", async () => {
+  const capturedInputs: OddsVerificationInput[] = [];
+
+  const result = await buildBetSlipPreview(interVsJuventusSlip(), "player-1", TEST_SECRET, {
+    verifyOddsFn: async (input) => {
+      capturedInputs.push(input);
+      return verified(2.1, 2.1);
+    },
+  });
+
+  assert.equal(capturedInputs.length, 1, "the provider must have been called exactly once");
+  const capturedInput = capturedInputs[0];
+  assert.equal(capturedInput.sport, "serie a", "the explicit Serie A league must route to the 'serie a' legacy sport string, not generic football");
+  assert.equal(capturedInput.selection, "Inter", "'Inter to win' must strip to the searchable participant 'Inter'");
+  assert.equal(capturedInput.odds, null, "no odds were submitted — the provider must be asked to find/verify a price, not compare against a fabricated one");
+
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[0].submittedOdds, 2.1, "the effective submitted odds must be populated from the provider-matched price");
+  assert.equal(result.preview.totalOdds, 2.1);
+  assert.equal(result.preview.potentialWin, 21, "10 stake * 2.1 odds");
+
+  // Confirmation allowed under the existing Step 15J guard: a real,
+  // finite, positive effective odds means a signed, confirmable token.
+  assert.ok(result.previewToken !== null);
+});
+
+test("Step 16A (11): a correctly routed but absent fixture still returns NOT_FOUND and never fabricates odds", async () => {
+  const result = await buildBetSlipPreview(interVsJuventusSlip(), "player-1", TEST_SECRET, {
+    verifyOddsFn: async (input) => {
+      assert.equal(input.sport, "serie a", "still correctly routed to Serie A even though no fixture exists right now");
+      // A real Step 15G verifyOdds() failed lookup never fabricates a
+      // price just because the event couldn't be matched.
+      return {
+        matched: false,
+        withinTolerance: null,
+        sourceOdds: null,
+        submittedOdds: null,
+        discrepancyPercent: null,
+        bookmaker: null,
+        note: 'No matching event found for "Inter Milan vs Juventus" in soccer_italy_serie_a',
+      };
+    },
+  });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "NOT_FOUND");
+  assert.equal(result.preview.selections[0].submittedOdds, null, "no odds may ever be fabricated for a fixture the provider genuinely could not find");
+  assert.equal(result.preview.totalOdds, null);
+  assert.equal(result.preview.potentialWin, null);
+});

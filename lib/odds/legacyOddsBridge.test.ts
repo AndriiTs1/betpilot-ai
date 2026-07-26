@@ -111,11 +111,66 @@ test("legacySelectionTextToCanonical: combined double-chance notation is NOT cla
 });
 
 test("legacySelectionTextToCanonical: a full team name or any other free text falls back to PARTICIPANT with the raw text preserved verbatim", () => {
-  for (const text of ["Real Madrid Win", "Manchester City Win", "Over 2.5", "Carlos Alcaraz"]) {
+  // Step 16A — "X Win"/"X to win"/"X wins" are no longer arbitrary free
+  // text; see the dedicated winner-phrase-stripping tests below. These
+  // fixtures deliberately avoid that recognized suffix shape so this test
+  // stays about the true fallback: text that isn't any recognized token or
+  // phrase at all.
+  for (const text of ["Real Madrid", "Manchester City", "Over 2.5", "Carlos Alcaraz"]) {
     const result = legacySelectionTextToCanonical(text);
     assert.equal(result.selectionType, "PARTICIPANT");
     assert.equal(result.marketType, "MONEYLINE_2WAY");
     assert.equal(result.participant?.name, text);
+  }
+});
+
+// ---------------------------------------------------------------------
+// Step 16A — natural winner-phrase normalization ("Inter Win", "Inter to
+// win", "Home win", ...), never hardcoding any specific club/team name.
+// ---------------------------------------------------------------------
+
+test("legacySelectionTextToCanonical: 'X Win'/'X to win'/'X wins' strip the winner-intent suffix, leaving the participant name searchable", () => {
+  for (const [text, expectedName] of [
+    ["Inter Win", "Inter"],
+    ["Inter to win", "Inter"],
+    ["Inter wins", "Inter"],
+    ["Juventus wins", "Juventus"],
+    ["Real Madrid to win", "Real Madrid"],
+  ] as const) {
+    const result = legacySelectionTextToCanonical(text);
+    assert.equal(result.selectionType, "PARTICIPANT", `"${text}" must classify as PARTICIPANT`);
+    assert.equal(result.marketType, "MONEYLINE_2WAY");
+    assert.equal(result.participant?.name, expectedName, `"${text}" must strip to "${expectedName}"`);
+  }
+});
+
+test("legacySelectionTextToCanonical: 'Home win'/'home team wins'/'Away win'/'away team wins' resolve to HOME/AWAY, not PARTICIPANT", () => {
+  for (const text of ["Home win", "home team wins", "HOME WINS"]) {
+    const result = legacySelectionTextToCanonical(text);
+    assert.equal(result.selectionType, "HOME", `"${text}" must resolve to HOME`);
+    assert.equal(result.marketType, "MONEYLINE_3WAY");
+  }
+
+  for (const text of ["Away win", "away team wins", "AWAY WINS"]) {
+    const result = legacySelectionTextToCanonical(text);
+    assert.equal(result.selectionType, "AWAY", `"${text}" must resolve to AWAY`);
+    assert.equal(result.marketType, "MONEYLINE_3WAY");
+  }
+});
+
+test("legacySelectionTextToCanonical: 'Draw' still resolves to DRAW, unaffected by winner-suffix stripping", () => {
+  const result = legacySelectionTextToCanonical("Draw");
+  assert.equal(result.selectionType, "DRAW");
+  assert.equal(result.marketType, "MONEYLINE_3WAY");
+});
+
+test("legacySelectionTextToCanonical: a real participant name is never damaged by the winner-suffix strip when there is no actual separating word boundary", () => {
+  // No literal club is named here — this proves the *mechanism* (anchored,
+  // whitespace-preceded suffix only) rather than special-casing any team.
+  for (const text of ["Darwin", "Edwin", "Corwin"]) {
+    const result = legacySelectionTextToCanonical(text);
+    assert.equal(result.selectionType, "PARTICIPANT");
+    assert.equal(result.participant?.name, text, `"${text}" must survive completely unmodified`);
   }
 });
 
@@ -145,6 +200,8 @@ test("request mapping: football DRAW selection", () => {
 });
 
 test("request mapping: basketball PARTICIPANT (team name) selection", () => {
+  // Step 16A — winner-suffix stripping applies uniformly, not just to
+  // football: "Lakers Win" -> "Lakers", the actual searchable name.
   const request = legacySelectionToCanonicalRequest({
     sport: "Basketball",
     event: "Lakers vs Celtics",
@@ -153,7 +210,7 @@ test("request mapping: basketball PARTICIPANT (team name) selection", () => {
   });
   assert.equal(request.selection.sport, "BASKETBALL");
   assert.equal(request.selection.selectionType, "PARTICIPANT");
-  assert.equal(request.selection.participant?.name, "Lakers Win");
+  assert.equal(request.selection.participant?.name, "Lakers");
 });
 
 test("request mapping: tennis PARTICIPANT (player name) selection", () => {

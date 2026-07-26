@@ -438,3 +438,182 @@ test("verifyOdds: numeric odds outside tolerance — full result shape unchanged
     note: null,
   });
 });
+
+// ---------------------------------------------------------------------
+// Step 16A — football league routing: explicit league (single sport_key),
+// no-league fallback (merged multi-key, mirroring tennis), partial
+// provider failure, full provider failure, dedup, and cross-league
+// ambiguity. A per-sport_key-aware fetch handler is needed here (unlike
+// mockEvents()'s single shared response) to prove exactly which
+// competitions were actually queried.
+// ---------------------------------------------------------------------
+
+function h2hEventWithId(id: string, homeTeam: string, awayTeam: string, outcomes: OutcomeFixture[]): unknown {
+  return {
+    id,
+    home_team: homeTeam,
+    away_team: awayTeam,
+    bookmakers: [{ key: "pinnacle", title: "Pinnacle", markets: [{ key: "h2h", outcomes }] }],
+  };
+}
+
+function sportKeyFromUrl(url: string): string {
+  const match = /\/sports\/([^/]+)\/odds\//.exec(url);
+  if (!match) throw new Error(`oddsVerifier.test.ts: could not extract sport_key from URL "${url}"`);
+  return match[1];
+}
+
+// Records every sport_key actually requested (in request order) and
+// dispatches a per-key fixture — "reject" simulates that one competition's
+// request failing outright while others may still succeed.
+function mockEventsBySportKey(bySportKey: Record<string, unknown[] | "reject">): { requestedSportKeys: string[] } {
+  const requestedSportKeys: string[] = [];
+  currentHandler = async (url: string) => {
+    const sportKey = sportKeyFromUrl(url);
+    requestedSportKeys.push(sportKey);
+    const outcome = bySportKey[sportKey];
+    if (outcome === undefined) {
+      throw new Error(`oddsVerifier.test.ts: no fixture configured for sport_key "${sportKey}"`);
+    }
+    if (outcome === "reject") {
+      throw new Error(`simulated provider failure for sport_key "${sportKey}"`);
+    }
+    return jsonResponse(outcome);
+  };
+  return { requestedSportKeys };
+}
+
+const ALL_FOOTBALL_SPORT_KEYS = [
+  "soccer_epl",
+  "soccer_spain_la_liga",
+  "soccer_italy_serie_a",
+  "soccer_germany_bundesliga",
+  "soccer_france_ligue_one",
+  "soccer_uefa_champs_league",
+];
+
+test("Step 16A (1): explicit Serie A propagation — only the Serie A provider key is requested", async () => {
+  const { requestedSportKeys } = mockEventsBySportKey({
+    soccer_italy_serie_a: [h2hEventWithId("evt-sa-1", "Inter Milan", "Juventus", standardOutcomes("Inter Milan", "Juventus", 2.1, 3.3))],
+  });
+
+  const result = await verifyOdds(bet({ sport: "serie a", event: "Inter Milan vs Juventus", selection: "Inter Milan", odds: 2.1 }));
+
+  assert.deepEqual(requestedSportKeys, ["soccer_italy_serie_a"], "only Serie A's own sport_key may ever be requested for an explicit Serie A league");
+  assert.equal(result.matched, true);
+});
+
+test("Step 16A (2): explicit EPL propagation — 'premier league' maps only to soccer_epl", async () => {
+  const { requestedSportKeys } = mockEventsBySportKey({
+    soccer_epl: [h2hEventWithId("evt-epl-1", "Arsenal", "Chelsea", standardOutcomes("Arsenal", "Chelsea", 1.9, 3.8))],
+  });
+
+  const result = await verifyOdds(bet({ sport: "premier league", event: "Arsenal vs Chelsea", selection: "Arsenal", odds: 1.9 }));
+
+  assert.deepEqual(requestedSportKeys, ["soccer_epl"]);
+  assert.equal(result.matched, true);
+});
+
+test("Step 16A (4): no-league football fallback searches more than one competition, not exclusively soccer_epl", async () => {
+  const fixtures = Object.fromEntries(ALL_FOOTBALL_SPORT_KEYS.map((key) => [key, []])) as Record<string, unknown[]>;
+  const { requestedSportKeys } = mockEventsBySportKey(fixtures);
+
+  await verifyOdds(bet({ sport: "football", event: "Some Team vs Another Team", selection: "Some Team", odds: 2.0 }));
+
+  assert.ok(requestedSportKeys.length > 1, "a no-league football lookup must search more than one competition");
+  assert.deepEqual(requestedSportKeys.slice().sort(), ALL_FOOTBALL_SPORT_KEYS.slice().sort());
+});
+
+test("Step 16A (5): cross-league event discovery — EPL has no match, Serie A does; the Serie A event is found", async () => {
+  const { requestedSportKeys } = mockEventsBySportKey({
+    soccer_epl: [h2hEventWithId("evt-epl-2", "Arsenal", "Chelsea", standardOutcomes("Arsenal", "Chelsea", 1.9, 3.8))],
+    soccer_spain_la_liga: [],
+    soccer_italy_serie_a: [h2hEventWithId("evt-sa-2", "Inter Milan", "Juventus", standardOutcomes("Inter Milan", "Juventus", 2.1, 3.3))],
+    soccer_germany_bundesliga: [],
+    soccer_france_ligue_one: [],
+    soccer_uefa_champs_league: [],
+  });
+
+  const result = await verifyOdds(bet({ sport: "football", event: "Inter Milan vs Juventus", selection: "Inter Milan", odds: 2.1 }));
+
+  assert.ok(requestedSportKeys.includes("soccer_italy_serie_a"));
+  assert.equal(result.matched, true);
+  assert.equal(result.sourceOdds, 2.1);
+});
+
+test("Step 16A (6): partial provider failure — one league request fails, another succeeds with a matching event; lookup still succeeds", async () => {
+  mockEventsBySportKey({
+    soccer_epl: "reject",
+    soccer_spain_la_liga: [],
+    soccer_italy_serie_a: [h2hEventWithId("evt-sa-3", "Inter Milan", "Juventus", standardOutcomes("Inter Milan", "Juventus", 2.1, 3.3))],
+    soccer_germany_bundesliga: [],
+    soccer_france_ligue_one: [],
+    soccer_uefa_champs_league: [],
+  });
+
+  const result = await verifyOdds(bet({ sport: "football", event: "Inter Milan vs Juventus", selection: "Inter Milan", odds: 2.1 }));
+
+  assert.equal(result.matched, true, "one failed competition request must not fail the whole lookup when another succeeds");
+});
+
+test("Step 16A (7): every provider request fails — provider failure is preserved accurately, never misreported as NOT_FOUND", async () => {
+  const fixtures = Object.fromEntries(ALL_FOOTBALL_SPORT_KEYS.map((key) => [key, "reject" as const]));
+  mockEventsBySportKey(fixtures);
+
+  const result = await verifyOdds(bet({ sport: "football", event: "Some Team vs Another Team", selection: "Some Team", odds: 2.0 }));
+
+  assert.equal(result.matched, false);
+  assert.ok(result.note?.includes("simulated provider failure"), `expected a provider-failure note, got: ${result.note}`);
+  assert.doesNotMatch(result.note ?? "", /No matching event found/);
+});
+
+test("Step 16A (8): every request succeeds but no event matches — EVENT_NOT_FOUND, no fabricated odds", async () => {
+  const fixtures = Object.fromEntries(ALL_FOOTBALL_SPORT_KEYS.map((key) => [key, []])) as Record<string, unknown[]>;
+  mockEventsBySportKey(fixtures);
+
+  const result = await verifyOdds(bet({ sport: "football", event: "Nonexistent FC vs Also Nonexistent FC", selection: "Nonexistent FC", odds: 2.0 }));
+
+  assert.equal(result.matched, false);
+  assert.equal(result.sourceOdds, null);
+  assert.match(result.note ?? "", /No matching event found/);
+});
+
+test("Step 16A: the same fixture returned by more than one merged competition is deduped, not double-counted or flagged ambiguous", async () => {
+  // Same event id "evt-dup" from two different sport_keys — a real-world
+  // edge case (a friendly listed under more than one competition feed) —
+  // must resolve as one single found event, never AMBIGUOUS.
+  mockEventsBySportKey({
+    soccer_epl: [h2hEventWithId("evt-dup", "Arsenal", "Chelsea", standardOutcomes("Arsenal", "Chelsea", 1.9, 3.8))],
+    soccer_spain_la_liga: [],
+    soccer_italy_serie_a: [h2hEventWithId("evt-dup", "Arsenal", "Chelsea", standardOutcomes("Arsenal", "Chelsea", 1.9, 3.8))],
+    soccer_germany_bundesliga: [],
+    soccer_france_ligue_one: [],
+    soccer_uefa_champs_league: [],
+  });
+
+  const result = await verifyOdds(bet({ sport: "football", event: "Arsenal vs Chelsea", selection: "Arsenal", odds: 1.9 }));
+
+  assert.equal(result.matched, true);
+  assert.doesNotMatch(result.note ?? "", /Ambiguous/);
+});
+
+test("Step 16A: two genuinely different events tied at the same best score across leagues return an ambiguity result, never an arbitrary pick", async () => {
+  // Two DIFFERENT ids, identical team names, in two different competitions
+  // (a plausible real scenario: a club and its reserve/B-team both
+  // registered similarly, or duplicate test-data-shaped listings) — neither
+  // may be silently preferred by league order.
+  mockEventsBySportKey({
+    soccer_epl: [h2hEventWithId("evt-a", "Sporting FC", "Athletic FC", standardOutcomes("Sporting FC", "Athletic FC", 2.0, 3.0))],
+    soccer_spain_la_liga: [],
+    soccer_italy_serie_a: [],
+    soccer_germany_bundesliga: [],
+    soccer_france_ligue_one: [],
+    soccer_uefa_champs_league: [h2hEventWithId("evt-b", "Sporting FC", "Athletic FC", standardOutcomes("Sporting FC", "Athletic FC", 2.2, 2.8))],
+  });
+
+  const result = await verifyOdds(bet({ sport: "football", event: "Sporting FC vs Athletic FC", selection: "Sporting FC", odds: 2.0 }));
+
+  assert.equal(result.matched, false);
+  assert.equal(result.sourceOdds, null, "an ambiguous match must never fabricate a source price from either candidate");
+  assert.match(result.note ?? "", /Ambiguous event match/);
+});

@@ -19,6 +19,7 @@ import type { CanonicalEvent, CanonicalLeague, CanonicalParticipant, Sport } fro
 import type { VerifySelectionRequest } from "./oddsProvider";
 import type { VerificationResult } from "./verification";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
+import { resolveFootballLeague } from "./footballLeagues";
 
 /* -------------------------------------------------------------------------- */
 /* Legacy sport string -> canonical Sport                                     */
@@ -68,27 +69,16 @@ export function legacySportToCanonical(sport: string): Sport {
 
 // Honest CanonicalLeague population for the six football-league-specific
 // legacy sport strings — closed, exact lookup only (no fuzzy/substring
-// matching), and never extended beyond what oddsVerifier.ts's own
-// SPORT_KEY_ALIASES already recognizes as a distinct sport_key (or, for
-// "premier league", the same sport_key the generic default already
-// resolves to, represented honestly rather than silently substituted).
-// Generic football aliases (football/soccer/футбол) are deliberately
-// absent from this table — they fabricate no league. No sport_key or
-// other provider-specific value ever appears here; this is purely a
-// human-readable league NAME, matching what CanonicalLeague already
-// exists to hold (lib/odds/domain.ts).
-const FOOTBALL_LEAGUE_NAMES: Readonly<Record<string, CanonicalLeague>> = {
-  "la liga": { name: "La Liga" },
-  "serie a": { name: "Serie A" },
-  bundesliga: { name: "Bundesliga" },
-  "ligue 1": { name: "Ligue 1" },
-  "champions league": { name: "UEFA Champions League" },
-  "uefa champions league": { name: "UEFA Champions League" },
-  "premier league": { name: "Premier League" },
-};
-
+// matching), backed by lib/odds/footballLeagues.ts's single centralized
+// alias table (Step 16A) rather than a second, independently-maintained
+// one. Generic football aliases (football/soccer/футбол) are deliberately
+// absent from that table — they fabricate no league. No sport_key or other
+// provider-specific value ever appears here; this is purely a
+// human-readable league NAME, matching what CanonicalLeague already exists
+// to hold (lib/odds/domain.ts).
 export function legacyFootballLeagueFromSportString(sport: string): CanonicalLeague | undefined {
-  return FOOTBALL_LEAGUE_NAMES[sport.toLowerCase().trim().replace(/\s+/g, " ")];
+  const resolved = resolveFootballLeague(sport);
+  return resolved ? { name: resolved.displayName } : undefined;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -120,11 +110,46 @@ const HOME_TOKENS: ReadonlySet<string> = new Set(["1", "п1", "p1", "home"]);
 const DRAW_TOKENS: ReadonlySet<string> = new Set(["x", "х", "draw", "ничья"]);
 const AWAY_TOKENS: ReadonlySet<string> = new Set(["2", "п2", "p2", "away"]);
 
+// Step 16A — natural winner phrases ("Inter Win", "Inter to win", "Inter
+// wins", "Home win", "away team wins", ...). Only a recognized TRAILING
+// winner-intent suffix is ever stripped, anchored to the end of the string
+// via `$` and requiring a preceding word boundary/whitespace — so a real
+// participant name that merely contains a similar-looking substring with
+// no actual separating space before it (there is no realistic team name
+// this could misfire on; the anchor makes that structurally true, not just
+// empirically) is never damaged, and the strip never fires more than once
+// per selection. This never hardcodes any team/club name — it recognizes
+// only the phrasing pattern, exactly like HOME/DRAW/AWAY_TOKENS above.
+const WINNER_SUFFIX_REGEX = /\s+(?:to\s+win|wins|win)$/i;
+
+// "home"/"home team" and "away"/"away team" — recognized only AFTER a
+// winner suffix was actually stripped (a bare "home"/"away" is already
+// handled by HOME_TOKENS/AWAY_TOKENS above); this only extends recognition
+// to the "<side> team wins" phrasing, never a different token set.
+const HOME_TEAM_PHRASES: ReadonlySet<string> = new Set(["home", "home team"]);
+const AWAY_TEAM_PHRASES: ReadonlySet<string> = new Set(["away", "away team"]);
+
 export function legacySelectionTextToCanonical(raw: string): ClassifiedSelection {
-  const key = raw.trim().toLowerCase();
+  const trimmed = raw.trim();
+  const key = trimmed.toLowerCase();
   if (HOME_TOKENS.has(key)) return { marketType: "MONEYLINE_3WAY", selectionType: "HOME" };
   if (DRAW_TOKENS.has(key)) return { marketType: "MONEYLINE_3WAY", selectionType: "DRAW" };
   if (AWAY_TOKENS.has(key)) return { marketType: "MONEYLINE_3WAY", selectionType: "AWAY" };
+
+  const withoutWinnerSuffix = trimmed.replace(WINNER_SUFFIX_REGEX, "").trim();
+
+  if (withoutWinnerSuffix.length > 0 && withoutWinnerSuffix.length !== trimmed.length) {
+    const strippedKey = withoutWinnerSuffix.toLowerCase();
+    if (HOME_TEAM_PHRASES.has(strippedKey)) return { marketType: "MONEYLINE_3WAY", selectionType: "HOME" };
+    if (AWAY_TEAM_PHRASES.has(strippedKey)) return { marketType: "MONEYLINE_3WAY", selectionType: "AWAY" };
+    // A genuine participant candidate — the winner-intent suffix stripped,
+    // the remainder (e.g. "Inter") is what's actually searchable against
+    // provider outcome names. The ORIGINAL raw text is never lost: it stays
+    // available to the caller via BetSlipSelectionInput.selection, which
+    // this function does not read from or write back to.
+    return { marketType: "MONEYLINE_2WAY", selectionType: "PARTICIPANT", participant: { name: withoutWinnerSuffix } };
+  }
+
   return { marketType: "MONEYLINE_2WAY", selectionType: "PARTICIPANT", participant: { name: raw } };
 }
 
@@ -193,6 +218,14 @@ function legacyEventToCanonical(sport: Sport, eventName: string, league: Canonic
 // stays with the caller.
 export interface LegacyVerifiableSelection {
   readonly sport: string;
+  // Step 16A — an explicit, player-stated league name (e.g. "Serie A"),
+  // when known. Passed through HONESTLY, exactly as given — this function
+  // never validates, normalizes, or aliases it (that decision belongs to
+  // the provider adapter, lib/odds/theOddsApiProvider.ts, which is the only
+  // place that knows which leagues are actually supported). Absent/null
+  // both mean "no league stated" and fall back to the existing
+  // sport-string-based reconstruction below, unchanged.
+  readonly league?: string | null;
   readonly event: string;
   readonly selection: string;
   readonly submittedOdds: number | null;
@@ -204,11 +237,17 @@ export interface LegacyVerifiableSelection {
 // verification OUTPUTS, never request inputs.
 export function legacySelectionToCanonicalRequest(selection: LegacyVerifiableSelection): VerifySelectionRequest {
   const sport = legacySportToCanonical(selection.sport);
-  // Only ever non-undefined when selection.sport is one of the six
-  // recognized football-league names — legacyFootballLeagueFromSportString
-  // returns undefined for every generic/non-football/unrecognized string,
-  // so this never fabricates a league (see that function's own comment).
-  const league = legacyFootballLeagueFromSportString(selection.sport);
+  // Step 16A — an explicit league (selection.league) takes priority over
+  // the older, narrower fallback (selection.sport itself happening to BE
+  // one of the six recognized league name strings — legacyFootballLeagueFromSportString,
+  // kept for backward compatibility). Neither ever fabricates a league:
+  // the explicit path passes through selection.league's own text verbatim
+  // (trimmed only), whatever it is — including a real but unsupported
+  // league name, which the provider adapter alone is responsible for
+  // recognizing as unsupported rather than silently substituting.
+  const league = selection.league
+    ? { name: selection.league.trim() }
+    : legacyFootballLeagueFromSportString(selection.sport);
   const event = legacyEventToCanonical(sport, selection.event, league);
   const classified = legacySelectionTextToCanonical(selection.selection);
 

@@ -14,6 +14,15 @@ import type { ParsedBet } from "@/lib/ai/betParser";
 
 export interface BetSlipSelectionInput {
   sport: string;
+  // Step 16A — optional (not required-nullable like submittedOdds below)
+  // specifically so every existing caller/fixture that builds this shape
+  // without a league keeps compiling and behaving exactly as before,
+  // unchanged — this field is purely additive. Absent (undefined) and
+  // explicitly-null both mean "no league stated"; callers may use either.
+  // A human-readable league name as stated (e.g. "Serie A"), never a
+  // provider sport_key — see lib/odds/footballLeagues.ts for where that
+  // name is actually resolved/validated.
+  league?: string | null;
   event: string;
   market: string | null;
   selection: string;

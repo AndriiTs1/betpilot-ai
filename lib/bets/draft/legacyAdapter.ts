@@ -1,11 +1,13 @@
 // Step 8A — deterministic adapter: UniversalBetDraft -> ParsedBetSlip.
 //
-// Produces the EXACT existing ParsedBetSlip shape (lib/bets/betSlip.ts,
-// untouched by this step) so every current consumer — buildBetSlipPreview,
-// both previewToken shapes, Prisma writes — keeps working completely
-// unchanged. league/period/line/warnings/confidence/participants are
-// deliberately NOT threaded through here: ParsedBetSlip has no slot for
-// them, and adding one is explicitly out of this step's scope.
+// Produces the EXACT existing ParsedBetSlip shape (lib/bets/betSlip.ts) so
+// every current consumer — buildBetSlipPreview, both previewToken shapes,
+// Prisma writes — keeps working completely unchanged. period/line/
+// warnings/confidence/participants are still deliberately NOT threaded
+// through here: ParsedBetSlip has no slot for them, and adding one remains
+// out of scope. league IS threaded through as of Step 16A (see
+// optionalLegacyLeagueText below) — BetSlipSelectionInput.league now exists
+// specifically to carry it.
 //
 // This file makes no business decisions: it never touches confirmation
 // eligibility, provider support, acceptedOdds, currentOdds, combined odds,
@@ -14,7 +16,7 @@
 // unchanged.
 
 import type { ParsedBetSlip, BetSlipSelectionInput } from "@/lib/bets/betSlip";
-import type { BetDraftField, UniversalBetDraft } from "./domain";
+import type { BetDraftField, BetDraftLeague, UniversalBetDraft } from "./domain";
 
 export type LegacyAdapterErrorCode = "INVALID_STAKE" | "INVALID_SUBMITTED_ODDS" | "INVALID_SPORT";
 
@@ -69,11 +71,28 @@ function optionalLegacyDisplayText<T>(field: BetDraftField<T>): string | null {
   return field.rawText ?? String(field.value);
 }
 
+// Step 16A — league is optional in legacy, same "prefer whatever text is
+// actually available" reasoning as optionalLegacyDisplayText above, but
+// reads BetDraftLeague's own resolvedName first when EXTRACTED (already
+// alias-normalized by lib/bets/draft/normalize.ts, e.g. "serie a" ->
+// "Serie A") since that is a more useful signal downstream
+// (lib/odds/footballLeagues.ts) than raw text alone. Falls back to the
+// field's own rawText for every other state (UNKNOWN/UNSUPPORTED/MISSING
+// with rawText) so a league that lib/bets/draft/normalize.ts's own,
+// separately-maintained alias table didn't recognize (e.g. "EPL") still
+// survives to reach lib/odds/footballLeagues.ts's alias table instead of
+// being silently dropped — exactly the data loss this step fixes.
+function optionalLegacyLeagueText(field: BetDraftField<BetDraftLeague>): string | null {
+  if (field.state === "EXTRACTED") return field.value.resolvedName ?? field.value.rawText;
+  return field.rawText ?? null;
+}
+
 export function universalBetDraftToParsedBetSlip(draft: UniversalBetDraft): ParsedBetSlip {
   const stake = toRequiredNumber(draft.stake, "INVALID_STAKE", "stake");
 
   const selections: BetSlipSelectionInput[] = draft.selections.map((selection, index) => ({
     sport: requiredLegacyText(selection.sport, "INVALID_SPORT", `selections[${index}].sport`),
+    league: optionalLegacyLeagueText(selection.league),
     event: selection.event.rawText,
     market: optionalLegacyDisplayText(selection.marketType),
     selection: selection.selectionRawText,

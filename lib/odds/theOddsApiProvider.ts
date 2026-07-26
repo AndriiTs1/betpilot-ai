@@ -15,6 +15,7 @@
 import { verifyOdds, type OddsVerificationInput } from "./oddsVerifier";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { validateCanonicalSelection, type CanonicalSelection, type Sport } from "./domain";
+import { resolveFootballLeague } from "./footballLeagues";
 import {
   createFailedResult,
   createOddsChangedResult,
@@ -52,13 +53,18 @@ const CAPABILITIES: OddsProviderCapabilities = {
   // h2h/moneyline only — oddsVerifier.ts:406 hardcodes `markets=h2h`;
   // oddsVerifier.ts:330 only ever reads the "h2h" market key.
   supportedMarketTypes: ["MONEYLINE_2WAY", "MONEYLINE_3WAY"],
-  leagueSelectionSupported: false,
+  // Step 16A — true as of this step: a stated, supported football league
+  // (lib/odds/footballLeagues.ts) now actually routes the request to that
+  // league's own sport_key, and an unsupported one is honestly reported as
+  // LEAGUE_NOT_SUPPORTED rather than silently substituted (see
+  // resolveFootballSportResolution below).
+  leagueSelectionSupported: true,
   livePrematchSupport: "PREMATCH_ONLY",
   eventSearchSupported: false,
   eventByIdLookupSupported: false,
   regions: ["eu"], // oddsVerifier.ts:406 hardcodes `regions=eu`
   notes: [
-    "Generic football/soccer with no recognized league resolves to the English Premier League only (oddsVerifier.ts SPORT_KEY_ALIASES). A football selection whose league is exactly one of La Liga/Serie A/Bundesliga/Ligue 1/UEFA Champions League/Premier League (see resolveLegacyFootballSport below) resolves to that league's own sport_key instead — any other or absent league still falls back to the generic EPL default.",
+    "Generic football/soccer with no stated league now merges across every currently supported competition (lib/odds/footballLeagues.ts / oddsVerifier.ts SPORT_KEY_ALIASES), not only the English Premier League. A football selection whose league is one of the supported names (or a recognized alias, e.g. EPL/UCL) resolves to that league's own sport_key alone; an unrecognized league returns LEAGUE_NOT_SUPPORTED rather than querying an unrelated competition.",
     "Tennis coverage is limited to the four Grand Slam tournaments, in-tournament only (oddsVerifier.ts TENNIS_SPORT_KEYS) — no year-round ATP/WTA tour coverage.",
     "Only bare 1X2/moneyline selections are verifiable — no totals, spreads, both-teams-to-score, or double-chance markets.",
     "findEvents() and getEventMarkets() are not implemented by this adapter in Step 5 — verifySelection() is the only operational method (see its own code comment below).",
@@ -83,49 +89,31 @@ const SPORT_TO_LEGACY_STRING: Readonly<Record<Exclude<Sport, "UNKNOWN">, string>
   AMERICAN_FOOTBALL: "american football",
 };
 
-// Step 7A compatibility fix — restores the five pre-existing football-
-// league-specific legacy sport strings oddsVerifier.ts's own
-// SPORT_KEY_ALIASES already resolves to distinct sport_keys ("la liga" ->
-// soccer_spain_la_liga, "serie a" -> soccer_italy_serie_a, "bundesliga" ->
-// soccer_germany_bundesliga, "ligue 1" -> soccer_france_ligue_one,
-// "champions league" -> soccer_uefa_champs_league), plus "premier league"
-// (which already resolves to the same soccer_epl the generic default
-// does, but is represented honestly rather than silently substituted).
-// These were reachable directly through legacy verifyOdds() before the
-// Step 7 migration collapsed every football league into the generic
-// "football" default. Closed, exact lookup only (trim + lowercase +
-// whitespace-normalize) — never fuzzy or substring matching, and never
-// extended beyond these six names (no Europa League, no international
-// competitions, no other domestic leagues — see
-// docs/ODDS_SUPPORT_MATRIX.md). No sport_key value is ever stored or
-// returned here — only the same human-readable legacy alias string
-// oddsVerifier.ts's own SPORT_KEY_ALIASES table already accepts; that
-// file remains the sole owner of sport_key resolution. Kept private to
-// this adapter — the canonical domain (CanonicalLeague) stays
-// provider-neutral and knows nothing about legacy alias strings.
-const FOOTBALL_LEAGUE_TO_LEGACY_STRING: Readonly<Record<string, string>> = {
-  "la liga": "la liga",
-  "serie a": "serie a",
-  bundesliga: "bundesliga",
-  "ligue 1": "ligue 1",
-  "champions league": "champions league",
-  "uefa champions league": "champions league",
-  "premier league": "premier league",
-};
-
-function normalizeLeagueName(name: string): string {
-  return name.trim().toLowerCase().replace(/\s+/g, " ");
-}
+// Step 16A — replaces the old Step 7A FOOTBALL_LEAGUE_TO_LEGACY_STRING
+// table (now lib/odds/footballLeagues.ts's single centralized alias
+// table, shared with legacyOddsBridge.ts's legacyFootballLeagueFromSportString
+// — never a second, independently-maintained list) with an explicit
+// three-way result: a supported league resolves to exactly its own legacy
+// sport string (queried alone); no league at all falls back to the
+// generic "football" default, which oddsVerifier.ts's own SPORT_KEY_ALIASES
+// now merges across every supported competition (Step 16A) instead of only
+// Premier League; an explicitly stated but UNRECOGNIZED league is reported
+// honestly rather than silently substituted with an unrelated competition
+// — the exact behavior change Step 16A requires (previously this silently
+// fell back to generic "football"/EPL).
+type FootballSportResolution =
+  | { readonly kind: "NO_LEAGUE" }
+  | { readonly kind: "SUPPORTED"; readonly legacySport: string }
+  | { readonly kind: "UNSUPPORTED_LEAGUE" };
 
 // Only ever consulted when selection.sport === "FOOTBALL" — every other
 // sport preserves today's exact SPORT_TO_LEGACY_STRING behavior,
-// completely untouched by this function. An absent or unrecognized league
-// falls back to the same generic "football" default that has always
-// applied — this function only ever narrows behavior for the six
-// explicitly recognized names, never broadens it.
-function resolveLegacyFootballSport(leagueName: string | undefined): string {
-  if (!leagueName) return SPORT_TO_LEGACY_STRING.FOOTBALL;
-  return FOOTBALL_LEAGUE_TO_LEGACY_STRING[normalizeLeagueName(leagueName)] ?? SPORT_TO_LEGACY_STRING.FOOTBALL;
+// completely untouched by this function.
+function resolveFootballSportResolution(leagueName: string | undefined): FootballSportResolution {
+  if (!leagueName) return { kind: "NO_LEAGUE" };
+  const resolved = resolveFootballLeague(leagueName);
+  if (!resolved) return { kind: "UNSUPPORTED_LEAGUE" };
+  return { kind: "SUPPORTED", legacySport: resolved.legacySportString };
 }
 
 // Only the tokens oddsVerifier.ts's classifySingleSelection/fuzzy matching
@@ -196,6 +184,14 @@ function classifyLegacyFailureNote(
   }
   if (/^No matching event found for /.test(note)) {
     return { reasonCode: "EVENT_NOT_FOUND", diagnosticCode: "LEGACY_EVENT_NOT_FOUND" };
+  }
+  // Step 16A — two or more genuinely DIFFERENT events (distinct provider
+  // IDs, e.g. from different merged competitions) scored an equally
+  // confident match — oddsVerifier.ts's findMatchingEvent() never silently
+  // picks one by array/league order in this case (see that function's own
+  // comment).
+  if (/^Ambiguous event match for /.test(note)) {
+    return { reasonCode: "AMBIGUOUS_EVENT", diagnosticCode: "LEGACY_AMBIGUOUS_EVENT" };
   }
   // Event was found but has no bookmaker/odds data at all — SELECTION_NOT_FOUND
   // is an imperfect fit (the event itself WAS found), but it is the
@@ -330,12 +326,31 @@ export class TheOddsApiProvider implements OddsProvider {
       });
     }
 
-    // FOOTBALL alone consults selection.league (Step 7A) — every other
-    // sport takes the exact, unchanged path it always has.
+    // FOOTBALL alone consults selection.league — every other sport takes
+    // the exact, unchanged path it always has.
+    const footballResolution =
+      selection.sport === "FOOTBALL" ? resolveFootballSportResolution(selection.league?.name) : null;
+
+    // Step 16A — an explicitly stated but unrecognized league is reported
+    // honestly and immediately, before any provider call — never silently
+    // substituted with an unrelated competition (the previous, deliberately
+    // changed behavior).
+    if (footballResolution?.kind === "UNSUPPORTED_LEAGUE") {
+      return createFailedResult({
+        submittedOdds,
+        provider: PROVIDER_NAME,
+        checkedAt: checkedAtFor(),
+        reasonCode: "LEAGUE_NOT_SUPPORTED",
+        diagnosticCode: "ADAPTER_LEAGUE_NOT_SUPPORTED",
+      });
+    }
+
     const legacySport =
-      selection.sport === "FOOTBALL"
-        ? resolveLegacyFootballSport(selection.league?.name)
-        : SPORT_TO_LEGACY_STRING[selection.sport];
+      footballResolution === null
+        ? SPORT_TO_LEGACY_STRING[selection.sport]
+        : footballResolution.kind === "SUPPORTED"
+          ? footballResolution.legacySport
+          : SPORT_TO_LEGACY_STRING.FOOTBALL;
 
     // Step 15H — this format/positivity check only applies when a value was
     // actually submitted; there is nothing to validate the shape of when

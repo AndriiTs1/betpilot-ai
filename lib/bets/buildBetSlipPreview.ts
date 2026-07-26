@@ -175,6 +175,11 @@ export async function buildBetSlipPreview(
     requests.push(
       legacySelectionToCanonicalRequest({
         sport: selection.sport,
+        // Step 16A — an explicit, player-stated league (e.g. "Serie A"),
+        // when present, now reaches provider verification instead of being
+        // silently dropped — see lib/odds/footballLeagues.ts for where it's
+        // actually resolved/validated.
+        league: selection.league ?? null,
         event: selection.event,
         selection: selection.selection,
         submittedOdds: selection.submittedOdds,

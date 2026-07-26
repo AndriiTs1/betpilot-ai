@@ -21,6 +21,9 @@ test("adapter: football SINGLE with odds adapts to the exact ParsedBetSlip shape
     selections: [
       {
         sport: "Football",
+        // Step 16A — league now threads through (null here: the fixture's
+        // default league field is MISSING with no rawText).
+        league: null,
         event: "Arsenal vs Chelsea",
         market: null,
         selection: "Arsenal",
@@ -215,7 +218,7 @@ test("adapter: an Infinity-like submittedOdds throws LegacyAdapterError rather t
 /* 12. No league/period/line leakage into output                             */
 /* -------------------------------------------------------------------------- */
 
-test("adapter: league/period/line/warnings/confidence/participants never leak into the adapted output shape", () => {
+test("adapter: period/line/warnings/confidence/participants never leak into the adapted output shape — league now intentionally does (Step 16A)", () => {
   const input = draft({
     selections: [
       draftSelection({
@@ -229,7 +232,10 @@ test("adapter: league/period/line/warnings/confidence/participants never leak in
   const slip = universalBetDraftToParsedBetSlip(input);
 
   assert.deepEqual(Object.keys(slip).sort(), ["selections", "stake", "type"]);
-  assert.deepEqual(Object.keys(slip.selections[0]).sort(), ["event", "market", "selection", "sport", "submittedOdds"]);
+  assert.deepEqual(Object.keys(slip.selections[0]).sort(), ["event", "league", "market", "selection", "sport", "submittedOdds"]);
+  // The actual point of Step 16A: an extracted league's resolvedName
+  // reaches ParsedBetSlip, where it used to be silently dropped.
+  assert.equal(slip.selections[0].league, "La Liga");
 });
 
 /* -------------------------------------------------------------------------- */

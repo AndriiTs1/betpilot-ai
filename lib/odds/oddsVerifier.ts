@@ -59,16 +59,43 @@ const TENNIS_SPORT_KEYS = [
   "tennis_wta_us_open",
 ];
 
+// Step 16A — one named constant per football sport_key, referenced both
+// individually (an explicit, supported league queries only its own key)
+// and together in FOOTBALL_FALLBACK_SPORT_KEYS below (no explicit/
+// recognized league merges across all of them) — never two separate
+// literal copies of the same sport_key string.
+const SOCCER_EPL_KEY = "soccer_epl";
+const SOCCER_LA_LIGA_KEY = "soccer_spain_la_liga";
+const SOCCER_SERIE_A_KEY = "soccer_italy_serie_a";
+const SOCCER_BUNDESLIGA_KEY = "soccer_germany_bundesliga";
+const SOCCER_LIGUE_1_KEY = "soccer_france_ligue_one";
+const SOCCER_UEFA_CL_KEY = "soccer_uefa_champs_league";
+
+// Step 16A — generic football/soccer (no explicit, supported league) now
+// merges across every currently supported competition, mirroring the
+// tennis multi-key pattern above, instead of defaulting exclusively to
+// soccer_epl. Order carries no priority meaning — findMatchingEvent()
+// below flags a cross-league score tie as ambiguous rather than silently
+// preferring whichever key happens to be listed first.
+const FOOTBALL_FALLBACK_SPORT_KEYS: string[] = [
+  SOCCER_EPL_KEY,
+  SOCCER_LA_LIGA_KEY,
+  SOCCER_SERIE_A_KEY,
+  SOCCER_BUNDESLIGA_KEY,
+  SOCCER_LIGUE_1_KEY,
+  SOCCER_UEFA_CL_KEY,
+];
+
 const SPORT_KEY_ALIASES: Record<string, string | string[]> = {
-  football: "soccer_epl",
-  soccer: "soccer_epl",
-  футбол: "soccer_epl",
-  "premier league": "soccer_epl",
-  "la liga": "soccer_spain_la_liga",
-  "serie a": "soccer_italy_serie_a",
-  bundesliga: "soccer_germany_bundesliga",
-  "ligue 1": "soccer_france_ligue_one",
-  "champions league": "soccer_uefa_champs_league",
+  football: FOOTBALL_FALLBACK_SPORT_KEYS,
+  soccer: FOOTBALL_FALLBACK_SPORT_KEYS,
+  футбол: FOOTBALL_FALLBACK_SPORT_KEYS,
+  "premier league": SOCCER_EPL_KEY,
+  "la liga": SOCCER_LA_LIGA_KEY,
+  "serie a": SOCCER_SERIE_A_KEY,
+  bundesliga: SOCCER_BUNDESLIGA_KEY,
+  "ligue 1": SOCCER_LIGUE_1_KEY,
+  "champions league": SOCCER_UEFA_CL_KEY,
   basketball: "basketball_nba",
   баскетбол: "basketball_nba",
   nba: "basketball_nba",
@@ -180,10 +207,25 @@ interface OddsApiEvent {
 
 const EVENT_MATCH_THRESHOLD = 0.5;
 
-function findMatchingEvent(events: OddsApiEvent[], betEvent: string): OddsApiEvent | null {
+// Step 16A — discriminated result instead of a bare nullable event: a
+// no-explicit-league football lookup can now merge events from several
+// competitions, so this must be able to honestly say "two genuinely
+// different events both matched equally well" (AMBIGUOUS) rather than
+// silently picking whichever happened to be scored first — never inventing
+// a permanent league priority to break the tie.
+type EventMatchResult =
+  | { readonly kind: "FOUND"; readonly event: OddsApiEvent }
+  | { readonly kind: "NOT_FOUND" }
+  | { readonly kind: "AMBIGUOUS" };
+
+function findMatchingEvent(events: OddsApiEvent[], betEvent: string): EventMatchResult {
   const teams = splitEventTeams(betEvent);
 
   let best: { event: OddsApiEvent; score: number } | null = null;
+  // True only while `best` has at least one OTHER, genuinely different
+  // event (distinct provider id) tied at the exact same score — reset
+  // whenever a strictly higher score dethrones it.
+  let tiedWithBest = false;
 
   for (const event of events) {
     const home = normalizeTeamName(event.home_team);
@@ -201,12 +243,19 @@ function findMatchingEvent(events: OddsApiEvent[], betEvent: string): OddsApiEve
       score = overlapScore(normalizeTeamName(betEvent), `${home} ${away}`);
     }
 
-    if (score >= EVENT_MATCH_THRESHOLD && (!best || score > best.score)) {
+    if (score < EVENT_MATCH_THRESHOLD) continue;
+
+    if (!best || score > best.score) {
       best = { event, score };
+      tiedWithBest = false;
+    } else if (score === best.score && event.id !== best.event.id) {
+      tiedWithBest = true;
     }
   }
 
-  return best?.event ?? null;
+  if (!best) return { kind: "NOT_FOUND" };
+  if (tiedWithBest) return { kind: "AMBIGUOUS" };
+  return { kind: "FOUND", event: best.event };
 }
 
 function pickBookmaker(
@@ -484,11 +533,24 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
     return { ...baseResult, note: lastFetchError };
   }
 
-  const event = findMatchingEvent(events, bet.event);
+  // Step 16A — dedupe by provider event id before matching: a football
+  // lookup can now merge several competitions' responses, and the same
+  // fixture must never be double-counted (which would otherwise make
+  // findMatchingEvent's own ambiguity tie-break fire for what is actually
+  // one single event seen twice, not two different ones).
+  const dedupedEvents = Array.from(new Map(events.map((event) => [event.id, event])).values());
 
-  if (!event) {
+  const matchResult = findMatchingEvent(dedupedEvents, bet.event);
+
+  if (matchResult.kind === "NOT_FOUND") {
     return { ...baseResult, note: `No matching event found for "${bet.event}" in ${sportKeys.join(", ")}` };
   }
+
+  if (matchResult.kind === "AMBIGUOUS") {
+    return { ...baseResult, note: `Ambiguous event match for "${bet.event}" across multiple leagues` };
+  }
+
+  const event = matchResult.event;
 
   const bookmakerPick = pickBookmaker(event);
 

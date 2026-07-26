@@ -82,14 +82,14 @@ test("capabilities: only moneyline markets are advertised — totals/spread/BTTS
   }
 });
 
-test("capabilities: pre-match only, no event search/by-ID lookup, league selection not supported", () => {
+test("capabilities: pre-match only, no event search/by-ID lookup, league selection supported (Step 16A)", () => {
   const provider = new TheOddsApiProvider();
   const capabilities = provider.getCapabilities();
 
   assert.equal(capabilities.livePrematchSupport, "PREMATCH_ONLY");
   assert.equal(capabilities.eventSearchSupported, false);
   assert.equal(capabilities.eventByIdLookupSupported, false);
-  assert.equal(capabilities.leagueSelectionSupported, false);
+  assert.equal(capabilities.leagueSelectionSupported, true);
   assert.deepEqual(capabilities.regions, ["eu"]);
 });
 
@@ -470,13 +470,15 @@ test("football league resolution: generic FOOTBALL with no league falls back to 
   assert.equal(calls[0].sport, "football");
 });
 
-test("football league resolution: an unrecognized football league falls back to 'football'", async () => {
+test("football league resolution: an unrecognized football league returns LEAGUE_NOT_SUPPORTED and never calls the provider (Step 16A — no more silent EPL/generic fallback)", async () => {
   const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.0 }));
   const provider = new TheOddsApiProvider(fn);
 
-  await provider.verifySelection({ selection: moneyline3Way({ league: { name: "Europa League" } }) });
+  const result = await provider.verifySelection({ selection: moneyline3Way({ league: { name: "Europa League" } }) });
 
-  assert.equal(calls[0].sport, "football");
+  assert.equal(calls.length, 0, "an unsupported league must never reach the provider — no unrelated competition is ever queried");
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "LEAGUE_NOT_SUPPORTED");
 });
 
 test("football league resolution: a non-football sport ignores any football-league value and preserves its own existing sport alias", async () => {
@@ -510,8 +512,13 @@ test("football league resolution: whitespace/case normalization applies only to 
   assert.equal(calls[0].sport, "la liga");
 
   calls.length = 0;
-  await provider.verifySelection({ selection: moneyline3Way({ league: { name: "La  Ligaa" } }) });
-  assert.equal(calls[0].sport, "football");
+  // Step 16A — "La  Ligaa" is not an exact recognized name (extra
+  // whitespace normalizes away, but the trailing "aa" typo does not) —
+  // LEAGUE_NOT_SUPPORTED, never a silent fallback to an unrelated
+  // competition.
+  const result = await provider.verifySelection({ selection: moneyline3Way({ league: { name: "La  Ligaa" } }) });
+  assert.equal(calls.length, 0);
+  assert.equal(result.reasonCode, "LEAGUE_NOT_SUPPORTED");
 });
 
 test("football league resolution: no provider sport_key is ever emitted — only the same human-readable legacy alias strings oddsVerifier.ts already accepts", async () => {

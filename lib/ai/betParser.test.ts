@@ -340,8 +340,10 @@ test("parseBetSlipMessage: extract_bet with league/market/period/line supplied p
   assert.equal(result.valid, true);
   if (!result.valid) return;
   assert.deepEqual(Object.keys(result).sort(), ["selections", "stake", "type", "valid"]);
-  assert.deepEqual(Object.keys(result.selections[0]).sort(), ["event", "market", "selection", "sport", "submittedOdds"]);
+  // Step 16A — league now also threads through (period/line still do not).
+  assert.deepEqual(Object.keys(result.selections[0]).sort(), ["event", "league", "market", "selection", "sport", "submittedOdds"]);
   assert.equal(result.selections[0].market, "Match Winner");
+  assert.equal(result.selections[0].league, "Premier League");
   assert.equal(result.selections[0].sport, "Football");
   assert.equal(result.selections[0].event, "Arsenal vs Chelsea");
   assert.equal(result.selections[0].selection, "Arsenal");
@@ -370,7 +372,7 @@ test("parseBetSlipMessage: extract_bet with the four new fields explicitly null 
     valid: true,
     type: "SINGLE",
     stake: 50,
-    selections: [{ sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: 1.9 }],
+    selections: [{ sport: "Football", league: null, event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: 1.9 }],
   });
 });
 
