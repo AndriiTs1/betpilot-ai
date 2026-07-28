@@ -4,6 +4,18 @@ import SelectionList from "@/components/bets/SelectionList";
 import type { DisplaySelection } from "@/lib/bets/mapBetForDisplay";
 import { formatAmount } from "@/lib/bets/formatAmount";
 import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
+import { hasUnverifiedOddsStatus } from "./canConfirmBetSlip";
+
+// Shown whenever the odds provider could not positively confirm a
+// selection's exact event/market (NOT_FOUND) or couldn't verify anything
+// right now (UNAVAILABLE/PENDING) — the same condition canConfirmBetSlip.ts's
+// hasUnverifiedOddsStatus disables the Confirm button for. Deliberately
+// does not invite the player to "submit for operator review" — a bet the
+// provider never confirmed must never reach the operator queue at all, so
+// this message only explains why confirmation is blocked, never implies a
+// submit-anyway path exists.
+const ODDS_UNVERIFIED_MESSAGE =
+  "We couldn't verify this event or market with the odds provider. Please check the bet details or try again later.";
 
 // Shared preview display — used by both BetTextForm (text flow) and
 // BetScreenshotForm (screenshot flow, Stage 4.5D). Extracted out of
@@ -220,18 +232,24 @@ export function OddsStatus({ preview }: { preview: BetPreview }) {
   }
 
   // NOT_FOUND, UNAVAILABLE, and the reserved-but-unreachable PENDING all
-  // show the same fixed, friendly message (Stage 9) — the specific
-  // technical reason is server-side only.
-  return (
-    <StatusBox
-      tone="warning"
-      label="Odds could not be verified"
-      description="This event is not currently available from the odds provider. You can still submit the bet for operator review."
-    />
-  );
+  // show the same fixed, friendly message and block confirmation outright
+  // (canConfirmBetSlip.ts's hasUnverifiedOddsStatus) — the specific
+  // technical reason is server-side only, and there is deliberately no
+  // "submit anyway" framing: the provider never confirmed this selection,
+  // so it must never reach the operator queue.
+  return <StatusBox tone="warning" label="Odds could not be verified" description={ODDS_UNVERIFIED_MESSAGE} />;
 }
 
 function ExpressOddsSummary({ preview }: { preview: BetPreview }) {
+  // A blocking status on any leg (NOT_FOUND/UNAVAILABLE/PENDING) blocks the
+  // whole slip — mirrors canConfirmBetSlip.ts's hasUnverifiedOddsStatus
+  // exactly, and the backend's own verifyPreviewFreshness.ts priority order
+  // (a provider outage or an unmatched leg always wins over a merely
+  // "some legs verified" summary).
+  if (hasUnverifiedOddsStatus(preview.selections)) {
+    return <StatusBox tone="warning" label="Odds could not be verified" description={ODDS_UNVERIFIED_MESSAGE} />;
+  }
+
   const verifiedCount = preview.selections.filter((s) => s.oddsStatus === "VERIFIED").length;
   const total = preview.selections.length;
   const allVerified = verifiedCount === total;
@@ -240,7 +258,7 @@ function ExpressOddsSummary({ preview }: { preview: BetPreview }) {
     <StatusBox
       tone={allVerified ? "success" : "warning"}
       label={`${verifiedCount} of ${total} selections verified`}
-      description="Each selection's status is shown above. You can still submit this express for operator review."
+      description="Each selection's status is shown above."
     />
   );
 }

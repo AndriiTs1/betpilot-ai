@@ -27,24 +27,24 @@ import {
 import type { AnyPreviewTokenPayload } from "@/lib/betPreview/previewToken";
 
 // Business priority (fixed, in this exact order — see decideFreshnessOutcome
-// below):
+// below). Final product decision: the odds provider must positively confirm
+// an event/market before a Bet is ever created — the operator queue must
+// never receive a bet the provider couldn't verify at all.
 //   1. Any selection UNAVAILABLE/PENDING (provider couldn't verify anything
 //      right now, a transient condition)      -> VERIFICATION_UNAVAILABLE
-//   2. Else, any selection ODDS_CHANGED (the selection IS real, the price
-//      moved)                                  -> ODDS_CHANGED (reconfirm)
-//   3. Else — only NOT_FOUND and/or VERIFIED remain, both are acceptable
-//      for a manually-reviewable PENDING bet   -> ACCEPT
-// NOT_FOUND (the odds provider couldn't match this exact event/market) is
-// deliberately NOT a blocking status on its own: lib/bets/betSlipRules.ts's
-// canSubmitBetSlip already told the player at preview time this exact
-// status is submittable for operator review, so confirm must honor that,
-// not silently re-reject it with a stricter policy the player was never
-// shown. It only stops being acceptable when a WORSE problem (a real
-// provider outage) is also present — that precedence is exactly what
-// decideFreshnessOutcome below checks for, explicitly, in order, rather
-// than via a numeric rank/Math.max (which previously made ODDS_CHANGED
-// outrank NOT_FOUND in the wrong direction and offered no single place to
-// read the actual business rule).
+//   2. Else, any selection ODDS_CHANGED (the selection IS real and
+//      provider-confirmed, only the price moved) -> ODDS_CHANGED (reconfirm)
+//   3. Else, any selection NOT_FOUND (the provider could not match this
+//      exact event/market at all)             -> SELECTION_UNAVAILABLE
+//   4. Else — every selection is VERIFIED      -> ACCEPT
+// NOT_FOUND is a blocking status: unlike ODDS_CHANGED (a real, confirmed
+// selection whose price merely moved), NOT_FOUND means the provider never
+// confirmed this selection exists at all, so confirm must refuse to create
+// a Bet for it — never silently downgrade it to "let the operator sort it
+// out". Implemented as explicit "does any selection have this status"
+// checks, evaluated in priority order — not a numeric rank/Math.max — so
+// the precedence is readable straight off decideFreshnessOutcome instead of
+// being implied by which status was assigned the highest number.
 export type VerifyPreviewFreshnessDecision =
   | { kind: "ACCEPT" }
   // Refreshed preview/token reuse buildBetSlipPreview's own BetSlipPreview
@@ -56,13 +56,13 @@ export type VerifyPreviewFreshnessDecision =
   // decideFreshnessOutcome below) — a reconfirmation-required response is
   // meaningless without something the client can actually resubmit.
   | { kind: "ODDS_CHANGED"; refreshedPreview: BetSlipPreview; refreshedPreviewToken: string }
-  // Reachable today only when odds genuinely changed but buildBetSlipPreview
-  // could not produce a signed refreshed EXPRESS token to reconfirm against
-  // (an exempt null-odds leg elsewhere prevents allOddsKnown) — see
-  // decideFreshnessOutcome. No longer reachable for a pure NOT_FOUND
-  // selection (that's ACCEPT now, per the priority above) — kept in this
-  // union regardless, per explicit instruction not to remove a decision
-  // kind without its own architectural decision.
+  // Returned whenever the provider could not match a selection's exact
+  // event/market at all (NOT_FOUND), and also when odds genuinely changed
+  // but buildBetSlipPreview could not produce a signed refreshed EXPRESS
+  // token to reconfirm against (an exempt null-odds leg elsewhere prevents
+  // allOddsKnown) — see decideFreshnessOutcome. Either way: no Bet may be
+  // created, the player must fix/retry, never the operator's problem to sort
+  // out.
   | { kind: "SELECTION_UNAVAILABLE" }
   | { kind: "VERIFICATION_UNAVAILABLE" };
 
@@ -170,14 +170,21 @@ export function decideFreshnessOutcome(
     return { kind: "ODDS_CHANGED", refreshedPreview, refreshedPreviewToken };
   }
 
-  // Priority 3 — only NOT_FOUND and/or VERIFIED remain. Both are
-  // acceptable: VERIFIED obviously so, and NOT_FOUND because
-  // lib/bets/betSlipRules.ts's canSubmitBetSlip already told the player at
-  // preview time this exact status is submittable for operator review —
-  // confirm must honor that, not re-reject it here with a stricter policy
-  // the player was never shown. The resulting Bet is created PENDING with
-  // the player's submitted odds (createBetFromPreview.ts, unchanged), for
-  // the operator to review manually.
+  // Priority 3 — the provider could not match this exact event/market at
+  // all. Unlike ODDS_CHANGED, there is no confirmed selection whose price
+  // merely moved — nothing here is safely reconfirmable, and this must
+  // never become a Bet the operator queue has to sort out. Reuses the
+  // existing SELECTION_UNAVAILABLE kind (same contract the null-token
+  // ODDS_CHANGED fallback above already uses) rather than introducing a new
+  // decision kind.
+  const hasNotFound = statuses.some((status) => status === "NOT_FOUND");
+  if (hasNotFound) return { kind: "SELECTION_UNAVAILABLE" };
+
+  // Priority 4 — every relevant selection is VERIFIED (or there were no
+  // relevant selections at all, e.g. every leg had no originally-submitted
+  // odds). The resulting Bet is created PENDING with the player's submitted
+  // odds (createBetFromPreview.ts, unchanged), for the operator's final
+  // confirm/reject.
   return { kind: "ACCEPT" };
 }
 
@@ -216,15 +223,14 @@ export async function verifyPreviewFreshness(
     // This means a null-submittedOdds selection's fresh status is
     // deterministically, structurally always "UNAVAILABLE" — not a
     // newly-discovered problem, but the exact same non-signal preview time
-    // already produced for it (lib/bets/betSlipRules.ts's
-    // canSubmitBetSlip already permits submitting such a selection for
-    // operator review). Treating this as a genuine "could not verify"
-    // signal here would make every bet that ever had an unclaimed-odds leg
-    // permanently unconfirmable, since this selection could structurally
-    // never produce any other status — a correctness bug, not a stricter
-    // safety improvement. Excluding it from gating is therefore the
-    // correct realization of "freshness could not be confirmed" for THIS
-    // selection specifically: there was never a claimed value to go stale.
+    // already produced for it. Treating this as a genuine "could not
+    // verify" signal here would make every bet that ever had an
+    // unclaimed-odds leg permanently unconfirmable, since this selection
+    // could structurally never produce any other status — a correctness
+    // bug, not a stricter safety improvement. Excluding it from gating is
+    // therefore the correct realization of "freshness could not be
+    // confirmed" for THIS selection specifically: there was never a
+    // claimed value to go stale.
     // It does not affect any OTHER selection's own status in the same
     // slip, which is still gated normally (see the dedicated
     // "does not hide UNAVAILABLE" test).

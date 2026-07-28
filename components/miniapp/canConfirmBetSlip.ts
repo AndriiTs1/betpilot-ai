@@ -45,14 +45,43 @@ export function hasUnresolvedSingleOdds(preview: BetPreviewSuccess | null): bool
   return !isConfirmableSingleOdds(preview.preview.selections[0]);
 }
 
+// Final product decision (see lib/bets/verifyPreviewFreshness.ts's
+// decideFreshnessOutcome, the server-side enforcement point this mirrors):
+// the odds provider must positively confirm a selection before the player
+// may even attempt to confirm it. NOT_FOUND (the provider could not match
+// this exact event/market), UNAVAILABLE (the provider couldn't verify
+// anything right now), and the reserved-but-practically-unreachable PENDING
+// default all block confirmation — a bet the provider never confirmed must
+// never reach PENDING/the operator queue, so the button must never let the
+// player attempt it in the first place, not merely fail server-side after
+// the fact. ODDS_CHANGED is deliberately NOT included: that selection IS
+// real and provider-confirmed, only the price moved — the player is still
+// allowed to tap Confirm, which re-verifies and asks for a fresh
+// confirmation (409 ODDS_CHANGED_RECONFIRM_REQUIRED) rather than being
+// blocked client-side.
+//
+// Exported so BetPreviewCard.tsx can show the same "could not verify"
+// messaging this exact same condition blocks Confirm for — one shared
+// decision, never two independently-maintained copies.
+const UNVERIFIED_ODDS_STATUSES: ReadonlySet<BetPreviewSelection["oddsStatus"]> = new Set([
+  "NOT_FOUND",
+  "UNAVAILABLE",
+  "PENDING",
+]);
+
+export function hasUnverifiedOddsStatus(selections: readonly BetPreviewSelection[]): boolean {
+  return selections.some((selection) => UNVERIFIED_ODDS_STATUSES.has(selection.oddsStatus));
+}
+
 export function canConfirmBetSlip(isReady: boolean, preview: BetPreviewSuccess | null): boolean {
   if (!isReady || preview === null || preview.previewToken === null) return false;
+
+  if (hasUnverifiedOddsStatus(preview.preview.selections)) return false;
 
   // Step 15J.1 — SINGLE additionally requires finite, positive effective
   // odds (see isConfirmableSingleOdds above); every other slip type
   // (currently just EXPRESS) keeps its exact pre-existing behavior —
-  // previewToken !== null alone, unchanged from before this step. Not
-  // redesigning EXPRESS/operator-review gating here, per this step's scope.
+  // previewToken !== null (plus the odds-status gate above) alone.
   if (preview.preview.type === "SINGLE") {
     return isConfirmableSingleOdds(preview.preview.selections[0]);
   }

@@ -65,17 +65,31 @@ test("betSlipRules: unknown type is rejected defensively", () => {
   assertCode(() => validateBetSlipType("PARLAY", selections(2)), "UNKNOWN_BET_SLIP_TYPE");
 });
 
-const ALL_STATUSES = ["PENDING", "VERIFIED", "ODDS_CHANGED", "NOT_FOUND", "UNAVAILABLE"] as const;
+const SUBMITTABLE_STATUSES = ["VERIFIED", "ODDS_CHANGED"] as const;
+const BLOCKING_STATUSES = ["PENDING", "NOT_FOUND", "UNAVAILABLE"] as const;
 
-test("betSlipRules: canSubmitBetSlip allows every individual oddsStatus", () => {
-  for (const oddsStatus of ALL_STATUSES) {
+test("betSlipRules: canSubmitBetSlip allows VERIFIED and ODDS_CHANGED individually", () => {
+  for (const oddsStatus of SUBMITTABLE_STATUSES) {
     assert.equal(canSubmitBetSlip([{ oddsStatus }]), true, `expected ${oddsStatus} to be submittable`);
   }
 });
 
-test("betSlipRules: canSubmitBetSlip allows a mix of every status at once", () => {
+test("betSlipRules: canSubmitBetSlip blocks PENDING, NOT_FOUND, and UNAVAILABLE individually — the provider never confirmed these", () => {
+  for (const oddsStatus of BLOCKING_STATUSES) {
+    assert.equal(canSubmitBetSlip([{ oddsStatus }]), false, `expected ${oddsStatus} to block submission`);
+  }
+});
+
+test("betSlipRules: canSubmitBetSlip allows a mix of only VERIFIED/ODDS_CHANGED", () => {
   assert.equal(
-    canSubmitBetSlip(ALL_STATUSES.map((oddsStatus) => ({ oddsStatus }))),
+    canSubmitBetSlip(SUBMITTABLE_STATUSES.map((oddsStatus) => ({ oddsStatus }))),
     true,
+  );
+});
+
+test("betSlipRules: canSubmitBetSlip blocks the whole slip if even one selection has a blocking status", () => {
+  assert.equal(
+    canSubmitBetSlip([{ oddsStatus: "VERIFIED" }, { oddsStatus: "NOT_FOUND" }]),
+    false,
   );
 });

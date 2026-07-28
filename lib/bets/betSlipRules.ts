@@ -76,22 +76,26 @@ export function validateBetSlipType(
   );
 }
 
-// Current business rule (explicit, deliberate — confirmed during the
-// Stage 12 audit): no odds-verification outcome blocks a player from
-// submitting a bet slip for operator review. VERIFIED, ODDS_CHANGED,
-// NOT_FOUND, UNAVAILABLE, and the reserved-but-practically-unreachable
-// PENDING default all currently allow submission — the operator's own
-// Confirm/Reject is the only real gate. Implemented as a membership check
-// against every known status (not a hardcoded `return true`) so the
-// function is a genuine, testable seam: changing this policy later (e.g.
-// blocking NOT_FOUND) means removing one entry here, not hunting down
-// scattered call sites.
+// Current business rule (final product decision — the odds provider must
+// positively confirm a selection before it may ever become a Bet; see
+// lib/bets/verifyPreviewFreshness.ts's decideFreshnessOutcome, the actual
+// server-side enforcement point this mirrors, and
+// components/miniapp/canConfirmBetSlip.ts's hasUnverifiedOddsStatus, the
+// client-side one). Only VERIFIED (the provider confirmed this exact
+// event/market and price) and ODDS_CHANGED (the provider confirmed the
+// selection but the price moved — resolved via a mandatory reconfirmation,
+// never silently accepted) are submittable. NOT_FOUND (the provider could
+// not match this exact event/market at all), UNAVAILABLE (the provider
+// couldn't verify anything right now), and the
+// reserved-but-practically-unreachable PENDING default are never
+// submittable — a bet the provider never confirmed must never reach the
+// operator queue. Implemented as a membership check against every known
+// status (not a hardcoded `return true`) so the function is a genuine,
+// testable seam: changing this policy later means editing one set here,
+// not hunting down scattered call sites.
 const SUBMITTABLE_ODDS_STATUSES: ReadonlySet<BetSelectionOddsStatus> = new Set([
-  "PENDING",
   "VERIFIED",
   "ODDS_CHANGED",
-  "NOT_FOUND",
-  "UNAVAILABLE",
 ] satisfies BetSelectionOddsStatus[]);
 
 export function canSubmitBetSlip(

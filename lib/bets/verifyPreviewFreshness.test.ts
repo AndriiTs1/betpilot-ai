@@ -144,14 +144,14 @@ test("verifyPreviewFreshness: SINGLE ODDS_CHANGED (better) is never silently acc
   assert.equal(decision.kind, "ODDS_CHANGED");
 });
 
-test("verifyPreviewFreshness: SINGLE NOT_FOUND accepts — submittable for operator review, never conflated with a provider outage", async () => {
+test("verifyPreviewFreshness: SINGLE NOT_FOUND returns SELECTION_UNAVAILABLE — the provider never confirmed this event/market, so it must never become a Bet", async () => {
   const payload = singlePayload({ odds: 2.05 });
 
   const decision = await verifyPreviewFreshness(payload, TEST_SECRET, {
     verifyOddsFn: fakeVerifyOddsFn({ "Real Madrid vs Barcelona": notFound(2.05) }),
   });
 
-  assert.deepEqual(decision, { kind: "ACCEPT" });
+  assert.deepEqual(decision, { kind: "SELECTION_UNAVAILABLE" });
 });
 
 test("verifyPreviewFreshness: SINGLE UNAVAILABLE (provider throws) returns VERIFICATION_UNAVAILABLE", async () => {
@@ -210,7 +210,7 @@ test("verifyPreviewFreshness: null submittedOdds is exempt from gating and never
   assert.deepEqual(decision, { kind: "ACCEPT" });
 });
 
-test("verifyPreviewFreshness: a null-submittedOdds leg is exempted, and a NOT_FOUND leg elsewhere still accepts (not masked, not blocked)", async () => {
+test("verifyPreviewFreshness: a null-submittedOdds leg is exempted, but does not hide a genuine NOT_FOUND on another relevant leg", async () => {
   const payload = expressPayload({
     selections: [
       { ...expressPayload().selections[0], submittedOdds: null, currentOdds: null, oddsStatus: "UNAVAILABLE" },
@@ -222,7 +222,7 @@ test("verifyPreviewFreshness: a null-submittedOdds leg is exempted, and a NOT_FO
     verifyOddsFn: fakeVerifyOddsFn({ "Inter vs Juventus": notFound(1.94) }),
   });
 
-  assert.deepEqual(decision, { kind: "ACCEPT" });
+  assert.deepEqual(decision, { kind: "SELECTION_UNAVAILABLE" });
 });
 
 test("verifyPreviewFreshness: a null-submittedOdds leg never hides a genuine UNAVAILABLE on another leg", async () => {
@@ -328,7 +328,7 @@ test("verifyPreviewFreshness: EXPRESS with multiple legs ODDS_CHANGED still reje
   assert.equal(decision.kind, "ODDS_CHANGED");
 });
 
-test("verifyPreviewFreshness: EXPRESS NOT_FOUND + VERIFIED accepts the whole slip for operator review", async () => {
+test("verifyPreviewFreshness: EXPRESS NOT_FOUND + VERIFIED returns SELECTION_UNAVAILABLE for the whole slip — one unconfirmed leg blocks the entire bet", async () => {
   const payload = expressPayload();
 
   const decision = await verifyPreviewFreshness(payload, TEST_SECRET, {
@@ -338,7 +338,7 @@ test("verifyPreviewFreshness: EXPRESS NOT_FOUND + VERIFIED accepts the whole sli
     }),
   });
 
-  assert.deepEqual(decision, { kind: "ACCEPT" });
+  assert.deepEqual(decision, { kind: "SELECTION_UNAVAILABLE" });
 });
 
 test("verifyPreviewFreshness: EXPRESS with one leg UNAVAILABLE returns VERIFICATION_UNAVAILABLE for the whole slip", async () => {

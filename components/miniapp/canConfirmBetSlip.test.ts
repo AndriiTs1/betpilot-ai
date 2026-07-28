@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canConfirmBetSlip, hasUnresolvedSingleOdds, getConfirmButtonLabel } from "./canConfirmBetSlip";
+import {
+  canConfirmBetSlip,
+  hasUnresolvedSingleOdds,
+  hasUnverifiedOddsStatus,
+  getConfirmButtonLabel,
+} from "./canConfirmBetSlip";
 import type { BetPreviewSuccess, BetPreviewSelection } from "./betPreviewApi";
 
 function singleSelection(overrides: Partial<BetPreviewSelection> = {}): BetPreviewSelection {
@@ -200,4 +205,123 @@ test("getConfirmButtonLabel: 'Confirm bet' for EXPRESS, never 'Odds unavailable'
     previewToken: "a-real-express-token",
   });
   assert.equal(getConfirmButtonLabel(false, preview), "Confirm bet");
+});
+
+// ---------------------------------------------------------------------
+// Final product decision — the odds provider must positively confirm a
+// selection before the player may even attempt to confirm it. Mirrors
+// lib/bets/verifyPreviewFreshness.ts's decideFreshnessOutcome server-side:
+// NOT_FOUND/UNAVAILABLE/PENDING block, VERIFIED and ODDS_CHANGED don't.
+// ---------------------------------------------------------------------
+
+test("canConfirmBetSlip: SINGLE VERIFIED is confirmable", () => {
+  const preview = previewSuccess({
+    preview: {
+      type: "SINGLE",
+      stake: 100,
+      totalOdds: 2.1,
+      potentialWin: 210,
+      selections: [singleSelection({ oddsStatus: "VERIFIED" })],
+    },
+  });
+  assert.equal(canConfirmBetSlip(true, preview), true);
+});
+
+test("canConfirmBetSlip: SINGLE ODDS_CHANGED is still confirmable (re-verifies and asks for reconfirmation server-side, never blocked client-side)", () => {
+  const preview = previewSuccess({
+    preview: {
+      type: "SINGLE",
+      stake: 100,
+      totalOdds: 2.1,
+      potentialWin: 210,
+      selections: [singleSelection({ oddsStatus: "ODDS_CHANGED" })],
+    },
+  });
+  assert.equal(canConfirmBetSlip(true, preview), true);
+});
+
+test("canConfirmBetSlip: SINGLE NOT_FOUND is never confirmable", () => {
+  const preview = previewSuccess({
+    preview: {
+      type: "SINGLE",
+      stake: 100,
+      totalOdds: 2.1,
+      potentialWin: 210,
+      selections: [singleSelection({ oddsStatus: "NOT_FOUND" })],
+    },
+  });
+  assert.equal(canConfirmBetSlip(true, preview), false);
+});
+
+test("canConfirmBetSlip: SINGLE UNAVAILABLE is never confirmable", () => {
+  const preview = previewSuccess({
+    preview: {
+      type: "SINGLE",
+      stake: 100,
+      totalOdds: 2.1,
+      potentialWin: 210,
+      selections: [singleSelection({ oddsStatus: "UNAVAILABLE" })],
+    },
+  });
+  assert.equal(canConfirmBetSlip(true, preview), false);
+});
+
+test("canConfirmBetSlip: SINGLE PENDING is never confirmable", () => {
+  const preview = previewSuccess({
+    preview: {
+      type: "SINGLE",
+      stake: 100,
+      totalOdds: 2.1,
+      potentialWin: 210,
+      selections: [singleSelection({ oddsStatus: "PENDING" })],
+    },
+  });
+  assert.equal(canConfirmBetSlip(true, preview), false);
+});
+
+test("canConfirmBetSlip: EXPRESS with one NOT_FOUND selection among otherwise-VERIFIED legs is never confirmable", () => {
+  const preview = previewSuccess({
+    preview: {
+      type: "EXPRESS",
+      stake: 40,
+      totalOdds: 3.06,
+      potentialWin: 122.4,
+      selections: [
+        singleSelection({ oddsStatus: "VERIFIED" }),
+        singleSelection({ event: "Inter vs Juventus", oddsStatus: "NOT_FOUND" }),
+      ],
+    },
+    previewToken: "a-real-express-token",
+  });
+  assert.equal(canConfirmBetSlip(true, preview), false);
+});
+
+test("canConfirmBetSlip: EXPRESS with every leg VERIFIED is confirmable", () => {
+  const preview = previewSuccess({
+    preview: {
+      type: "EXPRESS",
+      stake: 40,
+      totalOdds: 3.06,
+      potentialWin: 122.4,
+      selections: [
+        singleSelection({ oddsStatus: "VERIFIED" }),
+        singleSelection({ event: "Inter vs Juventus", oddsStatus: "VERIFIED" }),
+      ],
+    },
+    previewToken: "a-real-express-token",
+  });
+  assert.equal(canConfirmBetSlip(true, preview), true);
+});
+
+test("hasUnverifiedOddsStatus: true when any selection is NOT_FOUND/UNAVAILABLE/PENDING, false when every selection is VERIFIED/ODDS_CHANGED", () => {
+  assert.equal(hasUnverifiedOddsStatus([singleSelection({ oddsStatus: "NOT_FOUND" })]), true);
+  assert.equal(hasUnverifiedOddsStatus([singleSelection({ oddsStatus: "UNAVAILABLE" })]), true);
+  assert.equal(hasUnverifiedOddsStatus([singleSelection({ oddsStatus: "PENDING" })]), true);
+  assert.equal(hasUnverifiedOddsStatus([singleSelection({ oddsStatus: "VERIFIED" })]), false);
+  assert.equal(hasUnverifiedOddsStatus([singleSelection({ oddsStatus: "ODDS_CHANGED" })]), false);
+  assert.equal(
+    hasUnverifiedOddsStatus([singleSelection({ oddsStatus: "VERIFIED" }), singleSelection({ oddsStatus: "NOT_FOUND" })]),
+    true,
+    "one unverified leg among otherwise-fine legs still blocks",
+  );
 });
