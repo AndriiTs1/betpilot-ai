@@ -12,7 +12,10 @@ import WelcomeBanner from "@/components/miniapp/WelcomeBanner";
 import type { MiniAppTab, MeResponse } from "@/components/miniapp/types";
 import type { AnyConfirmedBet } from "@/components/miniapp/betConfirmApi";
 import { applyMiniAppDataAction } from "@/components/miniapp/mergeConfirmedBet";
-import { isTelegramAuthErrorReason, getTelegramAuthErrorMessage } from "@/components/miniapp/telegramAuthError";
+import {
+  isTelegramAuthErrorReason,
+  getTelegramAuthErrorMessage,
+} from "@/components/miniapp/telegramAuthError";
 import { hasPendingBet } from "@/components/miniapp/hasPendingBet";
 
 // Phase 1 — investor-demo end-to-end flow: while the player has at least
@@ -27,13 +30,23 @@ interface TelegramWebApp {
   viewportStableHeight: number;
   ready: () => void;
   expand: () => void;
-  onEvent: (eventType: "viewportChanged", callback: (event: { isStateStable: boolean }) => void) => void;
-  offEvent: (eventType: "viewportChanged", callback: (event: { isStateStable: boolean }) => void) => void;
+  onEvent: (
+    eventType: "viewportChanged",
+    callback: (event: { isStateStable: boolean }) => void,
+  ) => void;
+  offEvent: (
+    eventType: "viewportChanged",
+    callback: (event: { isStateStable: boolean }) => void,
+  ) => void;
   MainButton: {
     color: string;
     textColor: string;
     setText: (text: string) => void;
-    setParams: (params: { text?: string; color?: string; text_color?: string }) => void;
+    setParams: (params: {
+      text?: string;
+      color?: string;
+      text_color?: string;
+    }) => void;
     show: () => void;
     hide: () => void;
     onClick: (cb: () => void) => void;
@@ -57,18 +70,30 @@ declare global {
 // since a retry can actually help there, unlike an auth failure.
 type FetchState =
   | { status: "loading" }
-  | { status: "error"; reason: "not_registered" | "expired" | "auth_invalid" | "invalid" | "network" }
+  | {
+      status: "error";
+      reason:
+        | "not_registered"
+        | "expired"
+        | "auth_invalid"
+        | "invalid"
+        | "network";
+    }
   | { status: "ready"; data: MeResponse };
 
 export default function MiniAppPage() {
   const [scriptReady, setScriptReady] = useState(false);
   const [screen, setScreen] = useState<"banner" | "data">("banner");
-  const [fetchState, setFetchState] = useState<FetchState>({ status: "loading" });
-  const [viewportStableHeight, setViewportStableHeight] = useState<number | null>(null);
+  const [fetchState, setFetchState] = useState<FetchState>({
+    status: "loading",
+  });
+  const [viewportStableHeight, setViewportStableHeight] = useState<
+    number | null
+  >(null);
   const mainButtonHandlerRef = useRef<(() => void) | null>(null);
-  const viewportChangedHandlerRef = useRef<((event: { isStateStable: boolean }) => void) | null>(
-    null,
-  );
+  const viewportChangedHandlerRef = useRef<
+    ((event: { isStateStable: boolean }) => void) | null
+  >(null);
   // Single-flight guard shared by every background-refresh trigger (polling
   // tick, visibilitychange, and the player's own confirm) — never more than
   // one /api/miniapp/me request in flight at once, regardless of which
@@ -106,10 +131,18 @@ export default function MiniAppPage() {
         if (response.status === 401) {
           const body: unknown = await response.json().catch(() => null);
           const errorCode =
-            typeof body === "object" && body !== null ? (body as { error?: unknown }).error : undefined;
+            typeof body === "object" && body !== null
+              ? (body as { error?: unknown }).error
+              : undefined;
 
-          if (typeof errorCode === "string" && isTelegramAuthErrorReason(errorCode)) {
-            setFetchState({ status: "error", reason: errorCode === "expired" ? "expired" : "auth_invalid" });
+          if (
+            typeof errorCode === "string" &&
+            isTelegramAuthErrorReason(errorCode)
+          ) {
+            setFetchState({
+              status: "error",
+              reason: errorCode === "expired" ? "expired" : "auth_invalid",
+            });
             return;
           }
         }
@@ -158,7 +191,13 @@ export default function MiniAppPage() {
       setFetchState((prev) =>
         prev.status !== "ready"
           ? prev
-          : { status: "ready", data: applyMiniAppDataAction(prev.data, { type: "BACKGROUND_REFRESH_SUCCESS", data }) },
+          : {
+              status: "ready",
+              data: applyMiniAppDataAction(prev.data, {
+                type: "BACKGROUND_REFRESH_SUCCESS",
+                data,
+              }),
+            },
       );
     } catch {
       // Best-effort — see this function's own header comment.
@@ -192,7 +231,13 @@ export default function MiniAppPage() {
       setFetchState((prev) =>
         prev.status !== "ready"
           ? prev
-          : { status: "ready", data: applyMiniAppDataAction(prev.data, { type: "BET_CONFIRMED", bet }) },
+          : {
+              status: "ready",
+              data: applyMiniAppDataAction(prev.data, {
+                type: "BET_CONFIRMED",
+                bet,
+              }),
+            },
       );
       void refreshIfIdle();
     },
@@ -277,7 +322,8 @@ export default function MiniAppPage() {
     };
   }, []);
 
-  const hasPending = fetchState.status === "ready" && hasPendingBet(fetchState.data.recentBets);
+  const hasPending =
+    fetchState.status === "ready" && hasPendingBet(fetchState.data.recentBets);
 
   // Polling only exists while a PENDING bet is outstanding — starts the
   // moment one appears (via BET_CONFIRMED or a background refresh) and
@@ -323,9 +369,16 @@ export default function MiniAppPage() {
       />
 
       {screen === "banner" ? (
-        <BannerScreen ready={scriptReady} viewportHeight={viewportStableHeight} />
+        <BannerScreen
+          ready={scriptReady}
+          viewportHeight={viewportStableHeight}
+        />
       ) : (
-        <DataScreen state={fetchState} onRetry={loadData} onBetConfirmed={handleBetConfirmed} />
+        <DataScreen
+          state={fetchState}
+          onRetry={loadData}
+          onBetConfirmed={handleBetConfirmed}
+        />
       )}
     </>
   );
@@ -366,7 +419,7 @@ function BannerScreen({
           elevated card — the same treatment Telegram uses for media
           previews and Stripe uses for hero visuals, so it reads as native
           app chrome rather than a banner bleeding off the screen. */}
-      <div className="relative w-full aspect-[35/24] overflow-hidden rounded-[28px] bg-[#07111F] shadow-[0_20px_50px_-12px_rgba(0,0,0,0.65)] ring-1 ring-white/[0.08] min-[480px]:mx-auto min-[480px]:max-w-[420px]">
+      <div className="relative w-full aspect-[35/24] overflow-hidden rounded-[28px] bg-[#07111F] shadow-[0_20px_50px_-12px_rgba(0,0,0,0.65)] ring-1 ring-white/8 min-[480px]:mx-auto min-[480px]:max-w-[420px]">
         <Image
           src="/miniapp/betpilotshow.png"
           alt="BetPilot AI — AI Betting Assistant"
@@ -396,7 +449,7 @@ function BannerScreen({
           ].map(({ icon, label }) => (
             <span
               key={label}
-              className="flex items-center gap-1.5 rounded-full bg-white/[0.06] px-3.5 py-2 text-[13px] font-medium text-slate-200 ring-1 ring-white/[0.08]"
+              className="flex items-center gap-1.5 rounded-full bg-white/6 px-3.5 py-2 text-[13px] font-medium text-slate-200 ring-1 ring-white/8"
             >
               <span aria-hidden="true">{icon}</span>
               {label}
@@ -427,7 +480,9 @@ function DataScreen({
 
   if (state.status === "error") {
     if (state.reason === "not_registered") {
-      return <CenteredMessage text="Вы ещё не зарегистрированы. Обратитесь к оператору." />;
+      return (
+        <CenteredMessage text="Вы ещё не зарегистрированы. Обратитесь к оператору." />
+      );
     }
 
     // Neither "expired" nor "auth_invalid" gets a Retry action — resending
@@ -439,7 +494,9 @@ function DataScreen({
     }
 
     if (state.reason === "auth_invalid") {
-      return <CenteredMessage text={getTelegramAuthErrorMessage("malformed")} />;
+      return (
+        <CenteredMessage text={getTelegramAuthErrorMessage("malformed")} />
+      );
     }
 
     return (
@@ -474,8 +531,12 @@ function DataScreen({
             onNavigateToHistory={() => setActiveTab("history")}
           />
         )}
-        {activeTab === "active" && <ActiveBetsScreen recentBets={data.recentBets} />}
-        {activeTab === "history" && <HistoryScreen recentBets={data.recentBets} />}
+        {activeTab === "active" && (
+          <ActiveBetsScreen recentBets={data.recentBets} />
+        )}
+        {activeTab === "history" && (
+          <HistoryScreen recentBets={data.recentBets} />
+        )}
         {activeTab === "balance" && (
           <BalanceScreen
             creditLimit={data.creditLimit}
