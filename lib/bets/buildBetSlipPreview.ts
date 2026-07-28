@@ -150,27 +150,30 @@ export async function buildBetSlipPreview(
 
   const oddsVerificationService = resolveOddsVerificationService(options);
 
-  // Selections with no submitted odds are, by default, never sent to the
-  // provider — there is nothing to verify against, mirroring the exact
-  // call-gating this function has always had (previously: Promise.resolve(null)
-  // instead of calling verifyOddsFn). `verifiableIndices[batchIndex]` maps
-  // each verifyMany() result back to its original position in
-  // slip.selections, since the two arrays are no longer the same length.
+  // Step 17 — every selection is sent for provider verification, SINGLE and
+  // EXPRESS alike, regardless of whether the player submitted a price. A
+  // null submittedOdds is not "nothing to verify": Step 15G/15H's
+  // nullable-aware pipeline asks the provider to find and price the
+  // selection itself, and a successful match's price is promoted into
+  // submittedOdds below (see effectiveSubmittedOdds). There is no separate
+  // EXPRESS pipeline — this is the exact same request-building/verifyMany()
+  // path SINGLE has always used.
   //
-  // Step 15I — SINGLE-only exception: a null-submittedOdds SINGLE selection
-  // is still sent for provider verification, since Step 15G/15H's
-  // nullable-aware pipeline can promote a real, live provider price for it
-  // (see the reconstruction loop and previewSelections mapping below for
-  // where that promoted price actually surfaces). EXPRESS keeps the exact
-  // original, unchanged behavior — a null-odds leg is never sent to the
-  // provider at all; this feature is deliberately SINGLE-only in this step.
+  // Previously (Step 15I) this auto-lookup was gated to SINGLE only — an
+  // EXPRESS leg with no submitted price was never sent to the provider at
+  // all and fell straight to UNAVAILABLE, even when the underlying event
+  // was genuinely verifiable (confirmed live: an EXPRESS built from two
+  // real, individually-VERIFIED-as-SINGLE events reported the whole slip as
+  // unconfirmable). That restriction is now removed for both bet types.
+  //
+  // `verifiableIndices[batchIndex]` maps each verifyMany() result back to
+  // its original position in slip.selections — always the identity mapping
+  // now that nothing is filtered out, kept so the by-index reconstruction
+  // below needs no separate code path for "some selections were skipped".
   const verifiableIndices: number[] = [];
   const requests: VerifySelectionRequest[] = [];
 
   slip.selections.forEach((selection, index) => {
-    const includeForVerification = selection.submittedOdds !== null || slip.type === "SINGLE";
-    if (!includeForVerification) return;
-
     verifiableIndices.push(index);
     requests.push(
       legacySelectionToCanonicalRequest({
@@ -234,14 +237,13 @@ export async function buildBetSlipPreview(
       logScreenshotPipelineEvent("odds_check_rejected", { selectionIndex: index });
     }
 
-    // Step 15I — when the player submitted no odds but SINGLE auto-lookup
-    // (see the request-construction block above) found and verified a real
-    // provider price, oddsCheck.submittedOdds already holds that promoted
-    // price (Step 15G's own promotion, carried through by Step 15H's
-    // bridge). For every other case — a real player submission, an
-    // EXPRESS null-odds leg (oddsCheck stays null, never sent to the
-    // provider), or a SINGLE lookup that failed to find anything to
-    // promote — this is exactly the original value, unchanged.
+    // Step 15I / Step 17 — when the player submitted no odds but auto-lookup
+    // (see the request-construction block above, now identical for SINGLE
+    // and EXPRESS) found and verified a real provider price,
+    // oddsCheck.submittedOdds already holds that promoted price (Step 15G's
+    // own promotion, carried through by Step 15H's bridge). For every other
+    // case — a real player submission, or a lookup that failed to find
+    // anything to promote — this is exactly the original value, unchanged.
     const effectiveSubmittedOdds = selection.submittedOdds ?? oddsCheck?.submittedOdds ?? null;
 
     return {

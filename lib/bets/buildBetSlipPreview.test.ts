@@ -223,7 +223,10 @@ test("buildBetSlipPreview: EXPRESS token signed with exactly 10 selections (the 
   assert.equal(verified_.payload.selections.length, 10);
 });
 
-test("buildBetSlipPreview: EXPRESS with unknown odds still has no token (nothing valid to sign)", async () => {
+test("buildBetSlipPreview: EXPRESS with a leg the provider can't resolve a price for still has no token (nothing valid to sign)", async () => {
+  // Step 17 — "Unknown Odds" IS now sent to the provider (auto-lookup
+  // applies to EXPRESS too), but the lookup genuinely fails to find a price
+  // for it, so totals/token stay null exactly as before this fix.
   const slip: ParsedBetSlip = {
     type: "EXPRESS",
     stake: 40,
@@ -234,9 +237,16 @@ test("buildBetSlipPreview: EXPRESS with unknown odds still has no token (nothing
   };
 
   const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
-    verifyOddsFn: fakeVerifyOddsFn({ "Known Odds": verified(2.0, 2.0) }),
+    verifyOddsFn: fakeVerifyOddsFn({
+      "Known Odds": verified(2.0, 2.0),
+      // A real Step 15G verifyOdds() failed lookup never fabricates a
+      // price — submittedOdds stays null, matching the null input odds.
+      "Unknown Odds": { matched: false, withinTolerance: null, sourceOdds: null, submittedOdds: null, discrepancyPercent: null, bookmaker: null, note: "No matching event found" },
+    }),
   });
 
+  assert.equal(result.preview.selections[1].oddsStatus, "NOT_FOUND");
+  assert.equal(result.preview.selections[1].submittedOdds, null);
   assert.equal(result.preview.totalOdds, null);
   assert.equal(result.preview.potentialWin, null);
   assert.equal(result.previewToken, null);
@@ -351,7 +361,12 @@ test("buildBetSlipPreview: statuses are mapped independently across a mixed EXPR
   assert.equal(td.oddsStatus, "UNAVAILABLE");
 });
 
-test("buildBetSlipPreview: a selection with no submitted odds is skipped by verifyOddsFn and totals become null", async () => {
+test("buildBetSlipPreview: a null-odds selection whose provider lookup throws maps to UNAVAILABLE (attempted, not skipped) and totals become null", async () => {
+  // Step 17 — "Unknown Odds" IS now sent to the provider; fakeVerifyOddsFn
+  // throws for it (no fixture configured), exercising the "attempted but
+  // the check itself failed" path, distinct from an attempted-but-genuinely-
+  // unmatched NOT_FOUND (see the "provider can't resolve a price" test
+  // above).
   const slip: ParsedBetSlip = {
     type: "EXPRESS",
     stake: 40,
@@ -521,7 +536,7 @@ test("DI: TheOddsApiProvider can be built around an injected fake verifyOddsFn a
   assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
 });
 
-test("DI: an injected OddsVerificationService-shaped dependency is called exactly once, with one request per verifiable selection, in order", async () => {
+test("DI: an injected OddsVerificationService-shaped dependency is called exactly once, with one request per selection (including null-odds legs), in order", async () => {
   const calls: readonly VerifySelectionRequest[][] = [];
   const fakeService = {
     verifyMany: async (requests: readonly VerifySelectionRequest[]): Promise<readonly VerificationResult[]> => {
@@ -535,7 +550,9 @@ test("DI: an injected OddsVerificationService-shaped dependency is called exactl
     stake: 30,
     selections: [
       { sport: "Football", event: "Match A", market: null, selection: "1", submittedOdds: 2.0 },
-      { sport: "Football", event: "Match B", market: null, selection: "Win", submittedOdds: null }, // no submitted odds — excluded from the batch
+      // Step 17 — no submitted odds no longer excludes this leg from the
+      // batch: EXPRESS auto-lookup is now identical to SINGLE.
+      { sport: "Football", event: "Match B", market: null, selection: "Win", submittedOdds: null },
       { sport: "Football", event: "Match C", market: null, selection: "2", submittedOdds: 1.9 },
     ],
   };
@@ -543,9 +560,10 @@ test("DI: an injected OddsVerificationService-shaped dependency is called exactl
   await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: fakeService });
 
   assert.equal(calls.length, 1, "verifyMany is called exactly once for the whole batch");
-  assert.equal(calls[0].length, 2, "only the two selections with submitted odds are included");
+  assert.equal(calls[0].length, 3, "every selection is included, regardless of submitted odds");
   assert.equal(calls[0][0].selection.event.name, "Match A");
-  assert.equal(calls[0][1].selection.event.name, "Match C");
+  assert.equal(calls[0][1].selection.event.name, "Match B");
+  assert.equal(calls[0][2].selection.event.name, "Match C");
 });
 
 test("DI: supplying both oddsVerificationService and verifyOddsFn is rejected as ambiguous", async () => {
@@ -913,7 +931,7 @@ test("Step 15I (C): SINGLE + real numeric odds — unchanged, byte-for-byte regr
   assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
 });
 
-test("Step 15I (D): non-SINGLE (EXPRESS) + null odds — provider lookup is NOT activated for the null-odds leg", async () => {
+test("Step 17: EXPRESS + null odds — provider lookup IS now activated for the null-odds leg, same as SINGLE", async () => {
   const slip: ParsedBetSlip = {
     type: "EXPRESS",
     stake: 40,
@@ -927,16 +945,158 @@ test("Step 15I (D): non-SINGLE (EXPRESS) + null odds — provider lookup is NOT 
   const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
     verifyOddsFn: async (input) => {
       calledEvents.push(input.event);
-      if (input.odds === null) throw new Error("EXPRESS must never send a null-odds leg to the provider");
-      return verified(input.odds, input.odds);
+      if (input.event === "Known Odds") return verified(input.odds!, input.odds!);
+      // "Unknown Odds" — a real, live provider match for a leg the player
+      // never typed a price for; the auto-lookup promotes this price.
+      return verified(1.65, 1.65);
     },
   });
 
-  assert.deepEqual(calledEvents, ["Known Odds"], "only the selection with real submitted odds may reach the provider; the null-odds EXPRESS leg must not");
-  assert.equal(result.preview.selections[1].submittedOdds, null);
-  assert.equal(result.preview.selections[1].oddsStatus, "UNAVAILABLE");
+  assert.deepEqual(calledEvents, ["Known Odds", "Unknown Odds"], "both legs must now reach the provider, including the null-odds one");
+  assert.equal(result.preview.selections[1].submittedOdds, 1.65, "the null-odds leg's submittedOdds must be promoted from the provider match");
+  assert.equal(result.preview.selections[1].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.totalOdds, 3.3); // 2.0 * 1.65
+  assert.equal(result.preview.potentialWin, 132); // 40 * 3.3
+});
+
+// ---------------------------------------------------------------------
+// Step 17 — EXPRESS auto-lookup: removes the Step 15I SINGLE-only
+// restriction so a null-submittedOdds EXPRESS leg goes through the exact
+// same buildBetSlipPreview() -> oddsVerificationService.verifyMany() ->
+// provider.verifySelection() -> verifyOdds() path SINGLE already used.
+// Reproduces the diagnosed real-world case: two individually-VERIFIED-as-
+// SINGLE events ("Dinamo Zagreb vs Thun", "KuPS vs Sabah Baku"), combined
+// into an EXPRESS, neither with a player-submitted price.
+// ---------------------------------------------------------------------
+
+function dinamoKupsExpressSlip(): ParsedBetSlip {
+  return {
+    type: "EXPRESS",
+    stake: 100,
+    selections: [
+      { sport: "Football", event: "Dinamo Zagreb vs Thun", market: "Match Winner", selection: "Dinamo Zagreb", submittedOdds: null },
+      { sport: "Football", event: "KuPS vs Sabah Baku", market: "Match Winner", selection: "KuPS", submittedOdds: null },
+    ],
+  };
+}
+
+test("Step 17 (1): EXPRESS of two null-odds legs — both legs are sent to provider verification (verifyMany receives two requests, not zero)", async () => {
+  const calledEvents: string[] = [];
+  await buildBetSlipPreview(dinamoKupsExpressSlip(), "player-1", TEST_SECRET, {
+    verifyOddsFn: async (input) => {
+      calledEvents.push(input.event);
+      return verified(1.65, 1.65);
+    },
+  });
+
+  assert.deepEqual(
+    calledEvents.sort(),
+    ["Dinamo Zagreb vs Thun", "KuPS vs Sabah Baku"].sort(),
+    "both null-odds EXPRESS legs must reach the provider",
+  );
+});
+
+test("Step 17 (1b): DI-level proof — an injected OddsVerificationService.verifyMany() receives exactly two requests for this slip, never an empty batch", async () => {
+  const calls: readonly VerifySelectionRequest[][] = [];
+  const fakeService = {
+    verifyMany: async (requests: readonly VerifySelectionRequest[]): Promise<readonly VerificationResult[]> => {
+      (calls as VerifySelectionRequest[][]).push([...requests]);
+      return requests.map(() =>
+        createVerifiedResult({ submittedOdds: "1.65", currentOdds: "1.65", provider: "THE_ODDS_API", checkedAt: CHECKED_AT }),
+      );
+    },
+  };
+
+  await buildBetSlipPreview(dinamoKupsExpressSlip(), "player-1", TEST_SECRET, { oddsVerificationService: fakeService });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].length, 2, "verifyMany must receive one request per leg, not an empty batch");
+});
+
+test("Step 17 (2): EXPRESS of two null-odds legs, both VERIFIED — each leg's currentOdds is filled, totalOdds/potentialWin are computed, Confirm becomes available (token signed)", async () => {
+  const result = await buildBetSlipPreview(dinamoKupsExpressSlip(), "player-1", TEST_SECRET, {
+    verifyOddsFn: async (input) => {
+      if (input.event === "Dinamo Zagreb vs Thun") return verified(1.65, 1.65);
+      return verified(2.0, 2.0);
+    },
+  });
+
+  const [dinamo, kups] = result.preview.selections;
+  assert.equal(dinamo.oddsStatus, "VERIFIED");
+  assert.equal(dinamo.currentOdds, 1.65);
+  assert.equal(dinamo.submittedOdds, 1.65, "auto-lookup must promote the provider price into submittedOdds");
+  assert.equal(kups.oddsStatus, "VERIFIED");
+  assert.equal(kups.currentOdds, 2.0);
+  assert.equal(kups.submittedOdds, 2.0);
+
+  assert.equal(result.preview.totalOdds, 3.3); // 1.65 * 2.0
+  assert.equal(result.preview.potentialWin, 330); // 100 * 3.3
+
+  // Confirm becomes available: an EXPRESS previewToken is only ever signed
+  // once totalOdds/potentialWin are both known (buildBetSlipPreview.ts's
+  // own EXPRESS token-signing condition, unchanged by this fix).
+  assert.ok(typeof result.previewToken === "string" && result.previewToken.length > 0);
+});
+
+test("Step 17 (3): EXPRESS of two null-odds legs, one NOT_FOUND — that leg maps to NOT_FOUND per the existing mapping, the whole express stays unconfirmable (no token, no totals)", async () => {
+  const result = await buildBetSlipPreview(dinamoKupsExpressSlip(), "player-1", TEST_SECRET, {
+    verifyOddsFn: async (input) => {
+      if (input.event === "Dinamo Zagreb vs Thun") return verified(1.65, 1.65);
+      // KuPS vs Sabah Baku — provider genuinely cannot match this event, a
+      // real Step 15G verifyOdds() failure never fabricates a price.
+      return { matched: false, withinTolerance: null, sourceOdds: null, submittedOdds: null, discrepancyPercent: null, bookmaker: null, note: "No matching event found" };
+    },
+  });
+
+  const [dinamo, kups] = result.preview.selections;
+  assert.equal(dinamo.oddsStatus, "VERIFIED");
+  assert.equal(kups.oddsStatus, "NOT_FOUND", "mapOddsCheckToSelectionStatus maps a non-matched-but-attempted check to NOT_FOUND, not UNAVAILABLE");
+  assert.equal(kups.currentOdds, null);
+  assert.equal(kups.submittedOdds, null, "a failed lookup never fabricates a price");
+
+  // The whole EXPRESS stays unconfirmable: one leg's odds are unknown, so
+  // totalOdds/potentialWin can't be computed and no token is signed —
+  // downstream (Mini App canConfirmBetSlip.ts / confirm-time
+  // verifyPreviewFreshness.ts, both untouched by this fix) already treat
+  // NOT_FOUND identically to UNAVAILABLE as blocking.
   assert.equal(result.preview.totalOdds, null);
   assert.equal(result.preview.potentialWin, null);
+  assert.equal(result.previewToken, null);
+});
+
+test("Step 17 (3b): EXPRESS of two null-odds legs, one provider exception (never attempted a real match) — UNAVAILABLE, still unconfirmable", async () => {
+  const result = await buildBetSlipPreview(dinamoKupsExpressSlip(), "player-1", TEST_SECRET, {
+    verifyOddsFn: async (input) => {
+      if (input.event === "Dinamo Zagreb vs Thun") return verified(1.65, 1.65);
+      throw new Error("simulated provider crash");
+    },
+  });
+
+  const [dinamo, kups] = result.preview.selections;
+  assert.equal(dinamo.oddsStatus, "VERIFIED");
+  assert.equal(kups.oddsStatus, "UNAVAILABLE", "a genuinely thrown/never-completed check maps to UNAVAILABLE, distinct from an attempted-but-unmatched NOT_FOUND");
+  assert.equal(result.preview.totalOdds, null);
+  assert.equal(result.previewToken, null);
+});
+
+test("Step 17 (4): SINGLE null-odds regression — unaffected by the EXPRESS fix, byte-for-byte same as Step 15I (A)", async () => {
+  const slip = singleSlip(null);
+
+  let providerCallCount = 0;
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async (input) => {
+      providerCallCount += 1;
+      assert.equal(input.odds, null);
+      return verified(2.1, 2.1);
+    },
+  });
+
+  assert.equal(providerCallCount, 1);
+  assert.equal(result.preview.selections[0].submittedOdds, 2.1);
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.totalOdds, 2.1);
+  assert.equal(result.preview.potentialWin, 157.5);
+  assert.ok(result.previewToken !== null);
 });
 
 // ---------------------------------------------------------------------
