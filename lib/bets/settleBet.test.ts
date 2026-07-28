@@ -705,3 +705,222 @@ test("settleBet: Transaction.balanceAfter equals the final persisted currentCred
     assert.equal(fake._debug.getPlayer("player-1")?.currentCredit.toString(), result.balanceAfter.toString());
   }
 });
+
+// ---------------------------------------------------------------------
+// EXPRESS settlement — whole-Bet granularity only.
+//
+// Architectural context (see the Settlement audit): prisma/schema.prisma's
+// BetSelection model has no settlement-status column at all, and
+// settleBet.ts's own bet.findUnique select (line ~162) never reads `type`
+// or `selections` — only id/status/playerId/stake/totalOdds/odds. Settlement
+// math is therefore IDENTICAL for SINGLE and EXPRESS by construction; there
+// is no EXPRESS-specific branch inside settleBet.ts to exercise separately.
+// What the tests below actually prove:
+//   1. A real EXPRESS-shaped Bet (canonical Bet.totalOdds, legacy Bet.odds
+//      null, 2+ BetSelection rows) settles correctly using Bet.totalOdds —
+//      never re-deriving a price from the individual selections' own odds
+//      or falling back to legacy odds while totalOdds is present.
+//   2. BetSelection rows are provably untouched. settleBet.ts's only
+//      database calls are bet.findUnique / tx.bet.update / tx.player.update
+//      / tx.transaction.create — never tx.betSelection.* — and
+//      SettleBetInput (settleBet.ts:21-24) doesn't even accept selection
+//      data as input. No shared fake-db change is needed for this: the
+//      existing createFakeDb() tx object already has no `betSelection`
+//      property, so an accidental future tx.betSelection.* call inside
+//      settleBet.ts would throw immediately and fail every test in this
+//      file, not just these. The fixture below lives entirely outside the
+//      fake db (never passed into settleBet()) and is asserted unchanged
+//      purely to lock in and document that contract.
+// ---------------------------------------------------------------------
+
+// Mirrors prisma/schema.prisma's BetSelection shape (sport/event/outcome/
+// odds) closely enough to be recognizable as "the real thing" — not a
+// Prisma model, just a plain fixture settleBet() never receives a
+// reference to.
+interface FakeBetSelectionRow {
+  id: string;
+  betId: string;
+  sport: string;
+  event: string;
+  outcome: string;
+  odds: Prisma.Decimal;
+}
+
+// Deliberately does NOT multiply to totalOdds (1.50 * 1.80 = 2.70, while
+// expressBet()'s default totalOdds is 2.50) — Step "EXPRESS WIN uses
+// canonical Bet.totalOdds" below depends on this mismatch to prove
+// settleBet() never re-derives a price from these.
+function fakeExpressSelections(betId: string): readonly FakeBetSelectionRow[] {
+  return [
+    { id: "sel-1", betId, sport: "Football", event: "Real Madrid vs Barcelona", outcome: "Real Madrid Win", odds: new Prisma.Decimal("1.50") },
+    { id: "sel-2", betId, sport: "Football", event: "Inter vs Juventus", outcome: "Inter Win", odds: new Prisma.Decimal("1.80") },
+  ];
+}
+
+function selectionsFingerprint(selections: readonly FakeBetSelectionRow[]): string {
+  return JSON.stringify(selections.map((s) => ({ ...s, odds: s.odds.toString() })));
+}
+
+// A real EXPRESS Bet row per prisma/schema.prisma: no single event/outcome
+// of its own (both live on BetSelection, Stage 12), totalOdds is the
+// canonical combined price, legacy odds is null (no EXPRESS bet was ever
+// created through the pre-Stage-1 single-event path). `type: "EXPRESS"`
+// itself is deliberately not part of this fixture — settleBet.ts's own
+// select never reads it (confirmed above), so FakeBetRow correctly has no
+// such field either; what makes a fixture "EXPRESS" here is the paired
+// fakeExpressSelections() below, exactly as a real multi-selection Bet row
+// would be paired with 2+ BetSelection rows.
+function expressBet(overrides: Partial<FakeBetRow> = {}): FakeBetRow {
+  return fakeBet({ stake: new Prisma.Decimal(50), totalOdds: new Prisma.Decimal("2.50"), odds: null, ...overrides });
+}
+
+test("settleBet: EXPRESS WIN — CONFIRMED with 2 selections settles using Bet.totalOdds, BetSelection rows untouched", async () => {
+  const fake = createFakeDb({ bet: expressBet() });
+  const selections = fakeExpressSelections(BET_ID);
+  const before = selectionsFingerprint(selections);
+
+  const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN" });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_WIN");
+  assert.equal(result.grossPayout?.toString(), "125"); // 50 * 2.50 (Bet.totalOdds)
+  assert.equal(result.netProfit?.toString(), "75"); // 125 - 50
+  assert.equal(result.amount.toString(), "75");
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "75");
+  assert.equal(fake._debug.transactions().length, 1);
+  const [txRow] = fake._debug.transactions();
+  assert.equal(txRow.type, "BET_PAYOUT");
+  assert.equal(txRow.amount.toString(), "75");
+
+  assert.equal(selectionsFingerprint(selections), before, "BetSelection rows must be unchanged after settlement");
+});
+
+test("settleBet: EXPRESS LOSS — CONFIRMED with 3 selections, credit decreases by exactly stake, no odds required, BetSelection untouched", async () => {
+  const bet = expressBet({ stake: new Prisma.Decimal(40) });
+  const fake = createFakeDb({ bet });
+  const selections = [
+    ...fakeExpressSelections(BET_ID),
+    { id: "sel-3", betId: BET_ID, sport: "Football", event: "Bayern vs Dortmund", outcome: "Bayern Win", odds: new Prisma.Decimal("1.40") },
+  ];
+  const before = selectionsFingerprint(selections);
+
+  const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_LOSS" });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_LOSS");
+  assert.equal(result.amount.toString(), "-40");
+  assert.equal(result.grossPayout, undefined);
+  assert.equal(result.netProfit, undefined);
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "-40");
+  assert.equal(fake._debug.transactions().length, 1);
+  const [txRow] = fake._debug.transactions();
+  assert.equal(txRow.type, "BET_STAKE");
+  assert.equal(txRow.amount.toString(), "-40");
+
+  assert.equal(selectionsFingerprint(selections), before, "BetSelection rows must be unchanged after settlement");
+});
+
+test("settleBet: EXPRESS VOID — CONFIRMED with 2 selections, credit unchanged, single zero-amount ADJUSTMENT Transaction, BetSelection untouched", async () => {
+  const fake = createFakeDb({ bet: expressBet(), playerCurrentCredit: new Prisma.Decimal(15) });
+  const selections = fakeExpressSelections(BET_ID);
+  const before = selectionsFingerprint(selections);
+
+  const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "VOID" });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "VOID");
+  assert.equal(result.amount.toString(), "0");
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "15"); // unchanged
+  assert.equal(fake._debug.transactions().length, 1);
+  const [txRow] = fake._debug.transactions();
+  assert.equal(txRow.type, "ADJUSTMENT");
+  assert.equal(txRow.amount.toString(), "0");
+
+  assert.equal(selectionsFingerprint(selections), before, "BetSelection rows must be unchanged after settlement");
+});
+
+test("settleBet: EXPRESS WIN uses canonical Bet.totalOdds — never the legacy Bet.odds value, never the selections' own odds multiplied together", async () => {
+  // Three deliberately different numbers: totalOdds=2.50 (canonical, must
+  // win), selection odds 1.50*1.80=2.70 (must be ignored — and can't be
+  // read anyway, per this file's own header comment), legacy odds=9.99
+  // (must be ignored while totalOdds is present, same precedence already
+  // proven for SINGLE by "settleBet: WIN uses totalOdds in preference to
+  // legacy odds" above).
+  const fake = createFakeDb({
+    bet: expressBet({ stake: new Prisma.Decimal(50), totalOdds: new Prisma.Decimal("2.50"), odds: new Prisma.Decimal("9.99") }),
+  });
+  const selections = fakeExpressSelections(BET_ID); // product = 1.50 * 1.80 = 2.70, unused
+
+  const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN" });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.grossPayout?.toString(), "125", "must use totalOdds=2.50, not the legacy odds=9.99 or the selections' 1.50*1.80=2.70 product");
+  assert.equal(result.netProfit?.toString(), "75");
+  void selections; // documents the mismatch above; never read by settleBet()
+});
+
+test("settleBet: EXPRESS idempotency — repeating the same settlement returns IDEMPOTENT, no second write, BetSelection still untouched", async () => {
+  const fake = createFakeDb({ bet: expressBet() });
+  const selections = fakeExpressSelections(BET_ID);
+  const before = selectionsFingerprint(selections);
+
+  const first = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN" });
+  const second = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN" });
+
+  assert.equal(first.kind, "APPLIED");
+  assert.deepEqual(second, { kind: "IDEMPOTENT", betId: BET_ID, status: "SETTLED_WIN" });
+  assert.equal(fake._debug.playerUpdateCallCount(), 1);
+  assert.equal(fake._debug.transactions().length, 1);
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "75"); // only the first call's net profit
+
+  assert.equal(selectionsFingerprint(selections), before, "BetSelection rows must be unchanged after either call");
+});
+
+test("settleBet: EXPRESS conflict — SETTLED_WIN followed by a SETTLED_LOSS request throws SettlementConflictError, no further writes, BetSelection untouched", async () => {
+  const fake = createFakeDb({ bet: expressBet() });
+  const selections = fakeExpressSelections(BET_ID);
+  await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN" });
+  const before = selectionsFingerprint(selections);
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_LOSS" }),
+    (err: unknown) => {
+      assert.ok(err instanceof SettlementConflictError);
+      assert.equal(err.currentStatus, "SETTLED_WIN");
+      assert.equal(err.requestedStatus, "SETTLED_LOSS");
+      return true;
+    },
+  );
+
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_WIN"); // unchanged
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "75"); // unchanged by the rejected LOSS
+  assert.equal(fake._debug.transactions().length, 1); // only the original WIN
+  assert.equal(selectionsFingerprint(selections), before, "BetSelection rows must be unchanged after the rejected conflicting request");
+});
+
+test("settleBet: EXPRESS WIN with both totalOdds and legacy odds null throws MissingSettlementOddsError and performs no writes at all", async () => {
+  const fake = createFakeDb({ bet: expressBet({ totalOdds: null, odds: null }) });
+  const selections = fakeExpressSelections(BET_ID);
+  const before = selectionsFingerprint(selections);
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN" }),
+    (err: unknown) => {
+      assert.ok(err instanceof MissingSettlementOddsError);
+      assert.equal(err.code, "MISSING_SETTLEMENT_ODDS");
+      assert.equal(err.betId, BET_ID);
+      return true;
+    },
+  );
+
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "CONFIRMED"); // unchanged
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "0"); // unchanged
+  assert.equal(fake._debug.playerUpdateCallCount(), 0);
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+  assert.equal(fake._debug.betUpdateAttemptCount(), 0); // never even attempted — aborted before the transaction opened
+  assert.equal(selectionsFingerprint(selections), before, "BetSelection rows must be unchanged after a rejected settlement attempt");
+});
