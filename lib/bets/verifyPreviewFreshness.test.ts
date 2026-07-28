@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { verifyPreviewFreshness } from "./verifyPreviewFreshness";
+import { verifyPreviewFreshness, decideFreshnessOutcome } from "./verifyPreviewFreshness";
 import type { PreviewTokenPayload, ExpressPreviewTokenPayload } from "@/lib/betPreview/previewToken";
 import type { OddsVerificationInput } from "@/lib/odds/oddsVerifier";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
+import type { BetSlipPreview } from "./buildBetSlipPreview";
 
 // Same fixture/fake conventions as lib/bets/buildBetSlipPreview.test.ts —
 // this file exercises the exact same production odds-verification pipeline
@@ -143,14 +144,14 @@ test("verifyPreviewFreshness: SINGLE ODDS_CHANGED (better) is never silently acc
   assert.equal(decision.kind, "ODDS_CHANGED");
 });
 
-test("verifyPreviewFreshness: SINGLE NOT_FOUND returns SELECTION_UNAVAILABLE, never conflated with a provider outage", async () => {
+test("verifyPreviewFreshness: SINGLE NOT_FOUND accepts — submittable for operator review, never conflated with a provider outage", async () => {
   const payload = singlePayload({ odds: 2.05 });
 
   const decision = await verifyPreviewFreshness(payload, TEST_SECRET, {
     verifyOddsFn: fakeVerifyOddsFn({ "Real Madrid vs Barcelona": notFound(2.05) }),
   });
 
-  assert.deepEqual(decision, { kind: "SELECTION_UNAVAILABLE" });
+  assert.deepEqual(decision, { kind: "ACCEPT" });
 });
 
 test("verifyPreviewFreshness: SINGLE UNAVAILABLE (provider throws) returns VERIFICATION_UNAVAILABLE", async () => {
@@ -179,12 +180,20 @@ test("verifyPreviewFreshness: SINGLE provider timeout returns VERIFICATION_UNAVA
 // (lib/odds/mapOddsStatus.ts), whose implementation is exhaustive over
 // exactly four cases (null -> UNAVAILABLE; matched:false -> NOT_FOUND;
 // withinTolerance -> VERIFIED; else -> ODDS_CHANGED) and never returns
-// "PENDING" — confirmed by direct inspection of that file, which this step
-// does not modify. Per the review's own conditional instruction ("unless
-// repository types prove it is impossible in a completed preview"), no
-// runtime test exists for it; STATUS_RANK still ranks it identically to
-// UNAVAILABLE (rank 3) as pure defense-in-depth, in case that invariant
-// ever changes.
+// "PENDING" — confirmed by direct inspection of that file. No
+// integration-style test (one that goes through verifyPreviewFreshness's
+// real buildBetSlipPreview() call) can exercise it, so this instead
+// unit-tests the exported decideFreshnessOutcome() directly with a
+// synthetic "PENDING" status — it's ranked identically to UNAVAILABLE (both
+// resolve to VERIFICATION_UNAVAILABLE) as pure defense-in-depth, in case
+// that invariant ever changes.
+test("decideFreshnessOutcome: PENDING resolves to VERIFICATION_UNAVAILABLE (unreachable via the real pipeline today, defense-in-depth)", () => {
+  const dummyPreview: BetSlipPreview = { type: "SINGLE", stake: 50, totalOdds: null, potentialWin: null, selections: [] };
+
+  const decision = decideFreshnessOutcome(["PENDING"], dummyPreview, null);
+
+  assert.deepEqual(decision, { kind: "VERIFICATION_UNAVAILABLE" });
+});
 
 /* -------------------------------------------------------------------------- */
 /* C. Null submitted-odds semantics                                          */
@@ -201,7 +210,7 @@ test("verifyPreviewFreshness: null submittedOdds is exempt from gating and never
   assert.deepEqual(decision, { kind: "ACCEPT" });
 });
 
-test("verifyPreviewFreshness: a null-submittedOdds leg never hides a genuine NOT_FOUND on another leg", async () => {
+test("verifyPreviewFreshness: a null-submittedOdds leg is exempted, and a NOT_FOUND leg elsewhere still accepts (not masked, not blocked)", async () => {
   const payload = expressPayload({
     selections: [
       { ...expressPayload().selections[0], submittedOdds: null, currentOdds: null, oddsStatus: "UNAVAILABLE" },
@@ -213,7 +222,7 @@ test("verifyPreviewFreshness: a null-submittedOdds leg never hides a genuine NOT
     verifyOddsFn: fakeVerifyOddsFn({ "Inter vs Juventus": notFound(1.94) }),
   });
 
-  assert.deepEqual(decision, { kind: "SELECTION_UNAVAILABLE" });
+  assert.deepEqual(decision, { kind: "ACCEPT" });
 });
 
 test("verifyPreviewFreshness: a null-submittedOdds leg never hides a genuine UNAVAILABLE on another leg", async () => {
@@ -319,7 +328,7 @@ test("verifyPreviewFreshness: EXPRESS with multiple legs ODDS_CHANGED still reje
   assert.equal(decision.kind, "ODDS_CHANGED");
 });
 
-test("verifyPreviewFreshness: EXPRESS with one leg NOT_FOUND returns SELECTION_UNAVAILABLE for the whole slip", async () => {
+test("verifyPreviewFreshness: EXPRESS NOT_FOUND + VERIFIED accepts the whole slip for operator review", async () => {
   const payload = expressPayload();
 
   const decision = await verifyPreviewFreshness(payload, TEST_SECRET, {
@@ -329,7 +338,7 @@ test("verifyPreviewFreshness: EXPRESS with one leg NOT_FOUND returns SELECTION_U
     }),
   });
 
-  assert.deepEqual(decision, { kind: "SELECTION_UNAVAILABLE" });
+  assert.deepEqual(decision, { kind: "ACCEPT" });
 });
 
 test("verifyPreviewFreshness: EXPRESS with one leg UNAVAILABLE returns VERIFICATION_UNAVAILABLE for the whole slip", async () => {
@@ -345,7 +354,7 @@ test("verifyPreviewFreshness: EXPRESS with one leg UNAVAILABLE returns VERIFICAT
   assert.deepEqual(decision, { kind: "VERIFICATION_UNAVAILABLE" });
 });
 
-test("verifyPreviewFreshness: EXPRESS ODDS_CHANGED + NOT_FOUND resolves to SELECTION_UNAVAILABLE, never a reconfirmable refreshed preview", async () => {
+test("verifyPreviewFreshness: EXPRESS ODDS_CHANGED + NOT_FOUND resolves to ODDS_CHANGED — a real price move is never waved through just because another leg is merely not-found", async () => {
   const payload = expressPayload();
 
   const decision = await verifyPreviewFreshness(payload, TEST_SECRET, {
@@ -355,7 +364,10 @@ test("verifyPreviewFreshness: EXPRESS ODDS_CHANGED + NOT_FOUND resolves to SELEC
     }),
   });
 
-  assert.deepEqual(decision, { kind: "SELECTION_UNAVAILABLE" });
+  assert.equal(decision.kind, "ODDS_CHANGED");
+  if (decision.kind !== "ODDS_CHANGED") return;
+  assert.equal(typeof decision.refreshedPreviewToken, "string");
+  assert.ok(decision.refreshedPreviewToken.length > 0);
 });
 
 test("verifyPreviewFreshness: EXPRESS ODDS_CHANGED + UNAVAILABLE resolves to VERIFICATION_UNAVAILABLE, never a reconfirmable refreshed preview", async () => {

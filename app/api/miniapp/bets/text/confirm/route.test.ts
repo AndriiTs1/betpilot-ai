@@ -660,7 +660,7 @@ test("confirm route: SINGLE with better odds is still rejected as ODDS_CHANGED �
   assert.equal(db._debug.betCount(), 0);
 });
 
-test("confirm route: SINGLE with the event no longer found returns 422 SELECTION_UNAVAILABLE, never the transient VERIFICATION_UNAVAILABLE code, no DB write, no createBetFromPreview", async () => {
+test("confirm route: SINGLE with the event no longer found (NOT_FOUND) confirms as PENDING for operator review, with the submitted odds, never the transient VERIFICATION_UNAVAILABLE code", async () => {
   const db = createFakeDb();
   const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
 
@@ -669,13 +669,36 @@ test("confirm route: SINGLE with the event no longer found returns 422 SELECTION
     fakeOptions(db, { verifyOddsFn: fakeVerifyOddsFnByEvent({ "Real Madrid vs Barcelona": notFoundResult(2.1) }) }),
   );
 
-  assert.equal(res.status, 422);
-  const body = (await json(res)) as { error: string; refreshedPreview?: unknown; refreshedPreviewToken?: unknown };
-  assert.equal(body.error, "SELECTION_UNAVAILABLE");
-  assert.equal(body.refreshedPreview, undefined);
-  assert.equal(body.refreshedPreviewToken, undefined);
-  assert.equal(db._debug.betCount(), 0);
-  assert.equal(db._debug.createCallCount(), 0);
+  assert.equal(res.status, 200);
+  const body = (await json(res)) as { idempotent: boolean; bet: Record<string, unknown> };
+  assert.equal(body.idempotent, false);
+  assert.equal(body.bet.status, "PENDING");
+  assert.equal(body.bet.type, "SINGLE");
+  assert.equal(body.bet.odds, 2.1, "Bet.odds is the player's submitted odds from the signed token, not a provider price");
+  assert.equal(db._debug.betCount(), 1);
+  assert.equal(db._debug.createCallCount(), 1);
+});
+
+test("confirm route: repeated confirm of the same NOT_FOUND-turned-ACCEPT previewId is idempotent, no duplicate Bet", async () => {
+  const db = createFakeDb();
+  const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
+  const notFoundOptions = fakeOptions(db, {
+    verifyOddsFn: fakeVerifyOddsFnByEvent({ "Real Madrid vs Barcelona": notFoundResult(2.1) }),
+  });
+
+  const first = await handleBetConfirm(confirmRequest(token), notFoundOptions);
+  assert.equal(first.status, 200);
+  const firstBody = (await json(first)) as { idempotent: boolean; bet: Record<string, unknown> };
+  assert.equal(firstBody.idempotent, false);
+  assert.equal(firstBody.bet.status, "PENDING");
+
+  const second = await handleBetConfirm(confirmRequest(token), notFoundOptions);
+  assert.equal(second.status, 200);
+  const secondBody = (await json(second)) as { idempotent: boolean; bet: Record<string, unknown> };
+  assert.equal(secondBody.idempotent, true);
+  assert.deepEqual(secondBody.bet, firstBody.bet);
+  assert.equal(db._debug.betCount(), 1, "only one Bet row may ever exist for this previewId");
+  assert.equal(db._debug.createCallCount(), 1, "only the first confirm may have ever called bet.create");
 });
 
 test("confirm route: SINGLE with a provider failure (thrown error) returns 503 VERIFICATION_UNAVAILABLE, no DB write", async () => {
@@ -754,7 +777,7 @@ test("confirm route: EXPRESS with one leg changed and one leg UNAVAILABLE return
   assert.equal(db._debug.createCallCount(), 0);
 });
 
-test("confirm route: EXPRESS with one leg changed and one leg NOT_FOUND returns 422 SELECTION_UNAVAILABLE, no refreshed preview/token, no DB write", async () => {
+test("confirm route: EXPRESS with one leg changed and one leg NOT_FOUND returns 409 ODDS_CHANGED_RECONFIRM_REQUIRED — a real price move is never waved through by a merely-not-found sibling leg, no DB write", async () => {
   const db = createFakeDb();
   const token = signExpressPreviewToken(expressTokenInput(), PREVIEW_SECRET);
 
@@ -768,13 +791,39 @@ test("confirm route: EXPRESS with one leg changed and one leg NOT_FOUND returns 
     }),
   );
 
-  assert.equal(res.status, 422);
-  const body = (await json(res)) as { error: string; refreshedPreview?: unknown; refreshedPreviewToken?: unknown };
-  assert.equal(body.error, "SELECTION_UNAVAILABLE");
-  assert.equal(body.refreshedPreview, undefined);
-  assert.equal(body.refreshedPreviewToken, undefined);
+  assert.equal(res.status, 409);
+  const body = (await json(res)) as { error: string; refreshedPreview: unknown; refreshedPreviewToken: string | null };
+  assert.equal(body.error, "ODDS_CHANGED_RECONFIRM_REQUIRED");
+  assert.ok(body.refreshedPreview);
+  assert.equal(typeof body.refreshedPreviewToken, "string");
   assert.equal(db._debug.betCount(), 0);
   assert.equal(db._debug.createCallCount(), 0);
+});
+
+test("confirm route: EXPRESS with one leg NOT_FOUND and the other VERIFIED confirms as PENDING for operator review, selections carry the submitted odds", async () => {
+  const db = createFakeDb();
+  const token = signExpressPreviewToken(expressTokenInput(), PREVIEW_SECRET);
+
+  const res = await handleBetConfirm(
+    confirmRequest(token),
+    fakeOptions(db, {
+      verifyOddsFn: fakeVerifyOddsFnByEvent({
+        "Real Madrid vs Barcelona": { matched: true, withinTolerance: true, sourceOdds: 1.8, submittedOdds: 1.8, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null },
+        "Inter Milan vs Juventus": notFoundResult(1.7),
+      }),
+    }),
+  );
+
+  assert.equal(res.status, 200);
+  const body = (await json(res)) as { idempotent: boolean; bet: Record<string, unknown> & { selections: Array<Record<string, unknown>> } };
+  assert.equal(body.idempotent, false);
+  assert.equal(body.bet.status, "PENDING");
+  assert.equal(body.bet.type, "EXPRESS");
+  assert.equal(body.bet.selections.length, 2);
+  assert.equal(body.bet.selections[0].odds, "1.8", "the submitted odds from the token, not a provider price");
+  assert.equal(body.bet.selections[1].odds, "1.7", "the NOT_FOUND leg still carries the player's submitted odds");
+  assert.equal(db._debug.betCount(), 1);
+  assert.equal(db._debug.createCallCount(), 1);
 });
 
 test("confirm route: EXPRESS with changed odds but no reconfirmable token (another exempt null-odds leg) returns 422 SELECTION_UNAVAILABLE, never 409 with a null token, no DB write, no persistence transaction", async () => {
@@ -1120,7 +1169,7 @@ test("confirm route (rate limit): repeated refreshed-token submissions each cons
   assert.equal(third.status, 429, "the third resubmission (of a refreshed token) must be rate-limited — each resubmission is its own confirm attempt");
 });
 
-test("confirm route (rate limit): SELECTION_UNAVAILABLE also consumes quota (any request reaching verifyPreviewFreshness does)", async () => {
+test("confirm route (rate limit): a NOT_FOUND-turned-ACCEPT confirmation also consumes quota (any request reaching verifyPreviewFreshness does, regardless of outcome)", async () => {
   const db = createFakeDb();
   const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000 });
   const token = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
@@ -1129,9 +1178,9 @@ test("confirm route (rate limit): SELECTION_UNAVAILABLE also consumes quota (any
     confirmRequest(token),
     fakeOptions(db, { rateLimiter: limiter, verifyOddsFn: fakeVerifyOddsFnByEvent({ "Real Madrid vs Barcelona": notFoundResult(2.1) }) }),
   );
-  assert.equal(first.status, 422);
-  const firstBody = (await json(first)) as { error: string };
-  assert.equal(firstBody.error, "SELECTION_UNAVAILABLE");
+  assert.equal(first.status, 200);
+  const firstBody = (await json(first)) as { bet: Record<string, unknown> };
+  assert.equal(firstBody.bet.status, "PENDING");
 
   const tokenB = signPreviewToken(singleTokenInput({ odds: 2.1 }), PREVIEW_SECRET);
   const second = await handleBetConfirm(confirmRequest(tokenB), fakeOptions(db, { rateLimiter: limiter }));

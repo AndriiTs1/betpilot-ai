@@ -26,13 +26,25 @@ import {
 } from "@/lib/bets/buildBetSlipPreview";
 import type { AnyPreviewTokenPayload } from "@/lib/betPreview/previewToken";
 
-// Pre-commit review correction — NOT_FOUND (the selection/event/market is
-// genuinely gone) and UNAVAILABLE (the provider itself could not verify
-// anything right now, a transient condition) are deliberately kept as two
-// separate outcomes, never collapsed: NOT_FOUND is a durable "this exact
-// bet can't be reconfirmed" signal, UNAVAILABLE is a "try again shortly"
-// signal — conflating them would misrepresent one as the other to the
-// caller, exactly what this correction fixes.
+// Business priority (fixed, in this exact order — see decideFreshnessOutcome
+// below):
+//   1. Any selection UNAVAILABLE/PENDING (provider couldn't verify anything
+//      right now, a transient condition)      -> VERIFICATION_UNAVAILABLE
+//   2. Else, any selection ODDS_CHANGED (the selection IS real, the price
+//      moved)                                  -> ODDS_CHANGED (reconfirm)
+//   3. Else — only NOT_FOUND and/or VERIFIED remain, both are acceptable
+//      for a manually-reviewable PENDING bet   -> ACCEPT
+// NOT_FOUND (the odds provider couldn't match this exact event/market) is
+// deliberately NOT a blocking status on its own: lib/bets/betSlipRules.ts's
+// canSubmitBetSlip already told the player at preview time this exact
+// status is submittable for operator review, so confirm must honor that,
+// not silently re-reject it with a stricter policy the player was never
+// shown. It only stops being acceptable when a WORSE problem (a real
+// provider outage) is also present — that precedence is exactly what
+// decideFreshnessOutcome below checks for, explicitly, in order, rather
+// than via a numeric rank/Math.max (which previously made ODDS_CHANGED
+// outrank NOT_FOUND in the wrong direction and offered no single place to
+// read the actual business rule).
 export type VerifyPreviewFreshnessDecision =
   | { kind: "ACCEPT" }
   // Refreshed preview/token reuse buildBetSlipPreview's own BetSlipPreview
@@ -41,14 +53,16 @@ export type VerifyPreviewFreshnessDecision =
   // exists. refreshedPreviewToken is guaranteed non-null/non-empty by
   // construction: ODDS_CHANGED is only ever returned after runtime-checking
   // that buildBetSlipPreview actually produced a real token (see
-  // decisionForWorstRank below) — a reconfirmation-required response is
+  // decideFreshnessOutcome below) — a reconfirmation-required response is
   // meaningless without something the client can actually resubmit.
   | { kind: "ODDS_CHANGED"; refreshedPreview: BetSlipPreview; refreshedPreviewToken: string }
-  // Also returned (instead of ODDS_CHANGED) when odds genuinely changed but
-  // buildBetSlipPreview could not produce a signed refreshed token to
-  // reconfirm against (see decisionForWorstRank) — never alongside an
-  // unresolved or missing leg either: a reconfirmable refreshed preview
-  // must never contain an unverified or missing leg.
+  // Reachable today only when odds genuinely changed but buildBetSlipPreview
+  // could not produce a signed refreshed EXPRESS token to reconfirm against
+  // (an exempt null-odds leg elsewhere prevents allOddsKnown) — see
+  // decideFreshnessOutcome. No longer reachable for a pure NOT_FOUND
+  // selection (that's ACCEPT now, per the priority above) — kept in this
+  // union regardless, per explicit instruction not to remove a decision
+  // kind without its own architectural decision.
   | { kind: "SELECTION_UNAVAILABLE" }
   | { kind: "VERIFICATION_UNAVAILABLE" };
 
@@ -102,68 +116,68 @@ function reconstructParsedBetSlip(payload: AnyPreviewTokenPayload): ParsedBetSli
   };
 }
 
-// Section 3/4 of the pre-commit review — the exact required precedence,
-// implemented as a "take the single worst status across every
-// freshness-relevant selection" ranking rather than a chain of independent
-// booleans (which is what previously, incorrectly, let ODDS_CHANGED
-// outrank UNAVAILABLE/NOT_FOUND). Higher rank always wins:
-//   0 VERIFIED           -> contributes nothing
-//   1 ODDS_CHANGED        -> odds moved, but the selection IS still real
-//   2 NOT_FOUND            -> the selection/event/market is gone
-//   3 UNAVAILABLE/PENDING  -> could not verify anything right now (transient)
-// This directly encodes every required combination: ODDS_CHANGED+UNAVAILABLE
-// -> rank 3 -> VERIFICATION_UNAVAILABLE; ODDS_CHANGED+NOT_FOUND -> rank 2 ->
-// SELECTION_UNAVAILABLE; NOT_FOUND+UNAVAILABLE -> rank 3 ->
-// VERIFICATION_UNAVAILABLE. PENDING is ranked identically to UNAVAILABLE,
-// defensively — mapOddsCheckToSelectionStatus (lib/odds/mapOddsStatus.ts)
-// never actually produces it, but nothing here assumes that will always
-// remain true.
-const STATUS_RANK: Record<BetSlipPreviewSelection["oddsStatus"], number> = {
-  VERIFIED: 0,
-  ODDS_CHANGED: 1,
-  NOT_FOUND: 2,
-  UNAVAILABLE: 3,
-  PENDING: 3,
-};
-
-// Final pre-commit correction — a reconfirmation-required response is only
-// valid when the server can actually hand back something the client can
-// resubmit. buildBetSlipPreview's own previewToken is genuinely nullable
-// for EXPRESS (it stays null whenever totalOdds/potentialWin couldn't be
-// computed — e.g. some OTHER, exempt null-submittedOdds leg is present), so
-// ODDS_CHANGED must never be returned with a null/empty token: that would
-// be a domain contract lying about what the caller can do with the result.
-// This function proves the token exists at runtime (typeof + non-empty
-// check) before ever constructing the ODDS_CHANGED variant — no `!`
-// non-null assertion and no `as string` cast anywhere. When odds genuinely
-// changed but no valid reconfirmable token could be produced, the caller
-// gets SELECTION_UNAVAILABLE instead: the response cannot be safely
-// reconfirmed, there is no valid signed replacement, and the player must
-// generate a brand new preview from the beginning — never a stale/old
-// token, never a fabricated one, and never the misleading transient
-// VERIFICATION_UNAVAILABLE code (verification itself DID complete; only
-// token generation did not).
-function decisionForWorstRank(
-  worstRank: number,
+// The exact required precedence, expressed directly as "does any selection
+// have this status" checks, evaluated in priority order — not a numeric
+// rank/Math.max: each business rule is its own explicit branch, so the
+// precedence is readable straight off this function instead of being
+// implied by which status was assigned the highest number. Exported so
+// lib/bets/verifyPreviewFreshness.test.ts can unit-test the PENDING case
+// directly — mapOddsCheckToSelectionStatus (lib/odds/mapOddsStatus.ts)
+// never actually produces PENDING through the real provider pipeline
+// (confirmed by direct inspection: it's exhaustive over exactly
+// null/matched:false/withinTolerance/else), so there is no way to reach it
+// through an integration-style test that goes via buildBetSlipPreview().
+export function decideFreshnessOutcome(
+  statuses: readonly BetSlipPreviewSelection["oddsStatus"][],
   refreshedPreview: BetSlipPreview,
   refreshedPreviewToken: string | null,
 ): VerifyPreviewFreshnessDecision {
-  if (worstRank >= 3) return { kind: "VERIFICATION_UNAVAILABLE" };
-  if (worstRank === 2) return { kind: "SELECTION_UNAVAILABLE" };
+  // Priority 1 — a real provider outage (or the reserved-but-unreachable
+  // PENDING, ranked identically as defense-in-depth) always wins,
+  // regardless of what any other selection's status is: "try again
+  // shortly" can never be downgraded to something more permissive just
+  // because another leg happened to be fine or merely not-found.
+  const hasVerificationUnavailable = statuses.some(
+    (status) => status === "UNAVAILABLE" || status === "PENDING",
+  );
+  if (hasVerificationUnavailable) return { kind: "VERIFICATION_UNAVAILABLE" };
 
-  if (worstRank === 1) {
-    // Explicit runtime narrowing (typeof + length check), not a `!`
-    // non-null assertion and not an `as string` cast — TypeScript's own
+  // Priority 2 — the selection is real and a price genuinely moved; the
+  // player must see and accept the new price before this bet can be
+  // created. This still applies even when another selection in the same
+  // EXPRESS slip is merely NOT_FOUND (priority 3) — NOT_FOUND being
+  // acceptable does not mean a real, worse-than-preview price change on a
+  // DIFFERENT leg gets silently waved through.
+  const hasOddsChanged = statuses.some((status) => status === "ODDS_CHANGED");
+  if (hasOddsChanged) {
+    // A reconfirmation-required response is only valid when the server can
+    // actually hand back something the client can resubmit.
+    // buildBetSlipPreview's own previewToken is genuinely nullable for
+    // EXPRESS (stays null whenever totalOdds/potentialWin couldn't be
+    // computed — e.g. some OTHER, exempt null-submittedOdds leg is
+    // present), so ODDS_CHANGED must never be returned with a null/empty
+    // token. Explicit runtime narrowing (typeof + non-empty check), not a
+    // `!` non-null assertion and not an `as string` cast — TypeScript's own
     // control-flow analysis narrows refreshedPreviewToken to `string` for
-    // every line after this guard, satisfying the ODDS_CHANGED variant's
-    // required (non-optional, non-null) field type genuinely, not just
-    // superficially.
+    // every line after this guard. When odds genuinely changed but no
+    // valid reconfirmable token could be produced, the caller gets
+    // SELECTION_UNAVAILABLE instead: the response cannot be safely
+    // reconfirmed, there is no valid signed replacement, and the player
+    // must generate a brand new preview from the beginning.
     if (typeof refreshedPreviewToken !== "string" || refreshedPreviewToken.length === 0) {
       return { kind: "SELECTION_UNAVAILABLE" };
     }
     return { kind: "ODDS_CHANGED", refreshedPreview, refreshedPreviewToken };
   }
 
+  // Priority 3 — only NOT_FOUND and/or VERIFIED remain. Both are
+  // acceptable: VERIFIED obviously so, and NOT_FOUND because
+  // lib/bets/betSlipRules.ts's canSubmitBetSlip already told the player at
+  // preview time this exact status is submittable for operator review —
+  // confirm must honor that, not re-reject it here with a stricter policy
+  // the player was never shown. The resulting Bet is created PENDING with
+  // the player's submitted odds (createBetFromPreview.ts, unchanged), for
+  // the operator to review manually.
   return { kind: "ACCEPT" };
 }
 
@@ -186,7 +200,7 @@ export async function verifyPreviewFreshness(
   // real legacy-bridge translation), never re-implemented here.
   const result = await buildBetSlipPreview(slip, payload.playerId, previewTokenSecret, buildOptions);
 
-  let worstRank = 0;
+  const relevantStatuses: BetSlipPreviewSelection["oddsStatus"][] = [];
 
   result.preview.selections.forEach((selection, index) => {
     const originalSubmittedOdds = slip.selections[index].submittedOdds;
@@ -216,9 +230,8 @@ export async function verifyPreviewFreshness(
     // "does not hide UNAVAILABLE" test).
     if (originalSubmittedOdds === null) return;
 
-    const rank = STATUS_RANK[selection.oddsStatus];
-    if (rank > worstRank) worstRank = rank;
+    relevantStatuses.push(selection.oddsStatus);
   });
 
-  return decisionForWorstRank(worstRank, result.preview, result.previewToken);
+  return decideFreshnessOutcome(relevantStatuses, result.preview, result.previewToken);
 }
