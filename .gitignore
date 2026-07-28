@@ -42,3 +42,6 @@ yarn-error.log*
 next-env.d.ts
 
 /lib/generated/prisma
+
+# Playwright MCP artifacts (console logs, page snapshots)
+.playwright-mcp/
