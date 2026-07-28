@@ -21,6 +21,18 @@ export type SettlementDatabase = PrismaClient;
 export interface SettleBetInput {
   betId: string;
   requestedStatus: SettlementTarget;
+  // Stage 3.4A — optional, WIN-only override for the odds used to compute
+  // the payout, instead of the stored Bet.totalOdds/Bet.odds. Exists so an
+  // application-layer caller (e.g. a future EXPRESS aggregator) can supply
+  // a freshly-computed effective price — e.g. a combined price adjusted
+  // for a VOID leg — without this file duplicating that computation.
+  // Absent for every existing caller today; a no-op when omitted. Safe
+  // because BetSelection.odds/Bet.totalOdds/Bet.odds are all immutable
+  // after creation (no update() call anywhere in the codebase ever writes
+  // to them — confirmed by a full-codebase audit, not assumed), so there is
+  // no staleness window between when a caller computes this value and when
+  // it's used here.
+  effectiveOdds?: Prisma.Decimal;
 }
 
 export type SettleBetResult =
@@ -69,6 +81,23 @@ export class MissingSettlementOddsError extends Error {
   }
 }
 
+// Covers every way an optional effectiveOdds input can be invalid: wrong
+// runtime type (defense-in-depth beyond the TS boundary), non-finite
+// (NaN/±Infinity — Prisma.Decimal/decimal.js can represent both), zero, or
+// negative. Also covers misuse — effectiveOdds provided for a
+// SETTLED_LOSS/VOID request, where it has no meaning and silently ignoring
+// it would risk masking a caller bug instead of surfacing it.
+export class InvalidEffectiveSettlementOddsError extends Error {
+  readonly code = "INVALID_EFFECTIVE_SETTLEMENT_ODDS" as const;
+  readonly betId: string;
+
+  constructor(betId: string, message: string) {
+    super(message);
+    this.name = "InvalidEffectiveSettlementOddsError";
+    this.betId = betId;
+  }
+}
+
 // Deliberately NOT added (see Stage 13.3 report):
 // - PlayerNotFoundForSettlementError — Bet.playerId is a required FK with
 //   real referential integrity; a Bet can't reference a Player that
@@ -86,6 +115,45 @@ export class MissingSettlementOddsError extends Error {
 // a concurrent request already moved the Bet off CONFIRMED first.
 function isRecordNotFoundError(err: unknown): boolean {
   return err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025";
+}
+
+// Runs before any database read — a malformed effectiveOdds input fails
+// fast with zero DB access, same "abort before any write is attempted"
+// principle the pre-existing MissingSettlementOddsError check already
+// follows below. Deliberately does NOT re-round or otherwise reshape a
+// valid value — it flows through the exact same stake.times(x) ->
+// roundMoney() pipeline totalOdds/legacyOdds already use in
+// computeSettlementFinancials, unrounded on the way in; the caller is
+// responsible for passing an already-appropriately-scaled Decimal, the same
+// implicit contract totalOdds/odds already have (their scale comes from
+// Prisma column precision, never from a rounding step in this file).
+function validateEffectiveOddsInput(
+  betId: string,
+  requestedStatus: SettlementTarget,
+  effectiveOdds: Prisma.Decimal | undefined,
+): void {
+  if (effectiveOdds === undefined) return;
+
+  if (requestedStatus !== "SETTLED_WIN") {
+    throw new InvalidEffectiveSettlementOddsError(
+      betId,
+      `effectiveOdds may only be provided when requestedStatus is SETTLED_WIN, got ${requestedStatus}`,
+    );
+  }
+
+  // Defense-in-depth beyond the TS boundary — this file is internal-only
+  // today (no HTTP route passes effectiveOdds through), but a caller could
+  // still construct a malformed value via an `as` cast or an untyped test
+  // double.
+  if (!(effectiveOdds instanceof Prisma.Decimal)) {
+    throw new InvalidEffectiveSettlementOddsError(betId, "effectiveOdds must be a Prisma.Decimal instance");
+  }
+  if (!effectiveOdds.isFinite()) {
+    throw new InvalidEffectiveSettlementOddsError(betId, `effectiveOdds must be finite, got ${effectiveOdds.toString()}`);
+  }
+  if (effectiveOdds.lte(0)) {
+    throw new InvalidEffectiveSettlementOddsError(betId, `effectiveOdds must be positive, got ${effectiveOdds.toString()}`);
+  }
 }
 
 const ROUNDING_DECIMAL_PLACES = 2;
@@ -116,18 +184,23 @@ function computeSettlementFinancials(
   stake: Prisma.Decimal,
   totalOdds: Prisma.Decimal | null,
   legacyOdds: Prisma.Decimal | null,
+  overrideOdds: Prisma.Decimal | null,
 ): SettlementFinancials {
   if (targetStatus === "SETTLED_WIN") {
-    // Precedence: Bet.totalOdds (canonical, populated for both SINGLE and
-    // EXPRESS today) first, legacy Bet.odds only as a backward-compatible
+    // Precedence: Stage 3.4A's caller-supplied overrideOdds first (already
+    // validated by validateEffectiveOddsInput before this function is ever
+    // called), then Bet.totalOdds (canonical, populated for both SINGLE and
+    // EXPRESS today), then legacy Bet.odds as a backward-compatible
     // fallback for an older row. Never re-derived from BetSelection rows —
-    // Stage 13.1's explicit instruction.
-    const effectiveOdds = totalOdds ?? legacyOdds;
-    if (effectiveOdds === null) {
+    // Stage 13.1's explicit instruction, still true for the two DB-sourced
+    // fallbacks; overrideOdds is the one deliberate, explicit exception,
+    // and only when a caller actually asks for it.
+    const settlementOdds = overrideOdds ?? totalOdds ?? legacyOdds;
+    if (settlementOdds === null) {
       throw new MissingSettlementOddsError(betId);
     }
 
-    const grossPayout = roundMoney(stake.times(effectiveOdds));
+    const grossPayout = roundMoney(stake.times(settlementOdds));
     const netProfit = roundMoney(grossPayout.minus(stake));
     return { delta: netProfit, transactionType: "BET_PAYOUT", grossPayout, netProfit };
   }
@@ -155,7 +228,12 @@ class RaceResolvedIdempotently extends Error {
 }
 
 export async function settleBet(db: SettlementDatabase, input: SettleBetInput): Promise<SettleBetResult> {
-  const { betId, requestedStatus } = input;
+  const { betId, requestedStatus, effectiveOdds } = input;
+
+  // Fails fast, before any database access — a malformed/misused
+  // effectiveOdds is a caller bug, not something to silently ignore or
+  // discover mid-transaction.
+  validateEffectiveOddsInput(betId, requestedStatus, effectiveOdds);
 
   const bet = await db.bet.findUnique({
     where: { id: betId },
@@ -185,6 +263,7 @@ export async function settleBet(db: SettlementDatabase, input: SettleBetInput): 
     bet.stake,
     bet.totalOdds,
     bet.odds,
+    effectiveOdds ?? null,
   );
 
   try {

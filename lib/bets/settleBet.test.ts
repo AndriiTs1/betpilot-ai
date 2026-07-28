@@ -5,6 +5,7 @@ import {
   settleBet,
   BetNotFoundForSettlementError,
   MissingSettlementOddsError,
+  InvalidEffectiveSettlementOddsError,
   type SettlementDatabase,
 } from "./settleBet";
 import {
@@ -923,4 +924,340 @@ test("settleBet: EXPRESS WIN with both totalOdds and legacy odds null throws Mis
   assert.equal(fake._debug.transactionCreateCallCount(), 0);
   assert.equal(fake._debug.betUpdateAttemptCount(), 0); // never even attempted — aborted before the transaction opened
   assert.equal(selectionsFingerprint(selections), before, "BetSelection rows must be unchanged after a rejected settlement attempt");
+});
+
+// ---------------------------------------------------------------------
+// Stage 3.4A — optional caller-computed effectiveOdds, WIN only.
+//
+// Architectural context (see the Stage 3.4A audit): BetSelection.odds and
+// Bet.totalOdds/Bet.odds are provably immutable after creation — no
+// bet.update()/betSelection.update() call anywhere in the codebase ever
+// writes to them (every bet.update() call site writes only `status`). A
+// caller-computed effectiveOdds therefore has no staleness/TOCTOU risk to
+// guard against here; it's just an ordinary immutable input value.
+// ---------------------------------------------------------------------
+
+// ---------------------------------------------------------------------
+// B. Override behavior
+// ---------------------------------------------------------------------
+
+test("effectiveOdds: WIN uses the override instead of Bet.totalOdds", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("6.00") }) });
+  const result = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_WIN",
+    effectiveOdds: new Prisma.Decimal("2.00"),
+  });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.grossPayout?.toString(), "200"); // 100 * 2.00, not 100 * 6.00
+  assert.equal(result.netProfit?.toString(), "100");
+  assert.equal(result.amount.toString(), "100");
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "100");
+  assert.equal(fake._debug.transactions().length, 1);
+});
+
+test("effectiveOdds: WIN uses the override instead of legacy Bet.odds", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(50), totalOdds: null, odds: new Prisma.Decimal("9.99") }) });
+  const result = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_WIN",
+    effectiveOdds: new Prisma.Decimal("3.00"),
+  });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.grossPayout?.toString(), "150"); // 50 * 3.00, not 50 * 9.99
+});
+
+test("effectiveOdds: stake 100, stored totalOdds 6.00, effectiveOdds 2.00 — exact worked example from the task", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("6.00") }) });
+  const result = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_WIN",
+    effectiveOdds: new Prisma.Decimal("2.00"),
+  });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.grossPayout?.toString(), "200");
+  assert.equal(result.netProfit?.toString(), "100");
+  const [txRow] = fake._debug.transactions();
+  assert.equal(txRow.type, "BET_PAYOUT");
+  assert.equal(txRow.amount.toString(), "100");
+  assert.equal(fake._debug.playerUpdateCallCount(), 1); // balance changed exactly once
+});
+
+test("effectiveOdds = 1.00 -> gross return equals stake, delta 0, status SETTLED_WIN, a real zero-amount BET_PAYOUT Transaction is still created", async () => {
+  // Existing rule (unchanged, verified against the real code): settleBet()
+  // creates tx.transaction.create() unconditionally after a WIN decision —
+  // there is no "skip if delta is zero" branch. VOID's zero-amount
+  // Transaction uses type ADJUSTMENT; a WIN that happens to compute a
+  // zero delta (effectiveOdds=1.00) still uses type BET_PAYOUT — this test
+  // locks in that existing distinction rather than assuming VOID's behavior
+  // silently applies here too.
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("6.00") }) });
+  const result = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_WIN",
+    effectiveOdds: new Prisma.Decimal("1.00"),
+  });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.grossPayout?.toString(), "100");
+  assert.equal(result.netProfit?.toString(), "0");
+  assert.equal(result.amount.toString(), "0");
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_WIN");
+  assert.equal(fake._debug.transactions().length, 1);
+  const [txRow] = fake._debug.transactions();
+  assert.equal(txRow.type, "BET_PAYOUT");
+  assert.equal(txRow.amount.toString(), "0");
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "0"); // unchanged: delta is exactly 0
+});
+
+// ---------------------------------------------------------------------
+// C. Validation
+// ---------------------------------------------------------------------
+
+test("effectiveOdds: zero is rejected, no writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN", effectiveOdds: new Prisma.Decimal(0) }),
+    (err: unknown) => {
+      assert.ok(err instanceof InvalidEffectiveSettlementOddsError);
+      assert.equal(err.code, "INVALID_EFFECTIVE_SETTLEMENT_ODDS");
+      assert.equal(err.betId, BET_ID);
+      return true;
+    },
+  );
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "CONFIRMED");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+  assert.equal(fake._debug.betUpdateAttemptCount(), 0);
+});
+
+test("effectiveOdds: negative is rejected, no writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN", effectiveOdds: new Prisma.Decimal("-2.00") }),
+    (err: unknown) => err instanceof InvalidEffectiveSettlementOddsError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("effectiveOdds: NaN is rejected, no writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+  const nanOdds = new Prisma.Decimal(NaN);
+  assert.ok(nanOdds.isNaN(), "test setup: Prisma.Decimal must actually be able to represent NaN");
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN", effectiveOdds: nanOdds }),
+    (err: unknown) => err instanceof InvalidEffectiveSettlementOddsError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("effectiveOdds: Infinity is rejected, no writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+  const infOdds = new Prisma.Decimal(Infinity);
+  assert.ok(!infOdds.isFinite(), "test setup: Prisma.Decimal must actually be able to represent Infinity");
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN", effectiveOdds: infOdds }),
+    (err: unknown) => err instanceof InvalidEffectiveSettlementOddsError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("effectiveOdds: a non-Decimal value at the runtime boundary is rejected, not silently coerced", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+
+  await assert.rejects(
+    () =>
+      settleBet(db(fake), {
+        betId: BET_ID,
+        requestedStatus: "SETTLED_WIN",
+        effectiveOdds: "2.00" as unknown as Prisma.Decimal,
+      }),
+    (err: unknown) => err instanceof InvalidEffectiveSettlementOddsError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("effectiveOdds: provided for SETTLED_LOSS is rejected (misuse), no writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+
+  await assert.rejects(
+    () =>
+      settleBet(db(fake), {
+        betId: BET_ID,
+        requestedStatus: "SETTLED_LOSS",
+        effectiveOdds: new Prisma.Decimal("2.00"),
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof InvalidEffectiveSettlementOddsError);
+      return true;
+    },
+  );
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "CONFIRMED");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("effectiveOdds: provided for VOID is rejected (misuse), no writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+
+  await assert.rejects(
+    () =>
+      settleBet(db(fake), {
+        betId: BET_ID,
+        requestedStatus: "VOID",
+        effectiveOdds: new Prisma.Decimal("2.00"),
+      }),
+    (err: unknown) => err instanceof InvalidEffectiveSettlementOddsError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("effectiveOdds: validation runs before any database read (fails fast even for a bet that doesn't exist)", async () => {
+  const fake = createFakeDb({ bet: null });
+
+  await assert.rejects(
+    () =>
+      settleBet(db(fake), {
+        betId: "nonexistent-bet",
+        requestedStatus: "SETTLED_LOSS",
+        effectiveOdds: new Prisma.Decimal("2.00"),
+      }),
+    (err: unknown) => err instanceof InvalidEffectiveSettlementOddsError,
+  );
+});
+
+// ---------------------------------------------------------------------
+// D. Fallback
+// ---------------------------------------------------------------------
+
+test("effectiveOdds absent -> falls back to Bet.totalOdds exactly as before (regression guard)", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("2.10") }) });
+  const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN" });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.grossPayout?.toString(), "210");
+});
+
+test("effectiveOdds absent + totalOdds null -> falls back to legacy Bet.odds exactly as before (regression guard)", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(50), totalOdds: null, odds: new Prisma.Decimal("1.80") }) });
+  const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN" });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.grossPayout?.toString(), "90");
+});
+
+test("effectiveOdds absent + totalOdds null + odds null -> MissingSettlementOddsError exactly as before (regression guard)", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ totalOdds: null, odds: null }) });
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN" }),
+    (err: unknown) => err instanceof MissingSettlementOddsError,
+  );
+});
+
+test("effectiveOdds present + totalOdds null + odds null -> settlement still succeeds using the override alone", async () => {
+  // Confirmed safe by the Stage 3.4A audit: the only real eligibility gate
+  // (decideSettlementTransition — CONFIRMED-or-already-settled) is
+  // orthogonal to odds presence and already ran before this point; nothing
+  // is bypassed by letting effectiveOdds be the sole financial source.
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(40), totalOdds: null, odds: null }) });
+  const result = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_WIN",
+    effectiveOdds: new Prisma.Decimal("2.50"),
+  });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.grossPayout?.toString(), "100"); // 40 * 2.50
+  assert.equal(result.netProfit?.toString(), "60");
+});
+
+// ---------------------------------------------------------------------
+// E. Idempotency
+// ---------------------------------------------------------------------
+
+test("effectiveOdds: first WIN with an override applies; a second identical call is idempotent", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("6.00") }) });
+
+  const first = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_WIN",
+    effectiveOdds: new Prisma.Decimal("2.00"),
+  });
+  const second = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_WIN",
+    effectiveOdds: new Prisma.Decimal("2.00"),
+  });
+
+  assert.equal(first.kind, "APPLIED");
+  assert.deepEqual(second, { kind: "IDEMPOTENT", betId: BET_ID, status: "SETTLED_WIN" });
+  assert.equal(fake._debug.transactions().length, 1);
+  assert.equal(fake._debug.playerUpdateCallCount(), 1);
+});
+
+test("effectiveOdds: a second call with a DIFFERENT effectiveOdds after settlement is still idempotent and does not recompute/rewrite anything", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("6.00") }) });
+
+  const first = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_WIN",
+    effectiveOdds: new Prisma.Decimal("2.00"),
+  });
+  assert.equal(first.kind, "APPLIED");
+  const balanceAfterFirst = fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString();
+
+  // A materially different override — decideSettlementTransition() resolves
+  // IDEMPOTENT purely from status (SETTLED_WIN === SETTLED_WIN), before
+  // computeSettlementFinancials() is ever reached, so this value is
+  // validated but never used to recompute anything.
+  const second = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_WIN",
+    effectiveOdds: new Prisma.Decimal("6.00"),
+  });
+
+  assert.deepEqual(second, { kind: "IDEMPOTENT", betId: BET_ID, status: "SETTLED_WIN" });
+  assert.equal(fake._debug.transactions().length, 1); // no second Transaction
+  assert.equal(fake._debug.playerUpdateCallCount(), 1); // balance not touched again
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), balanceAfterFirst); // still the FIRST call's result (100 net profit, not 500)
+});
+
+// ---------------------------------------------------------------------
+// F. Conflict — effectiveOdds must never influence status transition rules
+// ---------------------------------------------------------------------
+
+test("effectiveOdds: after SETTLED_WIN via override, a LOSS request is still a conflict", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+  await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN", effectiveOdds: new Prisma.Decimal("2.00") });
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_LOSS" }),
+    (err: unknown) => err instanceof SettlementConflictError,
+  );
+  assert.equal(fake._debug.transactions().length, 1);
+});
+
+test("effectiveOdds: after a LOSS, a WIN request with an override is still a conflict, not a silent overwrite", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+  await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_LOSS" });
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN", effectiveOdds: new Prisma.Decimal("2.00") }),
+    (err: unknown) => err instanceof SettlementConflictError,
+  );
+  assert.equal(fake._debug.transactions().length, 1);
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_LOSS");
 });
