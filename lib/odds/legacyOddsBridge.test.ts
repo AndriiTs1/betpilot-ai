@@ -310,6 +310,12 @@ test("result mapping: VERIFIED reconstructs matched:true, withinTolerance:true",
     discrepancyPercent: 2.38,
     bookmaker: "Pinnacle",
     note: null,
+    // Stage 3.1 — undefined: this fixture's VerificationResult carries no
+    // matchedEvent (the createVerifiedResult() call above doesn't supply
+    // one), so there is nothing honest to reconstruct these from.
+    providerEventId: undefined,
+    providerSportKey: undefined,
+    eventStartTime: undefined,
   });
 });
 
@@ -444,6 +450,9 @@ test("result mapping: a successful null-input lookup (VERIFIED) reconstructs sub
     discrepancyPercent: 0,
     bookmaker: "Pinnacle",
     note: null,
+    providerEventId: undefined,
+    providerSportKey: undefined,
+    eventStartTime: undefined,
   });
 });
 
@@ -477,4 +486,50 @@ test("result mapping: the (now-unused) second parameter, if supplied, never over
   const { oddsCheck } = verificationResultToLegacyOddsCheck(result, 999);
 
   assert.equal(oddsCheck?.submittedOdds, 2.15, "must reflect the result's own submittedOdds, not the ignored 999 argument");
+});
+
+// ---------------------------------------------------------------------
+// Stage 3.1 — matchedEvent round-trips into OddsCheckResult's own
+// providerEventId/providerSportKey/eventStartTime fields, so
+// buildBetSlipPreview.ts has exactly one place to read provider event
+// metadata from (the reconstructed oddsCheck), matching this bridge's
+// existing "legacy shape is the one canonical read surface" convention.
+// ---------------------------------------------------------------------
+
+test("result mapping: VERIFIED round-trips matchedEvent into providerEventId/providerSportKey/eventStartTime", () => {
+  const result = createVerifiedResult({
+    submittedOdds: "2.15",
+    currentOdds: "2.15",
+    provider: "THE_ODDS_API",
+    checkedAt: CHECKED_AT,
+    matchedEvent: {
+      event: { sport: "FOOTBALL", name: "Manchester United vs Chelsea", participants: [], period: "FULL_GAME", startTime: "2026-08-15T18:00:00.000Z" },
+      reference: { provider: "THE_ODDS_API", eventId: "evt-round-trip-1", sportKey: "soccer_epl" },
+    },
+  });
+
+  const { oddsCheck } = verificationResultToLegacyOddsCheck(result);
+
+  assert.equal(oddsCheck?.providerEventId, "evt-round-trip-1");
+  assert.equal(oddsCheck?.providerSportKey, "soccer_epl");
+  assert.equal(oddsCheck?.eventStartTime, "2026-08-15T18:00:00.000Z");
+});
+
+test("result mapping: FAILED round-trips matchedEvent too (event found, selection not matched)", () => {
+  const result = createFailedResult({
+    submittedOdds: "2.15",
+    provider: "THE_ODDS_API",
+    checkedAt: CHECKED_AT,
+    reasonCode: "SELECTION_NOT_FOUND",
+    matchedEvent: {
+      event: { sport: "FOOTBALL", name: "Manchester United vs Chelsea", participants: [], period: "FULL_GAME", startTime: "2026-08-15T18:00:00.000Z" },
+      reference: { provider: "THE_ODDS_API", eventId: "evt-round-trip-2", sportKey: "soccer_epl" },
+    },
+  });
+
+  const { oddsCheck } = verificationResultToLegacyOddsCheck(result);
+
+  assert.equal(oddsCheck?.matched, false);
+  assert.equal(oddsCheck?.providerEventId, "evt-round-trip-2");
+  assert.equal(oddsCheck?.providerSportKey, "soccer_epl");
 });

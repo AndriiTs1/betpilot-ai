@@ -8,6 +8,7 @@ import type { verifyOdds } from "@/lib/odds/oddsVerifier";
 import { TheOddsApiProvider } from "@/lib/odds/theOddsApiProvider";
 import { OddsVerificationService } from "@/lib/odds/oddsVerificationService";
 import type { VerifySelectionRequest } from "@/lib/odds/oddsProvider";
+import type { CanonicalSelection } from "@/lib/odds/domain";
 import {
   legacySelectionToCanonicalRequest,
   verificationResultToLegacyOddsCheck,
@@ -124,6 +125,58 @@ export interface BuildBetSlipPreviewResult {
 // defaults to the shared TheOddsApiProvider + OddsVerificationService for
 // actual routes. Not a general dependency-injection framework, just two
 // alternative seams with a shared default; see resolveOddsVerificationService.
+// Stage 3.1 — the seven provider/canonical fields threaded into the signed
+// preview token (lib/betPreview/previewToken.ts's PreviewTokenProviderMetadata).
+// Gated as one atomic unit on a single signal: did the odds check actually
+// resolve a trustworthy provider event? (oddsCheck.matched === true AND
+// oddsVerifier.ts's own all-or-nothing metadata was present — see
+// lib/odds/oddsVerifier.ts's extractProviderEventMetadata). Provider event
+// identity (providerEventId/providerSportKey/eventStartTime) comes from
+// oddsCheck, the post-verification RESULT; canonical market/selection
+// identity comes from `canonicalSelection`, the pre-verification REQUEST
+// already built by legacySelectionToCanonicalRequest() above — deterministic
+// from the player's own text, independent of whether the provider call
+// succeeded, but only surfaced here alongside the provider fields, never
+// independently, so a consumer sees "all seven present" as one fact.
+interface ProviderTokenFields {
+  providerEventId: string | null;
+  providerSportKey: string | null;
+  eventStartTime: string | null;
+  canonicalMarketType: string | null;
+  canonicalSelectionType: string | null;
+  canonicalParticipant: string | null;
+  canonicalPeriod: string | null;
+}
+
+const NULL_PROVIDER_TOKEN_FIELDS: ProviderTokenFields = {
+  providerEventId: null,
+  providerSportKey: null,
+  eventStartTime: null,
+  canonicalMarketType: null,
+  canonicalSelectionType: null,
+  canonicalParticipant: null,
+  canonicalPeriod: null,
+};
+
+function buildProviderTokenFields(
+  oddsCheck: OddsCheckResult | null,
+  canonicalSelection: CanonicalSelection | undefined,
+): ProviderTokenFields {
+  if (!oddsCheck || oddsCheck.matched !== true || oddsCheck.providerEventId === undefined || !canonicalSelection) {
+    return NULL_PROVIDER_TOKEN_FIELDS;
+  }
+
+  return {
+    providerEventId: oddsCheck.providerEventId,
+    providerSportKey: oddsCheck.providerSportKey ?? null,
+    eventStartTime: oddsCheck.eventStartTime ?? null,
+    canonicalMarketType: canonicalSelection.marketType,
+    canonicalSelectionType: canonicalSelection.selectionType,
+    canonicalParticipant: canonicalSelection.participant?.name ?? null,
+    canonicalPeriod: canonicalSelection.period,
+  };
+}
+
 export interface BuildBetSlipPreviewOptions {
   // Existing seam (unchanged type) — still the most direct way for a test
   // to control odds-check outcomes without knowing about the canonical
@@ -294,6 +347,7 @@ export async function buildBetSlipPreview(
   if (slip.type === "SINGLE") {
     const single = previewSelections[0];
     const rawOddsCheck: OddsCheckResult | null = reconstructedByIndex.get(0)?.oddsCheck ?? null;
+    const providerTokenFields = buildProviderTokenFields(rawOddsCheck, requests[0]?.selection);
 
     previewToken = signPreviewToken(
       {
@@ -312,6 +366,7 @@ export async function buildBetSlipPreview(
               bookmaker: rawOddsCheck.bookmaker,
             }
           : null,
+        ...providerTokenFields,
       },
       previewTokenSecret,
     );
@@ -330,16 +385,22 @@ export async function buildBetSlipPreview(
         stake: stakeDecimal.toString(),
         totalOdds: totalOdds.toString(),
         potentialWin: potentialWin.toString(),
-        selections: previewSelections.map((selection) => ({
-          sport: selection.sport,
-          event: selection.event,
-          outcome: selection.selection,
-          market: selection.market,
-          submittedOdds:
-            selection.submittedOdds !== null ? new Prisma.Decimal(selection.submittedOdds).toString() : null,
-          currentOdds: selection.currentOdds !== null ? new Prisma.Decimal(selection.currentOdds).toString() : null,
-          oddsStatus: selection.oddsStatus,
-        })),
+        selections: previewSelections.map((selection, index) => {
+          const legOddsCheck = reconstructedByIndex.get(index)?.oddsCheck ?? null;
+          const providerTokenFields = buildProviderTokenFields(legOddsCheck, requests[index]?.selection);
+
+          return {
+            sport: selection.sport,
+            event: selection.event,
+            outcome: selection.selection,
+            market: selection.market,
+            submittedOdds:
+              selection.submittedOdds !== null ? new Prisma.Decimal(selection.submittedOdds).toString() : null,
+            currentOdds: selection.currentOdds !== null ? new Prisma.Decimal(selection.currentOdds).toString() : null,
+            oddsStatus: selection.oddsStatus,
+            ...providerTokenFields,
+          };
+        }),
       },
       previewTokenSecret,
     );

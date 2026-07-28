@@ -452,3 +452,237 @@ test("cross-type: a completely unknown type value is rejected by both verify fun
   assert.equal(singleResult.ok, false);
   if (!singleResult.ok) assert.equal(singleResult.reason, "invalid_payload");
 });
+
+/* -------------------------------------------------------------------------- */
+/* Stage 3.1 — provider event references / canonical market-selection        */
+/* identity carried through the signed token.                                */
+/* -------------------------------------------------------------------------- */
+
+function providerMetadataOverrides() {
+  return {
+    providerEventId: "evt-provider-abc123",
+    providerSportKey: "soccer_epl",
+    eventStartTime: "2026-08-15T18:00:00.000Z",
+    canonicalMarketType: "MONEYLINE_3WAY",
+    canonicalSelectionType: "HOME",
+    canonicalParticipant: null,
+    canonicalPeriod: "FULL_GAME",
+  };
+}
+
+test("Stage 3.1 SINGLE: sign -> verify roundtrip carries every new provider/canonical field through unchanged", () => {
+  const token = signPreviewToken(singleInput(providerMetadataOverrides()), SECRET);
+  const result = verifyPreviewToken(token, SECRET);
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.payload.providerEventId, "evt-provider-abc123");
+  assert.equal(result.payload.providerSportKey, "soccer_epl");
+  assert.equal(result.payload.eventStartTime, "2026-08-15T18:00:00.000Z");
+  assert.equal(result.payload.canonicalMarketType, "MONEYLINE_3WAY");
+  assert.equal(result.payload.canonicalSelectionType, "HOME");
+  assert.equal(result.payload.canonicalParticipant, null);
+  assert.equal(result.payload.canonicalPeriod, "FULL_GAME");
+});
+
+test("Stage 3.1 SINGLE: a token signed with no provider metadata (all null) still round-trips correctly", () => {
+  const token = signPreviewToken(singleInput(), SECRET);
+  const result = verifyPreviewToken(token, SECRET);
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.payload.providerEventId, null);
+  assert.equal(result.payload.providerSportKey, null);
+  assert.equal(result.payload.eventStartTime, null);
+  assert.equal(result.payload.canonicalMarketType, null);
+  assert.equal(result.payload.canonicalSelectionType, null);
+  assert.equal(result.payload.canonicalParticipant, null);
+  assert.equal(result.payload.canonicalPeriod, null);
+});
+
+test("Stage 3.1 EXPRESS: sign -> verify roundtrip carries every new field through unchanged, per leg", () => {
+  const token = signExpressPreviewToken(
+    expressInput({
+      selections: [
+        expressSelection({ event: "Real Madrid vs Barcelona", ...providerMetadataOverrides() }),
+        expressSelection({
+          event: "Inter Milan vs Juventus",
+          providerEventId: "evt-provider-xyz789",
+          providerSportKey: "soccer_italy_serie_a",
+          eventStartTime: "2026-08-16T20:00:00.000Z",
+          canonicalMarketType: "MONEYLINE_3WAY",
+          canonicalSelectionType: "AWAY",
+          canonicalParticipant: null,
+          canonicalPeriod: "FULL_GAME",
+        }),
+      ],
+    }),
+    SECRET,
+  );
+  const result = verifyExpressPreviewToken(token, SECRET);
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.payload.selections[0].providerEventId, "evt-provider-abc123");
+  assert.equal(result.payload.selections[0].providerSportKey, "soccer_epl");
+  assert.equal(result.payload.selections[1].providerEventId, "evt-provider-xyz789");
+  assert.equal(result.payload.selections[1].providerSportKey, "soccer_italy_serie_a");
+  // Different legs' provider IDs must never bleed into each other.
+  assert.notEqual(result.payload.selections[0].providerEventId, result.payload.selections[1].providerEventId);
+});
+
+test("Stage 3.1 backward compatibility: an old SINGLE token (signed before these fields existed) is still valid, new fields normalize to null", () => {
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const legacyPayload = {
+    v: 1,
+    previewId: "legacy-preview-id",
+    playerId: "player-1",
+    type: "SINGLE",
+    sport: "football",
+    event: "Real Madrid vs Barcelona",
+    outcome: "Real Madrid Win",
+    stake: 100,
+    odds: 2.1,
+    totalOdds: 2.1,
+    oddsCheck: { matched: true, withinTolerance: true, sourceOdds: 2.1, bookmaker: "Bet365" },
+    issuedAt,
+    expiresAt: issuedAt + 180,
+    // Deliberately NO providerEventId/providerSportKey/eventStartTime/
+    // canonicalMarketType/canonicalSelectionType/canonicalParticipant/
+    // canonicalPeriod keys at all — this is the exact shape a token signed
+    // before Stage 3.1 has.
+  };
+  const token = forgeExpressToken(legacyPayload, SECRET);
+
+  const result = verifyPreviewToken(token, SECRET);
+
+  assert.equal(result.ok, true, "an old-shaped, validly-signed token must still verify successfully");
+  if (!result.ok) return;
+  assert.equal(result.payload.playerId, "player-1");
+  assert.equal(result.payload.providerEventId, null);
+  assert.equal(result.payload.providerSportKey, null);
+  assert.equal(result.payload.eventStartTime, null);
+  assert.equal(result.payload.canonicalMarketType, null);
+  assert.equal(result.payload.canonicalSelectionType, null);
+  assert.equal(result.payload.canonicalParticipant, null);
+  assert.equal(result.payload.canonicalPeriod, null);
+});
+
+test("Stage 3.1 backward compatibility: an old EXPRESS token (selections missing these fields) is still valid, normalizes to null per leg", () => {
+  const legacySelection = {
+    sport: "Football",
+    event: "Real Madrid vs Barcelona",
+    outcome: "Real Madrid Win",
+    market: "Match Winner",
+    submittedOdds: "1.80",
+    currentOdds: "1.80",
+    oddsStatus: "VERIFIED",
+    // No provider/canonical keys — the exact pre-Stage-3.1 leg shape.
+  };
+  const legacyPayload = baseForgedPayload({ selections: [legacySelection, legacySelection] });
+  const token = forgeExpressToken(legacyPayload, SECRET);
+
+  const result = verifyExpressPreviewToken(token, SECRET);
+
+  assert.equal(result.ok, true, "an old-shaped, validly-signed EXPRESS token must still verify successfully");
+  if (!result.ok) return;
+  for (const selection of result.payload.selections) {
+    assert.equal(selection.providerEventId, null);
+    assert.equal(selection.providerSportKey, null);
+    assert.equal(selection.eventStartTime, null);
+    assert.equal(selection.canonicalMarketType, null);
+    assert.equal(selection.canonicalSelectionType, null);
+    assert.equal(selection.canonicalParticipant, null);
+    assert.equal(selection.canonicalPeriod, null);
+  }
+});
+
+test("Stage 3.1 tampering: changing providerEventId in the encoded payload invalidates the signature", () => {
+  const token = signPreviewToken(singleInput(providerMetadataOverrides()), SECRET);
+  const [encodedPayload, signature] = token.split(".");
+  const decoded = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
+  const tamperedPayload = Buffer.from(JSON.stringify({ ...decoded, providerEventId: "evt-attacker-injected" }), "utf8").toString("base64url");
+
+  const result = verifyPreviewToken(`${tamperedPayload}.${signature}`, SECRET);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.reason, "invalid_signature");
+});
+
+test("Stage 3.1 tampering: changing providerSportKey in the encoded payload invalidates the signature", () => {
+  const token = signPreviewToken(singleInput(providerMetadataOverrides()), SECRET);
+  const [encodedPayload, signature] = token.split(".");
+  const decoded = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
+  const tamperedPayload = Buffer.from(JSON.stringify({ ...decoded, providerSportKey: "soccer_spain_la_liga" }), "utf8").toString("base64url");
+
+  const result = verifyPreviewToken(`${tamperedPayload}.${signature}`, SECRET);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.reason, "invalid_signature");
+});
+
+test("Stage 3.1 tampering: changing eventStartTime in the encoded payload invalidates the signature", () => {
+  const token = signPreviewToken(singleInput(providerMetadataOverrides()), SECRET);
+  const [encodedPayload, signature] = token.split(".");
+  const decoded = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
+  const tamperedPayload = Buffer.from(JSON.stringify({ ...decoded, eventStartTime: "2099-01-01T00:00:00.000Z" }), "utf8").toString("base64url");
+
+  const result = verifyPreviewToken(`${tamperedPayload}.${signature}`, SECRET);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.reason, "invalid_signature");
+});
+
+test("Stage 3.1 tampering: injecting provider metadata into a legacy (previously-unsigned-for-these-fields) payload still fails signature verification", () => {
+  // Simulates an attacker trying to add fabricated provider metadata to an
+  // old, otherwise-validly-signed token that never had these keys at all.
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const legacyPayload = {
+    v: 1,
+    previewId: "legacy-preview-id-2",
+    playerId: "player-1",
+    type: "SINGLE",
+    sport: "football",
+    event: "Real Madrid vs Barcelona",
+    outcome: "Real Madrid Win",
+    stake: 100,
+    odds: 2.1,
+    totalOdds: 2.1,
+    oddsCheck: { matched: true, withinTolerance: true, sourceOdds: 2.1, bookmaker: "Bet365" },
+    issuedAt,
+    expiresAt: issuedAt + 180,
+  };
+  const legitimateToken = forgeExpressToken(legacyPayload, SECRET);
+  const [, realSignature] = legitimateToken.split(".");
+
+  const forgedPayload = Buffer.from(
+    JSON.stringify({ ...legacyPayload, providerEventId: "evt-attacker-injected", providerSportKey: "soccer_epl" }),
+    "utf8",
+  ).toString("base64url");
+
+  const result = verifyPreviewToken(`${forgedPayload}.${realSignature}`, SECRET);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.reason, "invalid_signature");
+});
+
+test("Stage 3.1: an expired token carrying provider metadata is still rejected as expired, not accepted because the new fields are present", () => {
+  const originalNow = Date.now;
+  try {
+    Date.now = () => new Date("2020-01-01T00:00:00Z").getTime();
+    const token = signPreviewToken(singleInput(providerMetadataOverrides()), SECRET);
+
+    Date.now = () => new Date("2020-01-01T01:00:00Z").getTime(); // +1h, well past the 180s TTL
+    const result = verifyPreviewToken(token, SECRET);
+
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.reason, "expired");
+  } finally {
+    Date.now = originalNow;
+  }
+});

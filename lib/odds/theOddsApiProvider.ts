@@ -39,6 +39,65 @@ import type {
 const PROVIDER_NAME: ProviderName = "THE_ODDS_API";
 
 /* -------------------------------------------------------------------------- */
+/* Stage 3.1 — matchedEvent/matchedOutcome construction                       */
+/* -------------------------------------------------------------------------- */
+//
+// Both helpers below read exclusively from data this adapter already has
+// honestly: legacyResult's new Stage 3.1 fields (oddsVerifier.ts's own
+// all-or-nothing provider event metadata — see that file's
+// extractProviderEventMetadata) for matchedEvent, and the already-validated
+// CanonicalSelection the caller constructed BEFORE this request was ever
+// sent to the provider (never provider response data) for matchedOutcome's
+// market/selection classification. Neither helper invents an outcome ID —
+// The Odds API's h2h outcomes carry no stable id/key of their own (only a
+// display `name` and a `price`), so ProviderOutcome.outcomeReference is
+// deliberately left unset here, never synthesized from outcome.name, a team
+// name, the market key, an array index, or a hash of any of those.
+
+function buildMatchedEvent(legacyResult: OddsCheckResult, selection: CanonicalSelection): ProviderEventCandidate | undefined {
+  if (!legacyResult.providerEventId || !legacyResult.providerSportKey) return undefined;
+
+  return {
+    event: {
+      sport: selection.sport,
+      league: selection.league,
+      name: selection.event.name,
+      participants: selection.event.participants,
+      startTime: legacyResult.eventStartTime,
+      period: selection.period,
+    },
+    reference: {
+      provider: PROVIDER_NAME,
+      eventId: legacyResult.providerEventId,
+      sportKey: legacyResult.providerSportKey,
+    },
+  };
+}
+
+// Only constructed once a real bookmaker price was actually found
+// (legacyResult.sourceOdds !== null) — the "event found but selection/
+// bookmaker not matched" failure paths have no price to report an outcome
+// for, and naturally produce undefined here (sourceOdds stays null on
+// those paths too).
+function buildMatchedOutcome(legacyResult: OddsCheckResult, selection: CanonicalSelection): ProviderOutcome | undefined {
+  if (legacyResult.sourceOdds === null || legacyResult.sourceOdds === undefined) return undefined;
+
+  return {
+    marketType: selection.marketType,
+    period: selection.period,
+    selectionType: selection.selectionType,
+    participant: selection.participant,
+    currentOdds: String(legacyResult.sourceOdds),
+    bookmaker: legacyResult.bookmaker ?? undefined,
+    // "h2h" is a real, known constant (oddsVerifier.ts always requests
+    // exactly this market key) — not synthesized, not guessed.
+    marketReference: { provider: PROVIDER_NAME, marketKey: "h2h" },
+    // outcomeReference deliberately omitted — see this section's header
+    // comment.
+  };
+}
+
+/* -------------------------------------------------------------------------- */
 /* Capabilities — CURRENT adapter reality only, never the future MVP target   */
 /* -------------------------------------------------------------------------- */
 
@@ -424,10 +483,20 @@ export class TheOddsApiProvider implements OddsProvider {
           ? String(legacyResult.submittedOdds)
           : null;
 
+    // Stage 3.1 — undefined whenever oddsVerifier.ts never resolved a
+    // trustworthy provider event (EVENT_NOT_FOUND/AMBIGUOUS_EVENT/coverage
+    // failures never set legacyResult.providerEventId at all) — see
+    // buildMatchedEvent's own null-check. Computed once, reused across
+    // every branch below (VERIFIED/ODDS_CHANGED/FAILED-with-event-found
+    // alike), since it depends only on legacyResult/selection, not on which
+    // branch is taken.
+    const matchedEvent = buildMatchedEvent(legacyResult, selection);
+
     if (legacyResult.matched) {
       const currentOdds = String(legacyResult.sourceOdds);
       const differencePercentage =
         legacyResult.discrepancyPercent !== null ? String(legacyResult.discrepancyPercent) : null;
+      const matchedOutcome = buildMatchedOutcome(legacyResult, selection);
 
       if (legacyResult.withinTolerance === true) {
         return createVerifiedResult({
@@ -437,6 +506,8 @@ export class TheOddsApiProvider implements OddsProvider {
           provider: PROVIDER_NAME,
           bookmaker,
           checkedAt,
+          matchedEvent,
+          matchedOutcome,
         });
       }
 
@@ -447,6 +518,8 @@ export class TheOddsApiProvider implements OddsProvider {
         provider: PROVIDER_NAME,
         bookmaker,
         checkedAt,
+        matchedEvent,
+        matchedOutcome,
       });
     }
 
@@ -464,6 +537,14 @@ export class TheOddsApiProvider implements OddsProvider {
       reasonCode,
       diagnosticCode,
       bookmaker,
+      // Present exactly for the two failure reasons where oddsVerifier.ts
+      // found the event before matching then failed (SELECTION_NOT_FOUND —
+      // "no bookmaker odds"/"could not match selection"); undefined for
+      // every coverage/matching failure where no event was ever resolved
+      // (EVENT_NOT_FOUND, AMBIGUOUS_EVENT, SPORT_NOT_SUPPORTED, etc.) —
+      // buildMatchedEvent's own check already encodes this distinction, no
+      // separate branch on reasonCode needed here.
+      matchedEvent,
     });
   }
 }

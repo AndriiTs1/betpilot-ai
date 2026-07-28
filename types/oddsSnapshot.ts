@@ -20,4 +20,20 @@ export interface OddsCheckResult {
   bookmaker: string | null;
 
   note: string | null;
+
+  // Stage 3.1 — present ONLY when findMatchingEvent() unambiguously resolved
+  // a single provider event AND its commence_time parsed as a valid date
+  // (see lib/odds/oddsVerifier.ts's extractProviderEventMetadata). Optional
+  // (never `| null`) because "absent" and "known to be null" are genuinely
+  // different states here: every return branch before an event is resolved
+  // (sport not mapped, provider fetch failed, NOT_FOUND, AMBIGUOUS) simply
+  // never sets these keys at all, rather than setting them to null — an
+  // absent key can never be mistaken for "we checked and there is no
+  // provider event," which a `| null` field could invite. All three fields
+  // are set together or not at all — never partially populated (an event id
+  // without a trustworthy start time) — so a consumer can treat "these
+  // exist" as one atomic fact.
+  providerEventId?: string;
+  providerSportKey?: string;
+  eventStartTime?: string; // ISO 8601, the provider's own commence_time
 }

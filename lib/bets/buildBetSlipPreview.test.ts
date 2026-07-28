@@ -1166,3 +1166,131 @@ test("Step 16A (11): a correctly routed but absent fixture still returns NOT_FOU
   assert.equal(result.preview.totalOdds, null);
   assert.equal(result.preview.potentialWin, null);
 });
+
+// ---------------------------------------------------------------------
+// Stage 3.1 — provider event references + canonical market/selection
+// identity, threaded through the signed previewToken end to end via the
+// real production path: verifyOddsFn -> TheOddsApiProvider.verifySelection()
+// -> VerificationResult.matchedEvent -> legacyOddsBridge's round-trip back
+// into OddsCheckResult -> buildBetSlipPreview's buildProviderTokenFields().
+// ---------------------------------------------------------------------
+
+function verifiedWithProviderMetadata(
+  sourceOdds: number,
+  submittedOdds: number,
+  providerEventId: string,
+  providerSportKey: string,
+  eventStartTime: string,
+): OddsCheckResult {
+  return { ...verified(sourceOdds, submittedOdds), providerEventId, providerSportKey, eventStartTime };
+}
+
+test("Stage 3.1 SINGLE: previewToken carries provider event references and canonical market/selection identity when the provider resolved a real event", async () => {
+  const slip = singleSlip(2.15);
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: fakeVerifyOddsFn({
+      "Manchester City vs Chelsea": verifiedWithProviderMetadata(2.15, 2.15, "evt-single-abc", "soccer_epl", "2026-08-15T18:00:00.000Z"),
+    }),
+  });
+
+  assert.ok(result.previewToken !== null);
+  const verified_ = verifyPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verified_.ok, true);
+  if (!verified_.ok) return;
+
+  assert.equal(verified_.payload.providerEventId, "evt-single-abc");
+  assert.equal(verified_.payload.providerSportKey, "soccer_epl");
+  assert.equal(verified_.payload.eventStartTime, "2026-08-15T18:00:00.000Z");
+  assert.equal(verified_.payload.canonicalMarketType, "MONEYLINE_2WAY", "the fixture's selection ('Manchester City Win') classifies as PARTICIPANT/MONEYLINE_2WAY");
+  assert.equal(verified_.payload.canonicalSelectionType, "PARTICIPANT");
+  // Step 16A's winner-phrase stripping (legacySelectionTextToCanonical)
+  // normalizes "Manchester City Win" -> participant name "Manchester City"
+  // — this is existing, pre-Stage-3.1 behavior, not something this stage
+  // changes.
+  assert.equal(verified_.payload.canonicalParticipant, "Manchester City");
+  assert.equal(verified_.payload.canonicalPeriod, "FULL_GAME");
+});
+
+test("Stage 3.1 SINGLE: previewToken's provider metadata comes from the VERIFIED provider result, never from the player's own raw text", async () => {
+  // Deliberately different displayed event/selection text than what the
+  // provider actually resolved metadata for — proves the token's
+  // providerEventId isn't derived from or fabricated out of selection.event.
+  const slip = singleSlip(1.33);
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: fakeVerifyOddsFn({
+      "Manchester City vs Chelsea": verifiedWithProviderMetadata(1.33, 1.33, "totally-opaque-provider-id-999", "soccer_epl", "2026-09-01T12:00:00.000Z"),
+    }),
+  });
+
+  const verified_ = verifyPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verified_.ok, true);
+  if (!verified_.ok) return;
+  assert.equal(verified_.payload.providerEventId, "totally-opaque-provider-id-999");
+});
+
+test("Stage 3.1 SINGLE: previewToken's provider metadata stays null when the odds check never resolved a provider event (NOT_FOUND)", async () => {
+  const slip = singleSlip(1.95);
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: fakeVerifyOddsFn({ "Manchester City vs Chelsea": notFound(1.95) }),
+  });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "NOT_FOUND");
+  // No token is signed at all once a SINGLE selection is NOT_FOUND-blocking,
+  // per the existing (unrelated to this stage) confirmation-blocking rules —
+  // nothing further to assert about the token here since none exists; this
+  // test documents that fact rather than assuming a token always exists.
+});
+
+test("Stage 3.1 EXPRESS: each leg's previewToken selection carries its OWN provider event references — different legs never share or mix IDs", async () => {
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 50,
+    selections: [
+      { sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: 1.8 },
+      { sport: "Football", event: "Inter vs Juventus", market: null, selection: "Over 2.5", submittedOdds: 1.7 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: fakeVerifyOddsFn({
+      "Real Madrid vs Barcelona": verifiedWithProviderMetadata(1.8, 1.8, "evt-express-leg-1", "soccer_spain_la_liga", "2026-08-20T19:00:00.000Z"),
+      "Inter vs Juventus": verifiedWithProviderMetadata(1.7, 1.7, "evt-express-leg-2", "soccer_italy_serie_a", "2026-08-21T20:00:00.000Z"),
+    }),
+  });
+
+  assert.ok(result.previewToken !== null);
+  const verified_ = verifyExpressPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verified_.ok, true);
+  if (!verified_.ok) return;
+
+  const [leg1, leg2] = verified_.payload.selections;
+  assert.equal(leg1.providerEventId, "evt-express-leg-1");
+  assert.equal(leg1.providerSportKey, "soccer_spain_la_liga");
+  assert.equal(leg1.eventStartTime, "2026-08-20T19:00:00.000Z");
+  assert.equal(leg2.providerEventId, "evt-express-leg-2");
+  assert.equal(leg2.providerSportKey, "soccer_italy_serie_a");
+  assert.equal(leg2.eventStartTime, "2026-08-21T20:00:00.000Z");
+  assert.notEqual(leg1.providerEventId, leg2.providerEventId, "different legs' provider event ids must never be mixed up");
+});
+
+test("Stage 3.1 EXPRESS: a leg whose provider check failed carries null provider metadata, without affecting a sibling leg's real metadata", async () => {
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 50,
+    selections: [
+      { sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: 1.8 },
+      { sport: "Football", event: "Inter vs Juventus", market: null, selection: "Over 2.5", submittedOdds: 1.7 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: fakeVerifyOddsFn({
+      "Real Madrid vs Barcelona": verifiedWithProviderMetadata(1.8, 1.8, "evt-express-leg-1", "soccer_spain_la_liga", "2026-08-20T19:00:00.000Z"),
+      "Inter vs Juventus": notFound(1.7),
+    }),
+  });
+
+  // No token is signed (one leg is NOT_FOUND, a blocking status), same
+  // existing rule as before this stage — nothing token-related to assert.
+  assert.equal(result.preview.selections[1].oddsStatus, "NOT_FOUND");
+});

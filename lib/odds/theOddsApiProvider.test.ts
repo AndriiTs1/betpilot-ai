@@ -374,15 +374,45 @@ test("adapter mapping: PARTICIPANT selectionType passes the participant's name t
   assert.equal(calls[0].selection, "Carlos Alcaraz");
 });
 
-test("adapter mapping: never fabricates matchedEvent, matchedOutcome, or providerTimestamp — legacy provides none of these", async () => {
+test("adapter mapping: never fabricates providerTimestamp — legacy provides none", async () => {
   const { fn } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.0, bookmaker: "Pinnacle" }));
   const provider = new TheOddsApiProvider(fn);
 
   const result = await provider.verifySelection({ selection: moneyline3Way() });
 
-  assert.equal(result.matchedEvent, undefined);
-  assert.equal(result.matchedOutcome, undefined);
   assert.equal(result.providerTimestamp, undefined);
+});
+
+test("adapter mapping: matchedEvent stays undefined when legacy carries no provider event metadata (Stage 3.1 fields absent from the fixture)", async () => {
+  const { fn } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.0, bookmaker: "Pinnacle" }));
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way() });
+
+  assert.equal(result.matchedEvent, undefined, "no providerEventId/providerSportKey on the legacy result means nothing to honestly construct matchedEvent from");
+});
+
+// Stage 3.1 — matchedOutcome is populated from data the adapter already
+// legitimately has (the already-validated CanonicalSelection it was given,
+// plus the real matched price) — this is NOT fabrication, and is
+// independent of whether matchedEvent could be built (that depends only on
+// provider event metadata, a separate concern).
+test("adapter mapping: matchedOutcome IS populated from the canonical selection + matched price, independent of matchedEvent", async () => {
+  const { fn } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.0, bookmaker: "Pinnacle" }));
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way() });
+
+  assert.deepEqual(result.matchedOutcome, {
+    marketType: "MONEYLINE_3WAY",
+    period: "FULL_GAME",
+    selectionType: "HOME",
+    participant: undefined,
+    currentOdds: "2",
+    bookmaker: "Pinnacle",
+    marketReference: { provider: "THE_ODDS_API", marketKey: "h2h" },
+  });
+  assert.equal(result.matchedOutcome?.outcomeReference, undefined, "never a synthetic outcome id — The Odds API has no stable outcome id/key");
 });
 
 test("adapter mapping: a null legacy bookmaker never becomes a fabricated string", async () => {
@@ -623,4 +653,162 @@ test("Step 15H: numeric submittedOdds is never round-tripped through Number/Stri
   const result = await provider.verifySelection({ selection: moneyline3Way({ submittedOdds: "2.10" }) });
 
   assert.equal(result.submittedOdds, "2.10");
+});
+
+// ---------------------------------------------------------------------
+// Stage 3.1 — provider event references (matchedEvent) end to end through
+// the adapter, given a legacy result carrying oddsVerifier.ts's own new
+// providerEventId/providerSportKey/eventStartTime fields.
+// ---------------------------------------------------------------------
+
+const PROVIDER_EVENT_ID = "evt-provider-abc123";
+const PROVIDER_SPORT_KEY = "soccer_epl";
+const EVENT_START_TIME = "2026-08-15T18:00:00.000Z";
+
+test("Stage 3.1: VERIFIED contains matchedEvent when the legacy result carries provider event metadata", async () => {
+  const { fn } = capturingVerifyOddsFn(
+    baseLegacyResult({
+      matched: true,
+      withinTolerance: true,
+      sourceOdds: 2.15,
+      bookmaker: "Pinnacle",
+      providerEventId: PROVIDER_EVENT_ID,
+      providerSportKey: PROVIDER_SPORT_KEY,
+      eventStartTime: EVENT_START_TIME,
+    }),
+  );
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way({ submittedOdds: "2.15" }) });
+
+  assert.equal(result.status, "VERIFIED");
+  assert.ok(result.matchedEvent, "matchedEvent must be present");
+  assert.equal(result.matchedEvent?.reference.eventId, PROVIDER_EVENT_ID);
+  assert.equal(result.matchedEvent?.reference.sportKey, PROVIDER_SPORT_KEY);
+  assert.equal(result.matchedEvent?.reference.provider, "THE_ODDS_API");
+  assert.equal(result.matchedEvent?.event.startTime, EVENT_START_TIME);
+});
+
+test("Stage 3.1: ODDS_CHANGED contains matchedEvent when the legacy result carries provider event metadata", async () => {
+  const { fn } = capturingVerifyOddsFn(
+    baseLegacyResult({
+      matched: true,
+      withinTolerance: false,
+      sourceOdds: 2.15,
+      discrepancyPercent: 16.28,
+      bookmaker: "Pinnacle",
+      providerEventId: PROVIDER_EVENT_ID,
+      providerSportKey: PROVIDER_SPORT_KEY,
+      eventStartTime: EVENT_START_TIME,
+    }),
+  );
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way({ submittedOdds: "2.50" }) });
+
+  assert.equal(result.status, "ODDS_CHANGED");
+  assert.ok(result.matchedEvent, "matchedEvent must be present");
+  assert.equal(result.matchedEvent?.reference.eventId, PROVIDER_EVENT_ID);
+  assert.equal(result.matchedEvent?.reference.sportKey, PROVIDER_SPORT_KEY);
+});
+
+test("Stage 3.1: ProviderEventReference.eventId is exactly legacyResult.providerEventId — never synthesized, never derived from event text", async () => {
+  const { fn } = capturingVerifyOddsFn(
+    baseLegacyResult({
+      matched: true,
+      withinTolerance: true,
+      sourceOdds: 2.15,
+      providerEventId: "some-opaque-provider-id-9f8e7d",
+      providerSportKey: PROVIDER_SPORT_KEY,
+      eventStartTime: EVENT_START_TIME,
+    }),
+  );
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way({ submittedOdds: "2.15" }) });
+
+  assert.equal(result.matchedEvent?.reference.eventId, "some-opaque-provider-id-9f8e7d");
+});
+
+test("Stage 3.1: ProviderEventReference.sportKey is exactly the endpoint key the legacy layer reports — never re-derived from league/sport display text", async () => {
+  const { fn } = capturingVerifyOddsFn(
+    baseLegacyResult({
+      matched: true,
+      withinTolerance: true,
+      sourceOdds: 2.15,
+      providerEventId: PROVIDER_EVENT_ID,
+      providerSportKey: "soccer_italy_serie_a",
+      eventStartTime: EVENT_START_TIME,
+    }),
+  );
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way({ league: { name: "Serie A" }, submittedOdds: "2.15" }) });
+
+  assert.equal(result.matchedEvent?.reference.sportKey, "soccer_italy_serie_a");
+});
+
+test("Stage 3.1: canonical matchedEvent.event.startTime is exactly legacyResult.eventStartTime (the provider's own commence_time, already ISO-normalized upstream)", async () => {
+  const { fn } = capturingVerifyOddsFn(
+    baseLegacyResult({
+      matched: true,
+      withinTolerance: true,
+      sourceOdds: 2.15,
+      providerEventId: PROVIDER_EVENT_ID,
+      providerSportKey: PROVIDER_SPORT_KEY,
+      eventStartTime: EVENT_START_TIME,
+    }),
+  );
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way({ submittedOdds: "2.15" }) });
+
+  assert.equal(result.matchedEvent?.event.startTime, EVENT_START_TIME);
+});
+
+test("Stage 3.1: no synthetic provider IDs — matchedEvent absent when legacy result has no providerEventId, even though the event genuinely matched", async () => {
+  const { fn } = capturingVerifyOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.15, bookmaker: "Pinnacle" }),
+  );
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way({ submittedOdds: "2.15" }) });
+
+  assert.equal(result.status, "VERIFIED", "sanity: the check itself still succeeds without provider event metadata");
+  assert.equal(result.matchedEvent, undefined, "must never fabricate an id from the event name, team names, or anything else");
+});
+
+test("Stage 3.1: matchedEvent is also present on a FAILED result when the event was found but the selection/bookmaker didn't match", async () => {
+  const { fn } = capturingVerifyOddsFn(
+    baseLegacyResult({
+      matched: false,
+      note: 'Could not match selection "X" to a bookmaker outcome',
+      bookmaker: "Pinnacle",
+      providerEventId: PROVIDER_EVENT_ID,
+      providerSportKey: PROVIDER_SPORT_KEY,
+      eventStartTime: EVENT_START_TIME,
+    }),
+  );
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way() });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "SELECTION_NOT_FOUND");
+  assert.ok(result.matchedEvent, "the event was genuinely found, even though the selection wasn't — matchedEvent must still be present");
+  assert.equal(result.matchedEvent?.reference.eventId, PROVIDER_EVENT_ID);
+  assert.equal(result.matchedOutcome, undefined, "no price was ever matched, so there is nothing honest to build matchedOutcome from");
+});
+
+test("Stage 3.1: matchedEvent is absent on a FAILED result when the event itself was never found (EVENT_NOT_FOUND)", async () => {
+  const { fn } = capturingVerifyOddsFn(
+    baseLegacyResult({ matched: false, note: 'No matching event found for "X vs Y" in soccer_epl' }),
+  );
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way() });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "EVENT_NOT_FOUND");
+  assert.equal(result.matchedEvent, undefined);
 });

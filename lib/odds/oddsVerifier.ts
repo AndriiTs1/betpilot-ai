@@ -215,6 +215,17 @@ interface OddsApiEvent {
   home_team: string;
   away_team: string;
   bookmakers: OddsApiBookmaker[];
+  // Stage 3.1 — NOT part of the raw JSON response. Tagged locally by
+  // verifyOdds() immediately after each fetchOddsForSport(sportKey) call,
+  // before events from different keys are merged into one array (see the
+  // multi-key loop below) — this is how a multi-key sport (tennis) or a
+  // no-explicit-league football fallback (FOOTBALL_FALLBACK_SPORT_KEYS)
+  // keeps track of which specific sport_key endpoint each event actually
+  // came from, once they're merged and no longer separable by array
+  // position alone. Never written into oddsCache (fetchOddsForSport's own
+  // cache stores the untagged, pristine parsed response) — this field only
+  // ever exists on the per-call working copy inside verifyOdds().
+  providerSportKey?: string;
 }
 
 const EVENT_MATCH_THRESHOLD = 0.5;
@@ -555,6 +566,37 @@ async function fetchOddsForSport(sportKey: string): Promise<OddsApiEvent[]> {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Stage 3.1 — provider event metadata extraction                             */
+/* -------------------------------------------------------------------------- */
+
+interface ProviderEventMetadata {
+  readonly providerEventId: string;
+  readonly providerSportKey: string;
+  readonly eventStartTime: string;
+}
+
+// All-or-nothing by design: returns either a complete, trustworthy metadata
+// triple or nothing at all — never an event id with a missing/invalid start
+// time. `event.providerSportKey` is only absent if some future code path
+// forgets to tag it (defensive only — every real call site above always
+// tags it); a missing or unparsable commence_time is the realistic failure
+// case this guards, per the task's explicit "invalid commence_time must not
+// propagate as trustworthy metadata" requirement.
+function extractProviderEventMetadata(event: OddsApiEvent): ProviderEventMetadata | null {
+  if (!event.providerSportKey) return null;
+  if (!event.commence_time) return null;
+
+  const parsedMs = Date.parse(event.commence_time);
+  if (Number.isNaN(parsedMs)) return null;
+
+  return {
+    providerEventId: event.id,
+    providerSportKey: event.providerSportKey,
+    eventStartTime: new Date(parsedMs).toISOString(),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
 /* Public entry point                                                          */
 /* -------------------------------------------------------------------------- */
 
@@ -586,7 +628,12 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
 
   for (const sportKey of sportKeys) {
     try {
-      events = events.concat(await fetchOddsForSport(sportKey));
+      const fetched = await fetchOddsForSport(sportKey);
+      // Tag every event from this fetch with the exact sport_key that
+      // produced it, before merging into the shared `events` array — once
+      // merged, array position/order no longer distinguishes which key an
+      // event came from (see OddsApiEvent.providerSportKey's own comment).
+      events = events.concat(fetched.map((event) => ({ ...event, providerSportKey: sportKey })));
       successCount += 1;
     } catch (err) {
       lastFetchError =
@@ -629,10 +676,20 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
 
   const event = matchResult.event;
 
+  // Stage 3.1 — computed once, right after the event is unambiguously
+  // resolved, and spread into every return branch from this point on
+  // (including the two failure branches immediately below, where the event
+  // itself WAS found even though bookmaker/selection matching then failed)
+  // — never into baseResult or any branch above this line, where no event
+  // was ever resolved at all. `?? {}` spreads nothing when metadata is
+  // null (an invalid/missing commence_time), rather than spreading
+  // `providerEventId: undefined` explicitly.
+  const providerMetadata = extractProviderEventMetadata(event) ?? {};
+
   const bookmakerPick = pickBookmaker(event);
 
   if (!bookmakerPick) {
-    return { ...baseResult, note: `No bookmaker odds available for "${bet.event}"` };
+    return { ...baseResult, ...providerMetadata, note: `No bookmaker odds available for "${bet.event}"` };
   }
 
   const price = extractOutcomePrice(bookmakerPick.bookmaker, bet.selection, event, bet.event);
@@ -640,6 +697,7 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
   if (price === null) {
     return {
       ...baseResult,
+      ...providerMetadata,
       bookmaker: bookmakerPick.bookmaker.title,
       note: `Could not match selection "${bet.selection}" to a bookmaker outcome`,
     };
@@ -668,6 +726,7 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
       note: bookmakerPick.isFallback
         ? `Pinnacle odds unavailable — using ${bookmakerPick.bookmaker.title} instead`
         : null,
+      ...providerMetadata,
     };
   }
 
@@ -683,5 +742,6 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
     note: bookmakerPick.isFallback
       ? `Pinnacle odds unavailable — using ${bookmakerPick.bookmaker.title} instead`
       : null,
+    ...providerMetadata,
   };
 }

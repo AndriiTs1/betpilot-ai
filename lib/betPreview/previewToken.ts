@@ -16,7 +16,40 @@ export interface PreviewTokenOddsCheck {
   bookmaker: string | null;
 }
 
-export interface PreviewTokenPayload {
+// Stage 3.1 — provider event references + canonical market/selection
+// identity, carried through the signed token so createBetFromPreview.ts can
+// persist them at confirm time without a second provider request or any
+// fuzzy re-matching. All seven fields are `string | null` (never bare
+// `string`, matching this file's existing odds/totalOdds convention) and
+// ALWAYS present on a token this file itself signs — `null` means
+// "verification never resolved trustworthy provider event metadata for
+// this selection," never "field omitted." Backward compatibility: an OLDER
+// token (signed before this change) genuinely has these keys missing
+// (`undefined` at decode time, not `null`) — hasValidPreviewTokenShape
+// treats `undefined` as equivalent to `null` for exactly this reason, and
+// verifyPreviewToken normalizes the decoded payload so this exported type's
+// own contract (`string | null`, never `undefined`) still holds for every
+// caller, old token or new. See lib/bets/buildBetSlipPreview.ts for where
+// these are populated (only when oddsCheck.matched === true and the odds
+// verifier actually resolved provider event metadata) and
+// lib/bets/createBetFromPreview.ts for where they're persisted.
+export interface PreviewTokenProviderMetadata {
+  providerEventId: string | null;
+  providerSportKey: string | null;
+  eventStartTime: string | null;
+  canonicalMarketType: string | null;
+  canonicalSelectionType: string | null;
+  canonicalParticipant: string | null;
+  canonicalPeriod: string | null;
+}
+
+// Partial, not the full (required) PreviewTokenProviderMetadata — so every
+// existing call site/test fixture that constructs a PreviewTokenPayload
+// object literal without knowing about Stage 3.1 keeps compiling unchanged
+// (this is the DECODED/verified shape; verifyPreviewToken's own
+// normalizeProviderMetadata is what actually guarantees `string | null`,
+// never `undefined`, for every real token this module itself produces).
+export interface PreviewTokenPayload extends Partial<PreviewTokenProviderMetadata> {
   v: typeof TOKEN_VERSION;
   previewId: string;
   playerId: string;
@@ -32,7 +65,7 @@ export interface PreviewTokenPayload {
   expiresAt: number;
 }
 
-export interface PreviewTokenInput {
+export interface PreviewTokenInput extends Partial<PreviewTokenProviderMetadata> {
   playerId: string;
   sport: string;
   event: string;
@@ -80,6 +113,48 @@ function isPreviewTokenOddsCheckShape(value: unknown): value is PreviewTokenOdds
   );
 }
 
+// Stage 3.1 — `undefined` (key absent, an older token signed before this
+// field existed) and `null` (a newer token that explicitly knows there is
+// no provider event metadata) are BOTH valid — this is exactly the
+// backward-compatibility rule: an old token's missing keys must decode
+// successfully, not be rejected as malformed.
+function isOptionalNullableString(value: unknown): value is string | null | undefined {
+  return value === undefined || value === null || typeof value === "string";
+}
+
+const PROVIDER_METADATA_KEYS = [
+  "providerEventId",
+  "providerSportKey",
+  "eventStartTime",
+  "canonicalMarketType",
+  "canonicalSelectionType",
+  "canonicalParticipant",
+  "canonicalPeriod",
+] as const;
+
+function hasValidProviderMetadataShape(p: Record<string, unknown>): boolean {
+  return PROVIDER_METADATA_KEYS.every((key) => isOptionalNullableString(p[key]));
+}
+
+// Normalizes an already shape-validated SINGLE payload's provider-metadata
+// keys: an absent (`undefined`) key from an older token becomes `null`,
+// matching PreviewTokenProviderMetadata's own `string | null` contract —
+// every caller of verifyPreviewToken sees exactly one shape, old token or
+// new, never `| undefined` leaking through. (EXPRESS has its own
+// per-selection equivalent, normalizeExpressSelection, below.)
+function normalizeProviderMetadata(p: PreviewTokenPayload): PreviewTokenPayload {
+  return {
+    ...p,
+    providerEventId: p.providerEventId ?? null,
+    providerSportKey: p.providerSportKey ?? null,
+    eventStartTime: p.eventStartTime ?? null,
+    canonicalMarketType: p.canonicalMarketType ?? null,
+    canonicalSelectionType: p.canonicalSelectionType ?? null,
+    canonicalParticipant: p.canonicalParticipant ?? null,
+    canonicalPeriod: p.canonicalPeriod ?? null,
+  };
+}
+
 // Validates every field's shape except `v`, which is checked separately by
 // the caller so a wrong version can be reported as "invalid_version" rather
 // than the generic "invalid_payload".
@@ -102,7 +177,8 @@ function hasValidPreviewTokenShape(
     (p.totalOdds === null || typeof p.totalOdds === "number") &&
     isPreviewTokenOddsCheckShape(p.oddsCheck) &&
     typeof p.issuedAt === "number" &&
-    typeof p.expiresAt === "number"
+    typeof p.expiresAt === "number" &&
+    hasValidProviderMetadataShape(p)
   );
 }
 
@@ -125,6 +201,13 @@ export function signPreviewToken(input: PreviewTokenInput, secret: string): stri
     odds: input.odds,
     totalOdds: input.totalOdds,
     oddsCheck: input.oddsCheck,
+    providerEventId: input.providerEventId ?? null,
+    providerSportKey: input.providerSportKey ?? null,
+    eventStartTime: input.eventStartTime ?? null,
+    canonicalMarketType: input.canonicalMarketType ?? null,
+    canonicalSelectionType: input.canonicalSelectionType ?? null,
+    canonicalParticipant: input.canonicalParticipant ?? null,
+    canonicalPeriod: input.canonicalPeriod ?? null,
   };
 
   const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
@@ -162,7 +245,11 @@ export function verifyPreviewToken(token: string, secret: string): VerifyPreview
     return { ok: false, reason: "invalid_version" };
   }
 
-  const payload = decoded as PreviewTokenPayload;
+  // Stage 3.1 — normalizes an older token's absent provider-metadata keys
+  // to `null`, so every caller of this function sees PreviewTokenPayload's
+  // declared `string | null` contract, never `undefined`, regardless of
+  // which code version originally signed the token.
+  const payload = normalizeProviderMetadata(decoded as PreviewTokenPayload);
 
   if (payload.issuedAt > payload.expiresAt) {
     return { ok: false, reason: "invalid_payload" };
@@ -228,7 +315,14 @@ const VALID_ODDS_STATUSES: readonly string[] = [
   "UNAVAILABLE",
 ];
 
-export interface ExpressPreviewTokenSelection {
+// Stage 3.1 — same PreviewTokenProviderMetadata fields as SINGLE's payload,
+// per leg — Partial for the same reason PreviewTokenPayload above is
+// Partial (existing call sites/fixtures unaffected; verifyExpressPreviewToken's
+// own normalizeExpressSelection guarantees `string | null` for every real
+// token this module produces). See PreviewTokenProviderMetadata's own doc
+// comment above for the full null-vs-undefined/backward-compatibility
+// contract, identical here.
+export interface ExpressPreviewTokenSelection extends Partial<PreviewTokenProviderMetadata> {
   sport: string;
   event: string;
   outcome: string;
@@ -315,8 +409,25 @@ function isExpressPreviewTokenSelectionShape(value: unknown): value is ExpressPr
     (s.market === null || typeof s.market === "string") &&
     (s.submittedOdds === null || isValidDecimalString(s.submittedOdds)) &&
     (s.currentOdds === null || isValidDecimalString(s.currentOdds)) &&
-    isValidOddsStatus(s.oddsStatus)
+    isValidOddsStatus(s.oddsStatus) &&
+    hasValidProviderMetadataShape(s)
   );
+}
+
+// Stage 3.1 — same undefined-to-null normalization as SINGLE's
+// normalizeProviderMetadata, applied per-leg. An older EXPRESS token's
+// selections legitimately have none of the seven new keys at all.
+function normalizeExpressSelection(selection: ExpressPreviewTokenSelection): ExpressPreviewTokenSelection {
+  return {
+    ...selection,
+    providerEventId: selection.providerEventId ?? null,
+    providerSportKey: selection.providerSportKey ?? null,
+    eventStartTime: selection.eventStartTime ?? null,
+    canonicalMarketType: selection.canonicalMarketType ?? null,
+    canonicalSelectionType: selection.canonicalSelectionType ?? null,
+    canonicalParticipant: selection.canonicalParticipant ?? null,
+    canonicalPeriod: selection.canonicalPeriod ?? null,
+  };
 }
 
 // Same "validate everything except v separately" pattern as
@@ -420,7 +531,15 @@ export function verifyExpressPreviewToken(token: string, secret: string): Verify
     return { ok: false, reason: "invalid_version" };
   }
 
-  const payload = decoded as ExpressPreviewTokenPayload;
+  // Stage 3.1 — normalize each leg's provider-metadata keys the same way
+  // SINGLE's verifyPreviewToken does, so an older EXPRESS token's
+  // selections (missing all seven keys) still decode to
+  // ExpressPreviewTokenSelection's declared `string | null` contract.
+  const rawPayload = decoded as ExpressPreviewTokenPayload;
+  const payload: ExpressPreviewTokenPayload = {
+    ...rawPayload,
+    selections: rawPayload.selections.map(normalizeExpressSelection),
+  };
 
   if (payload.issuedAt > payload.expiresAt) {
     return { ok: false, reason: "invalid_payload" };

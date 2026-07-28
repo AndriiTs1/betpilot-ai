@@ -760,3 +760,170 @@ test("UEFA CL Qualification: the mocked Dinamo Zagreb vs FC Thun fixture verifie
   assert.equal(result.sourceOdds, 1.65);
   assert.equal(result.bookmaker, "Pinnacle");
 });
+
+// ---------------------------------------------------------------------
+// Stage 3.1 — provider event metadata (providerEventId/providerSportKey/
+// eventStartTime), the persistence groundwork verified in this file's own
+// return-value shape before it ever reaches theOddsApiProvider.ts/Prisma.
+// ---------------------------------------------------------------------
+
+const COMMENCE_TIME = "2026-08-15T18:00:00Z";
+
+test("Stage 3.1: a matched event returns providerEventId matching the provider's own event.id", async () => {
+  mockEvents([h2hEventWithId("evt-meta-1", "Manchester United", "Chelsea", standardOutcomes("Manchester United", "Chelsea", 2.15, 3.4), COMMENCE_TIME)]);
+
+  const result = await verifyOdds(bet({ event: "Manchester United vs Chelsea", selection: "1", odds: 2.15 }));
+
+  assert.equal(result.matched, true);
+  assert.equal(result.providerEventId, "evt-meta-1");
+});
+
+test("Stage 3.1: a matched event returns the actual sport_key its own endpoint was fetched under", async () => {
+  const { requestedSportKeys } = mockEventsBySportKey({
+    soccer_italy_serie_a: [h2hEventWithId("evt-meta-2", "Inter Milan", "Juventus", standardOutcomes("Inter Milan", "Juventus", 2.1, 3.3), COMMENCE_TIME)],
+  });
+
+  const result = await verifyOdds(bet({ sport: "serie a", event: "Inter Milan vs Juventus", selection: "Inter Milan", odds: 2.1 }));
+
+  assert.deepEqual(requestedSportKeys, ["soccer_italy_serie_a"]);
+  assert.equal(result.providerSportKey, "soccer_italy_serie_a");
+});
+
+test("Stage 3.1: a matched event returns eventStartTime equal to the provider's commence_time, normalized to ISO", async () => {
+  mockEvents([h2hEventWithId("evt-meta-3", "Manchester United", "Chelsea", standardOutcomes("Manchester United", "Chelsea", 2.15, 3.4), COMMENCE_TIME)]);
+
+  const result = await verifyOdds(bet({ event: "Manchester United vs Chelsea", selection: "1", odds: 2.15 }));
+
+  assert.equal(result.eventStartTime, new Date(COMMENCE_TIME).toISOString());
+});
+
+test("Stage 3.1: provider event metadata is preserved on the ODDS_CHANGED path (odds far from the source price)", async () => {
+  mockEvents([h2hEventWithId("evt-meta-4", "Manchester United", "Chelsea", standardOutcomes("Manchester United", "Chelsea", 2.15, 3.4), COMMENCE_TIME)]);
+
+  // Explicit single-league sport — avoids the no-league fallback merge
+  // across all 7 football sport_keys, which would otherwise re-tag this
+  // mockEvents() shared fixture under every key in turn (mockEvents(), unlike
+  // mockEventsBySportKey(), returns the same response for every requested
+  // key) and leave only the LAST-queried key's tag surviving id-based dedup
+  // — a test-fixture artifact, not a real production scenario.
+  //
+  // Source is 2.15; 2.50 is well outside tolerance -> matched but not
+  // withinTolerance (the "odds changed" case at this layer).
+  const result = await verifyOdds(bet({ sport: "premier league", event: "Manchester United vs Chelsea", selection: "1", odds: 2.5 }));
+
+  assert.equal(result.matched, true);
+  assert.equal(result.withinTolerance, false);
+  assert.equal(result.providerEventId, "evt-meta-4");
+  assert.equal(result.providerSportKey, "soccer_epl");
+  assert.equal(result.eventStartTime, new Date(COMMENCE_TIME).toISOString());
+});
+
+test("Stage 3.1: provider event metadata is preserved when the event is found but the selection can't be matched to a bookmaker outcome", async () => {
+  mockEvents([h2hEventWithId("evt-meta-5", "Manchester United", "Chelsea", standardOutcomes("Manchester United", "Chelsea", 2.15, 3.4), COMMENCE_TIME)]);
+
+  const result = await verifyOdds(
+    bet({ sport: "premier league", event: "Manchester United vs Chelsea", selection: "Some Completely Unrelated Outcome", odds: 2.0 }),
+  );
+
+  assert.equal(result.matched, false);
+  assert.match(result.note ?? "", /Could not match selection/);
+  assert.equal(result.providerEventId, "evt-meta-5", "the event WAS found, even though the selection wasn't — metadata must still be present");
+  assert.equal(result.providerSportKey, "soccer_epl");
+  assert.equal(result.eventStartTime, new Date(COMMENCE_TIME).toISOString());
+});
+
+test("Stage 3.1: provider event metadata is preserved when the event is found but has no bookmaker odds at all", async () => {
+  mockEvents([
+    {
+      id: "evt-meta-6",
+      commence_time: COMMENCE_TIME,
+      home_team: "Manchester United",
+      away_team: "Chelsea",
+      bookmakers: [],
+    },
+  ]);
+
+  const result = await verifyOdds(bet({ sport: "premier league", event: "Manchester United vs Chelsea", selection: "1", odds: 2.15 }));
+
+  assert.equal(result.matched, false);
+  assert.match(result.note ?? "", /No bookmaker odds available/);
+  assert.equal(result.providerEventId, "evt-meta-6");
+  assert.equal(result.providerSportKey, "soccer_epl");
+});
+
+test("Stage 3.1: no event found never returns fabricated provider metadata", async () => {
+  mockEvents([h2hEventWithId("evt-meta-7", "Real Madrid", "Barcelona", standardOutcomes("Real Madrid", "Barcelona", 1.9, 4.1), COMMENCE_TIME)]);
+
+  const result = await verifyOdds(bet({ event: "Manchester United vs Chelsea", selection: "1", odds: 2.15 }));
+
+  assert.equal(result.matched, false);
+  assert.match(result.note ?? "", /No matching event found/);
+  assert.equal(result.providerEventId, undefined);
+  assert.equal(result.providerSportKey, undefined);
+  assert.equal(result.eventStartTime, undefined);
+});
+
+test("Stage 3.1: an unmapped sport never returns fabricated provider metadata", async () => {
+  const result = await verifyOdds(bet({ sport: "curling", event: "Team A vs Team B", selection: "1", odds: 2.0 }));
+
+  assert.equal(result.matched, false);
+  assert.equal(result.providerEventId, undefined);
+  assert.equal(result.providerSportKey, undefined);
+  assert.equal(result.eventStartTime, undefined);
+});
+
+test("Stage 3.1: a multi-key (no-league) football fallback never mixes sport keys — the matched event's providerSportKey is exactly the key it was actually fetched from", async () => {
+  mockEventsBySportKey({
+    soccer_epl: [h2hEventWithId("evt-epl-meta", "Arsenal", "Chelsea", standardOutcomes("Arsenal", "Chelsea", 1.9, 3.8), COMMENCE_TIME)],
+    soccer_spain_la_liga: [],
+    soccer_italy_serie_a: [h2hEventWithId("evt-sa-meta", "Inter Milan", "Juventus", standardOutcomes("Inter Milan", "Juventus", 2.1, 3.3), COMMENCE_TIME)],
+    soccer_germany_bundesliga: [],
+    soccer_france_ligue_one: [],
+    soccer_uefa_champs_league: [],
+    soccer_uefa_champs_league_qualification: [],
+  });
+
+  const result = await verifyOdds(bet({ sport: "football", event: "Inter Milan vs Juventus", selection: "Inter Milan", odds: 2.1 }));
+
+  assert.equal(result.matched, true);
+  assert.equal(result.providerEventId, "evt-sa-meta");
+  assert.equal(result.providerSportKey, "soccer_italy_serie_a", "must report the key the WINNING event actually came from, never the EPL key merely because it was queried too");
+});
+
+test("Stage 3.1: a missing commence_time is handled safely — matched:true still, but no provider metadata at all (all-or-nothing)", async () => {
+  mockEvents([
+    {
+      id: "evt-no-commence",
+      // commence_time deliberately omitted entirely.
+      home_team: "Manchester United",
+      away_team: "Chelsea",
+      bookmakers: [{ key: "pinnacle", title: "Pinnacle", markets: [{ key: "h2h", outcomes: standardOutcomes("Manchester United", "Chelsea", 2.15, 3.4) }] }],
+    },
+  ]);
+
+  const result = await verifyOdds(bet({ event: "Manchester United vs Chelsea", selection: "1", odds: 2.15 }));
+
+  assert.equal(result.matched, true, "the odds check itself must still succeed — missing commence_time is not a matching failure");
+  assert.equal(result.providerEventId, undefined, "must not report an id without a trustworthy start time (all-or-nothing)");
+  assert.equal(result.providerSportKey, undefined);
+  assert.equal(result.eventStartTime, undefined);
+});
+
+test("Stage 3.1: an unparsable commence_time is handled safely — matched:true still, but no provider metadata at all", async () => {
+  mockEvents([
+    {
+      id: "evt-bad-commence",
+      commence_time: "not-a-real-date",
+      home_team: "Manchester United",
+      away_team: "Chelsea",
+      bookmakers: [{ key: "pinnacle", title: "Pinnacle", markets: [{ key: "h2h", outcomes: standardOutcomes("Manchester United", "Chelsea", 2.15, 3.4) }] }],
+    },
+  ]);
+
+  const result = await verifyOdds(bet({ event: "Manchester United vs Chelsea", selection: "1", odds: 2.15 }));
+
+  assert.equal(result.matched, true, "an unparsable commence_time must not fail the odds check itself");
+  assert.equal(result.providerEventId, undefined);
+  assert.equal(result.providerSportKey, undefined);
+  assert.equal(result.eventStartTime, undefined);
+});

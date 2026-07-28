@@ -20,7 +20,21 @@ import type { PreviewTokenPayload, ExpressPreviewTokenPayload, ExpressPreviewTok
 // never uses this cast (it only ever runs against the real singleton).
 // ---------------------------------------------------------------------
 
-interface FakeBetRow {
+// Stage 3.1 — the eight provider/canonical reference fields, shared by both
+// FakeBetRow (SINGLE) and FakeSelectionRow (EXPRESS legs), mirroring
+// prisma/schema.prisma's own Variant-B field set on Bet/BetSelection.
+interface FakeProviderReferenceColumns {
+  providerName: string | null;
+  providerEventId: string | null;
+  providerSportKey: string | null;
+  eventStartTime: Date | null;
+  canonicalMarketType: string | null;
+  canonicalSelectionType: string | null;
+  canonicalParticipant: string | null;
+  canonicalPeriod: string | null;
+}
+
+interface FakeBetRow extends FakeProviderReferenceColumns {
   id: string;
   playerId: string;
   previewId: string | null;
@@ -36,7 +50,7 @@ interface FakeBetRow {
   updatedAt: Date;
 }
 
-interface FakeSelectionRow {
+interface FakeSelectionRow extends FakeProviderReferenceColumns {
   id: string;
   betId: string;
   sport: string;
@@ -96,7 +110,7 @@ function createFakeDb(options: FakeDbOptions = {}) {
     totalOdds: Prisma.Decimal | null;
     status: string;
     selections?: { create: Array<Omit<FakeSelectionRow, "id" | "betId" | "createdAt" | "updatedAt">> };
-  }) {
+  } & Partial<FakeProviderReferenceColumns>) {
     createCallCount += 1;
 
     if (betIdByPreviewId.has(data.previewId)) {
@@ -123,6 +137,14 @@ function createFakeDb(options: FakeDbOptions = {}) {
       status: data.status,
       createdAt: now,
       updatedAt: now,
+      providerName: data.providerName ?? null,
+      providerEventId: data.providerEventId ?? null,
+      providerSportKey: data.providerSportKey ?? null,
+      eventStartTime: data.eventStartTime ?? null,
+      canonicalMarketType: data.canonicalMarketType ?? null,
+      canonicalSelectionType: data.canonicalSelectionType ?? null,
+      canonicalParticipant: data.canonicalParticipant ?? null,
+      canonicalPeriod: data.canonicalPeriod ?? null,
     };
 
     const newSelections: FakeSelectionRow[] = [];
@@ -496,4 +518,189 @@ test("createBetFromPreview: an unknown payload type is rejected", async () => {
     },
   );
   assert.equal(db._debug.betCount(), 0);
+});
+
+// ---------------------------------------------------------------------
+// Stage 3.1 — provider event references / canonical market-selection
+// identity, persisted from the already-verified signed token payload only.
+// ---------------------------------------------------------------------
+
+test("Stage 3.1 SINGLE: provider/canonical fields are persisted on Bet from the token payload", async () => {
+  const db = createFakeDb();
+  const payload = singlePayload({
+    providerEventId: "evt-single-abc",
+    providerSportKey: "soccer_epl",
+    eventStartTime: "2026-08-15T18:00:00.000Z",
+    canonicalMarketType: "MONEYLINE_3WAY",
+    canonicalSelectionType: "HOME",
+    canonicalParticipant: null,
+    canonicalPeriod: "FULL_GAME",
+  });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  assert.equal(result.bet.providerName, "THE_ODDS_API");
+  assert.equal(result.bet.providerEventId, "evt-single-abc");
+  assert.equal(result.bet.providerSportKey, "soccer_epl");
+  assert.equal(result.bet.eventStartTime?.toISOString(), "2026-08-15T18:00:00.000Z");
+  assert.equal(result.bet.canonicalMarketType, "MONEYLINE_3WAY");
+  assert.equal(result.bet.canonicalSelectionType, "HOME");
+  assert.equal(result.bet.canonicalParticipant, null);
+  assert.equal(result.bet.canonicalPeriod, "FULL_GAME");
+});
+
+test("Stage 3.1 SINGLE: providerName stays null when providerEventId is null — never fabricated independently", async () => {
+  const db = createFakeDb();
+  const result = await createBetFromPreview(singlePayload(), fakeOptions(db));
+
+  assert.equal(result.bet.providerEventId, null);
+  assert.equal(result.bet.providerName, null, "providerName must never be set without a real providerEventId to attach it to");
+});
+
+test("Stage 3.1 EXPRESS: each leg persists its OWN provider event references — different legs never share or mix IDs", async () => {
+  const db = createFakeDb();
+  const payload = expressPayload({
+    selections: [
+      expressSelection({
+        event: "Real Madrid vs Barcelona",
+        providerEventId: "evt-leg-1",
+        providerSportKey: "soccer_spain_la_liga",
+        eventStartTime: "2026-08-20T19:00:00.000Z",
+        canonicalMarketType: "MONEYLINE_3WAY",
+        canonicalSelectionType: "HOME",
+        canonicalPeriod: "FULL_GAME",
+      }),
+      expressSelection({
+        event: "Inter Milan vs Juventus",
+        providerEventId: "evt-leg-2",
+        providerSportKey: "soccer_italy_serie_a",
+        eventStartTime: "2026-08-21T20:00:00.000Z",
+        canonicalMarketType: "MONEYLINE_3WAY",
+        canonicalSelectionType: "AWAY",
+        canonicalPeriod: "FULL_GAME",
+      }),
+    ],
+  });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  const [leg1, leg2] = result.bet.selections;
+  assert.equal(leg1.providerEventId, "evt-leg-1");
+  assert.equal(leg1.providerSportKey, "soccer_spain_la_liga");
+  assert.equal(leg1.eventStartTime?.toISOString(), "2026-08-20T19:00:00.000Z");
+  assert.equal(leg1.canonicalSelectionType, "HOME");
+  assert.equal(leg2.providerEventId, "evt-leg-2");
+  assert.equal(leg2.providerSportKey, "soccer_italy_serie_a");
+  assert.equal(leg2.canonicalSelectionType, "AWAY");
+  assert.notEqual(leg1.providerEventId, leg2.providerEventId, "different legs' provider event ids must never be mixed up");
+});
+
+test("Stage 3.1 EXPRESS: leg order is preserved for provider references, matching the token's own selection order", async () => {
+  const db = createFakeDb();
+  const payload = expressPayload({
+    selections: [
+      expressSelection({ event: "Match A", providerEventId: "evt-A" }),
+      expressSelection({ event: "Match B", providerEventId: "evt-B" }),
+    ],
+  });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  assert.equal(result.bet.selections[0].event, "Match A");
+  assert.equal(result.bet.selections[0].providerEventId, "evt-A");
+  assert.equal(result.bet.selections[1].event, "Match B");
+  assert.equal(result.bet.selections[1].providerEventId, "evt-B");
+});
+
+test("Stage 3.1 legacy SINGLE token (no provider/canonical fields at all): writes null, does not crash", async () => {
+  const db = createFakeDb();
+  // A genuinely old-shaped payload — the seven Stage 3.1 keys are entirely
+  // absent, exactly as verifyPreviewToken would decode a pre-Stage-3.1
+  // token (normalized to undefined by TypeScript's Partial, matching what
+  // JSON.parse of an old token produces at runtime).
+  const legacyPayload = singlePayload();
+
+  const result = await createBetFromPreview(legacyPayload, fakeOptions(db));
+
+  assert.equal(result.idempotent, false, "sanity: bet creation itself must still succeed");
+  assert.equal(result.bet.providerName, null);
+  assert.equal(result.bet.providerEventId, null);
+  assert.equal(result.bet.providerSportKey, null);
+  assert.equal(result.bet.eventStartTime, null);
+  assert.equal(result.bet.canonicalMarketType, null);
+  assert.equal(result.bet.canonicalSelectionType, null);
+  assert.equal(result.bet.canonicalParticipant, null);
+  assert.equal(result.bet.canonicalPeriod, null);
+});
+
+test("Stage 3.1 legacy EXPRESS token (selections with no provider/canonical fields): writes null per leg, does not crash", async () => {
+  const db = createFakeDb();
+  const legacyPayload = expressPayload();
+
+  const result = await createBetFromPreview(legacyPayload, fakeOptions(db));
+
+  assert.equal(result.idempotent, false);
+  for (const selection of result.bet.selections) {
+    assert.equal(selection.providerName, null);
+    assert.equal(selection.providerEventId, null);
+    assert.equal(selection.providerSportKey, null);
+    assert.equal(selection.eventStartTime, null);
+  }
+});
+
+test("Stage 3.1: createBetFromPreview only ever persists what the already-verified token payload contains — no other input surface exists for provider identity", async () => {
+  // There is no client body, header, or query param this function reads —
+  // its only parameter is the payload already produced by
+  // verifyPreviewToken/verifyExpressPreviewToken (HMAC-checked before this
+  // function is ever called, by the confirm route, unchanged). This test
+  // documents that structural guarantee: whatever the (simulated, already-
+  // verified) payload says is exactly and only what gets persisted.
+  const db = createFakeDb();
+  const payload = singlePayload({ providerEventId: "evt-exactly-this-and-nothing-else" });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  assert.equal(result.bet.providerEventId, "evt-exactly-this-and-nothing-else");
+});
+
+test("Stage 3.1: an invalid (unparsable) eventStartTime in the token does not crash bet creation — degrades to null", async () => {
+  const db = createFakeDb();
+  const payload = singlePayload({
+    providerEventId: "evt-bad-time",
+    providerSportKey: "soccer_epl",
+    eventStartTime: "not-a-real-timestamp",
+  });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  assert.equal(result.idempotent, false, "bet creation must still succeed");
+  assert.equal(result.bet.providerEventId, "evt-bad-time", "the id itself is unaffected — only the unparsable time degrades");
+  assert.equal(result.bet.eventStartTime, null, "an invalid timestamp must never be written as Invalid Date");
+});
+
+test("Stage 3.1: a missing eventStartTime (undefined) with a real providerEventId still persists the id, with a null time", async () => {
+  const db = createFakeDb();
+  const payload = singlePayload({ providerEventId: "evt-no-time", providerSportKey: "soccer_epl" });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  assert.equal(result.bet.providerEventId, "evt-no-time");
+  assert.equal(result.bet.eventStartTime, null);
+});
+
+test("Stage 3.1: existing OddsSnapshot behavior for SINGLE is unaffected by the new provider fields", async () => {
+  const db = createFakeDb();
+  const payload = singlePayload({
+    providerEventId: "evt-snapshot-check",
+    providerSportKey: "soccer_epl",
+    eventStartTime: "2026-08-15T18:00:00.000Z",
+  });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  // Unchanged existing fields — proves the new provider columns are purely
+  // additive to the same create() call, not a replacement of anything.
+  assert.equal(result.bet.stake.toString(), "100");
+  assert.equal(result.bet.odds?.toString(), "2.1");
+  assert.equal(result.bet.status, "PENDING");
 });

@@ -169,6 +169,24 @@ model Bet {
   oddsSnapshot OddsSnapshot?
   transactions Transaction[]
 
+  // Stage 3.1 — provider event references for SINGLE (Variant B: SINGLE has
+  // no BetSelection row today, so its provider metadata lives here instead;
+  // EXPRESS's equivalent fields live on BetSelection below). All nullable —
+  // only ever populated when the odds provider unambiguously resolved the
+  // matched event at verification time (see lib/odds/oddsVerifier.ts's
+  // extractProviderEventMetadata); never fabricated, never backfilled by
+  // fuzzy re-matching. Not used by any settlement/display code yet — purely
+  // additive persistence, laying the groundwork for a future automatic
+  // settlement stage.
+  providerName           String?
+  providerEventId        String?
+  providerSportKey       String?
+  eventStartTime         DateTime?
+  canonicalMarketType    String?
+  canonicalSelectionType String?
+  canonicalParticipant   String?
+  canonicalPeriod        String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -202,6 +220,19 @@ model BetSelection {
   market      String?
   currentOdds Decimal?               @db.Decimal(6, 2)
   oddsStatus  BetSelectionOddsStatus @default(PENDING)
+
+  // Stage 3.1 — provider event references, one set per EXPRESS leg (Variant
+  // B: mirrors the same field set added to Bet above, for SINGLE). Same
+  // nullable, additive, never-fabricated semantics — see Bet's own comment
+  // above for the full rationale.
+  providerName           String?
+  providerEventId        String?
+  providerSportKey       String?
+  eventStartTime         DateTime?
+  canonicalMarketType    String?
+  canonicalSelectionType String?
+  canonicalParticipant   String?
+  canonicalPeriod        String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

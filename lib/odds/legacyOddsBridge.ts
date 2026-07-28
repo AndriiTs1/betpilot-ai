@@ -319,6 +319,20 @@ export function verificationResultToLegacyOddsCheck(
   // assertion anywhere in this derivation.
   const submittedOdds = result.submittedOdds !== null ? Number(result.submittedOdds) : null;
 
+  // Stage 3.1 — round-trips result.matchedEvent back into OddsCheckResult's
+  // own providerEventId/providerSportKey/eventStartTime fields, so
+  // buildBetSlipPreview.ts only ever has to read one place (the
+  // reconstructed oddsCheck) for both the original odds-check figures and
+  // the provider event metadata — the same "legacy shape is the one
+  // canonical read surface" convention this bridge already established for
+  // matched/sourceOdds/bookmaker/etc. Present on FAILED too (the
+  // event-found-but-selection-not-matched case) for honesty, even though
+  // buildBetSlipPreview.ts only ever reads it from a matched:true result in
+  // practice (Stage 3.1 gates preview-token population on that).
+  const providerEventId = result.matchedEvent?.reference.eventId;
+  const providerSportKey = result.matchedEvent?.reference.sportKey;
+  const eventStartTime = result.matchedEvent?.event.startTime;
+
   switch (result.status) {
     case "VERIFIED":
     case "ODDS_CHANGED":
@@ -337,6 +351,9 @@ export function verificationResultToLegacyOddsCheck(
           // confirmed by a full audit of every `.note` access site during
           // this step) — safe to always reconstruct as null.
           note: null,
+          providerEventId,
+          providerSportKey,
+          eventStartTime,
         },
         wasExceptionMapped: false,
       };
@@ -351,6 +368,9 @@ export function verificationResultToLegacyOddsCheck(
           discrepancyPercent: null,
           bookmaker: result.bookmaker ?? null,
           note: null,
+          providerEventId,
+          providerSportKey,
+          eventStartTime,
         },
         wasExceptionMapped: false,
       };

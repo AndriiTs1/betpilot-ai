@@ -94,6 +94,72 @@ function isValidDecimalString(value: unknown): value is string {
   return typeof value === "string" && DECIMAL_STRING_PATTERN.test(value);
 }
 
+// Stage 3.1 — only one provider exists today (lib/odds/oddsProvider.ts's
+// ProviderName is a single-member union, "THE_ODDS_API"), so this is a
+// literal constant, not a value threaded through the preview token — adding
+// a redundant providerName field to the already-large token payload for a
+// value with zero actual variability would be pure overhead. Honest because
+// it's only ever attached when providerEventId is genuinely present (an
+// event this exact provider actually resolved) — never on a Bet/BetSelection
+// that has no provider event metadata at all.
+const PROVIDER_NAME = "THE_ODDS_API";
+
+// Stage 3.1 — defense-in-depth: by the time a value reaches here it should
+// already be a valid ISO string (oddsVerifier.ts's own all-or-nothing
+// extractProviderEventMetadata never emits an unparsable commence_time, and
+// previewToken.ts's shape validation only checks "is this a string", not
+// "is this a valid date"). A malformed value here must never crash bet
+// creation or silently produce `Invalid Date` in Postgres — it degrades to
+// null, matching providerEventId's own "nothing honest to persist" case.
+function parseValidEventStartTime(iso: string | null | undefined): Date | null {
+  if (iso === null || iso === undefined) return null;
+
+  const parsedMs = Date.parse(iso);
+  if (Number.isNaN(parsedMs)) return null;
+
+  return new Date(parsedMs);
+}
+
+// Stage 3.1 — the eight provider/canonical columns shared identically by
+// Bet (SINGLE) and BetSelection (EXPRESS legs) — see prisma/schema.prisma's
+// own comment on both models for the full Variant-B rationale. Reads only
+// from the already-verified, signed token payload — never a second provider
+// request, never fuzzy re-matching, never trusting anything from outside
+// the HMAC-verified payload.
+interface ProviderReferenceColumns {
+  providerName: string | null;
+  providerEventId: string | null;
+  providerSportKey: string | null;
+  eventStartTime: Date | null;
+  canonicalMarketType: string | null;
+  canonicalSelectionType: string | null;
+  canonicalParticipant: string | null;
+  canonicalPeriod: string | null;
+}
+
+function providerReferenceColumnsFromToken(source: {
+  providerEventId?: string | null;
+  providerSportKey?: string | null;
+  eventStartTime?: string | null;
+  canonicalMarketType?: string | null;
+  canonicalSelectionType?: string | null;
+  canonicalParticipant?: string | null;
+  canonicalPeriod?: string | null;
+}): ProviderReferenceColumns {
+  const providerEventId = source.providerEventId ?? null;
+
+  return {
+    providerName: providerEventId !== null ? PROVIDER_NAME : null,
+    providerEventId,
+    providerSportKey: source.providerSportKey ?? null,
+    eventStartTime: parseValidEventStartTime(source.eventStartTime),
+    canonicalMarketType: source.canonicalMarketType ?? null,
+    canonicalSelectionType: source.canonicalSelectionType ?? null,
+    canonicalParticipant: source.canonicalParticipant ?? null,
+    canonicalPeriod: source.canonicalPeriod ?? null,
+  };
+}
+
 function assertValidExpressPayload(payload: ExpressPreviewTokenPayload): void {
   if (payload.previewId.length === 0 || payload.playerId.length === 0) {
     throw new CreateBetFromPreviewValidationError(
@@ -225,6 +291,7 @@ async function createSingleBetFromPreview(
           odds: payload.odds !== null ? new Prisma.Decimal(payload.odds) : null,
           totalOdds: payload.totalOdds !== null ? new Prisma.Decimal(payload.totalOdds) : null,
           status: "PENDING",
+          ...providerReferenceColumnsFromToken(payload),
         },
       });
 
@@ -315,6 +382,7 @@ async function createExpressBetFromPreview(
               odds: selection.submittedOdds !== null ? new Prisma.Decimal(selection.submittedOdds) : null,
               currentOdds: selection.currentOdds !== null ? new Prisma.Decimal(selection.currentOdds) : null,
               oddsStatus: selection.oddsStatus,
+              ...providerReferenceColumnsFromToken(selection),
             })),
           },
         },
