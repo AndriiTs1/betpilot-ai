@@ -13,6 +13,14 @@ import type { MiniAppTab, MeResponse } from "@/components/miniapp/types";
 import type { AnyConfirmedBet } from "@/components/miniapp/betConfirmApi";
 import { applyMiniAppDataAction } from "@/components/miniapp/mergeConfirmedBet";
 import { isTelegramAuthErrorReason, getTelegramAuthErrorMessage } from "@/components/miniapp/telegramAuthError";
+import { hasPendingBet } from "@/components/miniapp/hasPendingBet";
+
+// Phase 1 — investor-demo end-to-end flow: while the player has at least
+// one PENDING bet, poll for the operator's confirm/reject decision every
+// 5s so it shows up without the player closing and reopening the Mini App.
+// Same silent-reconciliation mechanism as refreshDataSilently below, not a
+// second data-loading system — this only decides *when* to call it.
+const PENDING_BET_POLL_INTERVAL_MS = 5000;
 
 interface TelegramWebApp {
   initData: string;
@@ -61,6 +69,19 @@ export default function MiniAppPage() {
   const viewportChangedHandlerRef = useRef<((event: { isStateStable: boolean }) => void) | null>(
     null,
   );
+  // Single-flight guard shared by every background-refresh trigger (polling
+  // tick, visibilitychange, and the player's own confirm) — never more than
+  // one /api/miniapp/me request in flight at once, regardless of which
+  // trigger fired.
+  const isBackgroundRefreshingRef = useRef(false);
+  // True for as long as this component instance is mounted — set in the
+  // mount effect below, flipped to false in its cleanup. A background
+  // refresh's fetch can still resolve after unmount (clearInterval/
+  // removeEventListener only stop *new* ticks, not one already in flight);
+  // refreshDataSilently checks this ref after every await, before touching
+  // React state, so a post-unmount resolution is a safe no-op instead of a
+  // setState call.
+  const isMountedRef = useRef(false);
 
   const loadData = useCallback(async () => {
     const tg = window.Telegram?.WebApp;
@@ -120,9 +141,20 @@ export default function MiniAppPage() {
         headers: { Authorization: `tma ${tg.initData}` },
       });
 
+      // The component may have unmounted while this fetch was in flight —
+      // clearInterval/removeEventListener (see the polling/visibilitychange
+      // effects below) only prevent a *new* refresh from starting, they
+      // can't cancel one already awaiting a response. Bail out before
+      // touching React state (or even parsing the body) if that happened.
+      if (!isMountedRef.current) return;
       if (!response.ok) return;
 
       const data = (await response.json()) as MeResponse;
+
+      // Same race, second await — unmount could have happened while
+      // response.json() was resolving.
+      if (!isMountedRef.current) return;
+
       setFetchState((prev) =>
         prev.status !== "ready"
           ? prev
@@ -132,6 +164,22 @@ export default function MiniAppPage() {
       // Best-effort — see this function's own header comment.
     }
   }, []);
+
+  // Thin wrapper around refreshDataSilently — adds only single-flight
+  // dedupe (via isBackgroundRefreshingRef), no new fetch/merge logic.
+  // Every background-refresh trigger (polling, visibilitychange, and the
+  // post-confirm reconciliation below) goes through this one function, so
+  // two of them can never overlap.
+  const refreshIfIdle = useCallback(async () => {
+    if (isBackgroundRefreshingRef.current) return;
+
+    isBackgroundRefreshingRef.current = true;
+    try {
+      await refreshDataSilently();
+    } finally {
+      isBackgroundRefreshingRef.current = false;
+    }
+  }, [refreshDataSilently]);
 
   // The one shared confirmation-update path both BetTextForm and
   // BetScreenshotForm now feed into via BetScreen.tsx's single
@@ -146,9 +194,9 @@ export default function MiniAppPage() {
           ? prev
           : { status: "ready", data: applyMiniAppDataAction(prev.data, { type: "BET_CONFIRMED", bet }) },
       );
-      void refreshDataSilently();
+      void refreshIfIdle();
     },
-    [refreshDataSilently],
+    [refreshIfIdle],
   );
 
   const handleScriptReady = useCallback(() => {
@@ -214,6 +262,57 @@ export default function MiniAppPage() {
       }
     };
   }, []);
+
+  // Mount-lifetime tracker for refreshDataSilently's post-await guards
+  // above — true for the entire time this component instance is mounted,
+  // set back to false in the cleanup that runs on unmount (and, under
+  // Strict Mode's dev-only double-invoke, on the synthetic
+  // mount→cleanup→mount cycle, which this correctly survives: the second
+  // setup sets it back to true, same as any other ref/state Strict Mode
+  // intentionally preserves across that cycle).
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  const hasPending = fetchState.status === "ready" && hasPendingBet(fetchState.data.recentBets);
+
+  // Polling only exists while a PENDING bet is outstanding — starts the
+  // moment one appears (via BET_CONFIRMED or a background refresh) and
+  // stops the moment none remain, including mid-poll (the effect re-runs,
+  // clearing this interval, as soon as `hasPending` flips to false).
+  useEffect(() => {
+    if (!hasPending) return;
+
+    const intervalId = setInterval(() => {
+      void refreshIfIdle();
+    }, PENDING_BET_POLL_INTERVAL_MS);
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [hasPending, refreshIfIdle]);
+
+  // Silent refresh when the player returns to the Mini App (e.g. switches
+  // back from another Telegram chat) — independent of `hasPending`, since
+  // returning to the app is itself a reasonable moment to reconcile,
+  // matching Telegram's own visibility semantics for a webview. Guarded by
+  // the same isBackgroundRefreshingRef single-flight lock as polling, so
+  // this can never double up with an in-flight poll tick.
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void refreshIfIdle();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [refreshIfIdle]);
 
   return (
     <>
