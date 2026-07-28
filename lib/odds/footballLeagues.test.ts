@@ -63,14 +63,47 @@ test("resolveFootballLeague: generic football/soccer aliases are never recognize
   }
 });
 
-test("FOOTBALL_LEAGUES / FOOTBALL_FALLBACK_LEGACY_SPORT_STRINGS: exactly the six supported competitions, in sync with each other", () => {
-  assert.equal(FOOTBALL_LEAGUES.length, 6);
+test("FOOTBALL_LEAGUES / FOOTBALL_FALLBACK_LEGACY_SPORT_STRINGS: exactly the seven supported competitions, in sync with each other", () => {
+  assert.equal(FOOTBALL_LEAGUES.length, 7);
   assert.deepEqual(
     FOOTBALL_FALLBACK_LEGACY_SPORT_STRINGS,
     FOOTBALL_LEAGUES.map((league) => league.legacySportString),
   );
   assert.deepEqual(
     [...FOOTBALL_FALLBACK_LEGACY_SPORT_STRINGS].sort(),
-    ["premier league", "la liga", "serie a", "bundesliga", "ligue 1", "champions league"].sort(),
+    [
+      "premier league",
+      "la liga",
+      "serie a",
+      "bundesliga",
+      "ligue 1",
+      "champions league",
+      "champions league qualification",
+    ].sort(),
   );
+});
+
+test("resolveFootballLeague: UEFA Champions League Qualification resolves to its own league, distinct from the main tournament", () => {
+  assert.deepEqual(resolveFootballLeague("UEFA Champions League Qualification"), {
+    displayName: "UEFA Champions League Qualification",
+    legacySportString: "champions league qualification",
+  });
+});
+
+test("resolveFootballLeague: Champions League Qualification aliases all resolve to the qualification league", () => {
+  const cases = [
+    "Champions League Qualification",
+    "UCL Qualification",
+    "ucl qualification",
+    "Champions League Qualifiers",
+    "Лига чемпионов квалификация",
+    "квалификация Лиги чемпионов",
+  ];
+
+  for (const input of cases) {
+    const resolved = resolveFootballLeague(input);
+    assert.ok(resolved, `"${input}" must resolve to a known league`);
+    assert.equal(resolved?.displayName, "UEFA Champions League Qualification");
+    assert.equal(resolved?.legacySportString, "champions league qualification");
+  }
 });

@@ -497,6 +497,7 @@ const ALL_FOOTBALL_SPORT_KEYS = [
   "soccer_germany_bundesliga",
   "soccer_france_ligue_one",
   "soccer_uefa_champs_league",
+  "soccer_uefa_champs_league_qualification",
 ];
 
 test("Step 16A (1): explicit Serie A propagation — only the Serie A provider key is requested", async () => {
@@ -539,6 +540,7 @@ test("Step 16A (5): cross-league event discovery — EPL has no match, Serie A d
     soccer_germany_bundesliga: [],
     soccer_france_ligue_one: [],
     soccer_uefa_champs_league: [],
+    soccer_uefa_champs_league_qualification: [],
   });
 
   const result = await verifyOdds(bet({ sport: "football", event: "Inter Milan vs Juventus", selection: "Inter Milan", odds: 2.1 }));
@@ -556,6 +558,7 @@ test("Step 16A (6): partial provider failure — one league request fails, anoth
     soccer_germany_bundesliga: [],
     soccer_france_ligue_one: [],
     soccer_uefa_champs_league: [],
+    soccer_uefa_champs_league_qualification: [],
   });
 
   const result = await verifyOdds(bet({ sport: "football", event: "Inter Milan vs Juventus", selection: "Inter Milan", odds: 2.1 }));
@@ -596,6 +599,7 @@ test("Step 16A: the same fixture returned by more than one merged competition is
     soccer_germany_bundesliga: [],
     soccer_france_ligue_one: [],
     soccer_uefa_champs_league: [],
+    soccer_uefa_champs_league_qualification: [],
   });
 
   const result = await verifyOdds(bet({ sport: "football", event: "Arsenal vs Chelsea", selection: "Arsenal", odds: 1.9 }));
@@ -622,6 +626,7 @@ test("Step 16A/16B: two genuinely different events tied at the same best score, 
     soccer_uefa_champs_league: [
       h2hEventWithId("evt-b", "Sporting FC", "Athletic FC", standardOutcomes("Sporting FC", "Athletic FC", 2.2, 2.8), "2026-09-01T15:00:00Z"),
     ],
+    soccer_uefa_champs_league_qualification: [],
   });
 
   const result = await verifyOdds(bet({ sport: "football", event: "Sporting FC vs Athletic FC", selection: "Sporting FC", odds: 2.0 }));
@@ -700,4 +705,58 @@ test("Step 16B: a genuine same-teams rematch (kickoffs months apart) is NOT sema
   // fixtures months apart — never merged, and never silently arbitrated.
   assert.equal(result.matched, false);
   assert.match(result.note ?? "", /Ambiguous event match/);
+});
+
+// ---------------------------------------------------------------------
+// UEFA Champions League Qualification — a real, live gap found via
+// diagnostic: The Odds API lists qualifying-round fixtures under a
+// sport_key entirely separate from the main tournament
+// (soccer_uefa_champs_league_qualification vs. soccer_uefa_champs_league),
+// and the no-league fallback previously never queried it.
+// ---------------------------------------------------------------------
+
+test("UEFA CL Qualification: the new sport_key is included in the no-league football fallback set", async () => {
+  const fixtures = Object.fromEntries(ALL_FOOTBALL_SPORT_KEYS.map((key) => [key, []])) as Record<string, unknown[]>;
+  const { requestedSportKeys } = mockEventsBySportKey(fixtures);
+
+  await verifyOdds(bet({ sport: "football", event: "Some Team vs Another Team", selection: "Some Team", odds: 2.0 }));
+
+  assert.ok(
+    requestedSportKeys.includes("soccer_uefa_champs_league_qualification"),
+    "a no-league football lookup must also query the qualification sport_key",
+  );
+});
+
+test("UEFA CL Qualification: explicit league propagation — only the qualification sport_key is requested, never the main tournament's", async () => {
+  const { requestedSportKeys } = mockEventsBySportKey({
+    soccer_uefa_champs_league_qualification: [
+      h2hEventWithId("evt-clq-1", "Dinamo Zagreb", "FC Thun", standardOutcomes("Dinamo Zagreb", "FC Thun", 1.65, 5.2)),
+    ],
+  });
+
+  const result = await verifyOdds(
+    bet({ sport: "champions league qualification", event: "Dinamo Zagreb vs FC Thun", selection: "Dinamo Zagreb", odds: 1.65 }),
+  );
+
+  assert.deepEqual(requestedSportKeys, ["soccer_uefa_champs_league_qualification"]);
+  assert.equal(result.matched, true);
+});
+
+test("UEFA CL Qualification: the mocked Dinamo Zagreb vs FC Thun fixture verifies for the diagnosed bet text (Match Winner / Dinamo Zagreb)", async () => {
+  mockEventsBySportKey({
+    soccer_uefa_champs_league_qualification: [
+      h2hEventWithId("evt-clq-2", "Dinamo Zagreb", "FC Thun", standardOutcomes("Dinamo Zagreb", "FC Thun", 1.65, 5.2)),
+    ],
+  });
+
+  // Exactly the diagnosed real-world bet: "Dinamo Zagreb vs Thun" (short
+  // team name), submitted with no odds — mirroring how a player's provider
+  // price gets promoted when no price was typed.
+  const result = await verifyOdds(
+    bet({ sport: "champions league qualification", event: "Dinamo Zagreb vs Thun", selection: "Dinamo Zagreb", odds: null }),
+  );
+
+  assert.equal(result.matched, true, "must no longer report NOT_FOUND for a real, live qualification-round event");
+  assert.equal(result.sourceOdds, 1.65);
+  assert.equal(result.bookmaker, "Pinnacle");
 });

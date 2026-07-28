@@ -70,6 +70,12 @@ const SOCCER_SERIE_A_KEY = "soccer_italy_serie_a";
 const SOCCER_BUNDESLIGA_KEY = "soccer_germany_bundesliga";
 const SOCCER_LIGUE_1_KEY = "soccer_france_ligue_one";
 const SOCCER_UEFA_CL_KEY = "soccer_uefa_champs_league";
+// The Odds API models the UEFA Champions League qualifying rounds as a
+// sport_key entirely separate from the main tournament (SOCCER_UEFA_CL_KEY)
+// — never merged/aliased together, since they are genuinely distinct
+// provider-side competitions (confirmed live: the main-tournament key can
+// return zero events while this one lists real, in-progress qualifiers).
+const SOCCER_UEFA_CL_QUALIFICATION_KEY = "soccer_uefa_champs_league_qualification";
 
 // Step 16A — generic football/soccer (no explicit, supported league) now
 // merges across every currently supported competition, mirroring the
@@ -84,6 +90,7 @@ const FOOTBALL_FALLBACK_SPORT_KEYS: string[] = [
   SOCCER_BUNDESLIGA_KEY,
   SOCCER_LIGUE_1_KEY,
   SOCCER_UEFA_CL_KEY,
+  SOCCER_UEFA_CL_QUALIFICATION_KEY,
 ];
 
 const SPORT_KEY_ALIASES: Record<string, string | string[]> = {
@@ -96,6 +103,7 @@ const SPORT_KEY_ALIASES: Record<string, string | string[]> = {
   bundesliga: SOCCER_BUNDESLIGA_KEY,
   "ligue 1": SOCCER_LIGUE_1_KEY,
   "champions league": SOCCER_UEFA_CL_KEY,
+  "champions league qualification": SOCCER_UEFA_CL_QUALIFICATION_KEY,
   basketball: "basketball_nba",
   баскетбол: "basketball_nba",
   nba: "basketball_nba",

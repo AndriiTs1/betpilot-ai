@@ -35,6 +35,15 @@ export const FOOTBALL_LEAGUES: readonly FootballLeagueDefinition[] = [
   { displayName: "Bundesliga", legacySportString: "bundesliga" },
   { displayName: "Ligue 1", legacySportString: "ligue 1" },
   { displayName: "UEFA Champions League", legacySportString: "champions league" },
+  // Provider-side, this is a distinct competition from the main tournament
+  // above (The Odds API: soccer_uefa_champs_league_qualification vs.
+  // soccer_uefa_champs_league) — a separate legacySportString so
+  // oddsVerifier.ts's SPORT_KEY_ALIASES routes it to its own sport_key
+  // rather than merging it into the main tournament's.
+  {
+    displayName: "UEFA Champions League Qualification",
+    legacySportString: "champions league qualification",
+  },
 ];
 
 // Case-insensitive, whitespace-tolerant aliases -> this table's own
@@ -58,6 +67,12 @@ const FOOTBALL_LEAGUE_ALIASES: Readonly<Record<string, string>> = {
   "champions league": "UEFA Champions League",
   "uefa champions league": "UEFA Champions League",
   ucl: "UEFA Champions League",
+  "uefa champions league qualification": "UEFA Champions League Qualification",
+  "champions league qualification": "UEFA Champions League Qualification",
+  "ucl qualification": "UEFA Champions League Qualification",
+  "champions league qualifiers": "UEFA Champions League Qualification",
+  "лига чемпионов квалификация": "UEFA Champions League Qualification",
+  "квалификация лиги чемпионов": "UEFA Champions League Qualification",
 };
 
 function normalizeLeagueAliasKey(name: string): string {
