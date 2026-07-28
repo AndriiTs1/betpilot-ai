@@ -12,6 +12,7 @@ import { formatDisplayNumber, formatSignedDisplayNumber } from "@/lib/format/num
 import { mapBetForDisplay } from "@/lib/bets/mapBetForDisplay";
 import { getSettlementCountdown } from "@/lib/dashboard/settlementCountdown";
 import { computePlayerStatus, type PlayerStatusTone } from "@/lib/dashboard/playerStatus";
+import { dispatchDashboardRefresh } from "@/lib/dashboard/refreshEvent";
 
 const ICON_RENDER_PX = 28;
 
@@ -206,6 +207,112 @@ function PlayerStatusPill({
   );
 }
 
+type SettlementStatus = "SETTLED_WIN" | "SETTLED_LOSS" | "VOID";
+
+const SETTLEMENT_ACTIONS: readonly {
+  status: SettlementStatus;
+  label: string;
+  confirmMessage: (betLabel: string) => string;
+  className: string;
+}[] = [
+  {
+    status: "SETTLED_WIN",
+    label: "Win",
+    confirmMessage: (betLabel) => `Mark "${betLabel}" as Win? This cannot be undone.`,
+    className: "bg-green-500 text-black hover:bg-green-400 disabled:hover:bg-green-500",
+  },
+  {
+    status: "SETTLED_LOSS",
+    label: "Loss",
+    confirmMessage: (betLabel) => `Mark "${betLabel}" as Loss? This cannot be undone.`,
+    className: "bg-red-500 text-white hover:bg-red-400 disabled:hover:bg-red-500",
+  },
+  {
+    status: "VOID",
+    label: "Void",
+    confirmMessage: (betLabel) => `Void "${betLabel}"? This cannot be undone.`,
+    className: "bg-slate-700 text-white hover:bg-slate-600 disabled:hover:bg-slate-700",
+  },
+];
+
+// Same single-flight pendingAction + fetch + error-state pattern as
+// components/bets/BetQueueItem.tsx's Confirm/Reject — reuses the existing
+// dashboard settle proxy (app/api/dashboard/bets/[id]/settle/route.ts,
+// itself unchanged) and the existing dispatchDashboardRefresh() mechanism.
+// The only genuinely new pieces are: a JSON body carrying the target
+// status instead of an empty POST, and a window.confirm() guard, since
+// unlike confirm/reject, settlement can never be changed to a different
+// result afterward (lib/bets/settlementRules.ts's SettlementConflictError).
+function SettlementActions({ betId, betLabel }: { betId: string; betLabel: string }) {
+  const [pendingStatus, setPendingStatus] = useState<SettlementStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSettle(status: SettlementStatus, confirmMessage: string) {
+    if (!window.confirm(confirmMessage)) return;
+
+    setPendingStatus(status);
+    setError(null);
+
+    try {
+      const response = await fetch(`/api/dashboard/bets/${betId}/settle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+
+      if (response.ok) {
+        // The bet moving from Active to History, and Available/Exposure/
+        // Period P/L updating, all happen because PlayerList.tsx already
+        // refetches /api/dashboard/players on this event — nothing is
+        // settled here manually, same as BetQueueItem.tsx's confirm/reject.
+        dispatchDashboardRefresh();
+        return;
+      }
+
+      const body = await response.json().catch(() => null);
+      // Two possible error shapes depending on which layer rejected the
+      // request: the dashboard proxy's own auth failure returns
+      // { error: "UNAUTHORIZED" } (a string — lib/auth/requireOperator.ts's
+      // unauthorizedApiResponse), while everything proxied through from the
+      // internal settle route returns { success: false, error: { code,
+      // message, ... } } (an object — app/api/bets/[id]/settle/route.ts's
+      // SettleErrorBody). Both are handled, matching
+      // BetQueueItem.tsx's own defensive `body?.error ?? "..."` fallback.
+      const message =
+        typeof body?.error === "string"
+          ? body.error
+          : typeof body?.error?.message === "string"
+            ? body.error.message
+            : null;
+      setError(message ?? "Не удалось выполнить settlement. Попробуйте ещё раз.");
+    } catch {
+      setError("Не удалось связаться с сервером. Проверьте соединение.");
+    } finally {
+      setPendingStatus(null);
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <div className="flex justify-end gap-1.5">
+        {SETTLEMENT_ACTIONS.map(({ status, label, confirmMessage, className }) => (
+          <button
+            key={status}
+            type="button"
+            onClick={() => handleSettle(status, confirmMessage(betLabel))}
+            disabled={pendingStatus !== null}
+            aria-label={`${label} bet: ${betLabel}`}
+            className={`min-h-7 rounded-lg px-2.5 py-1 text-xs font-semibold transition-colors disabled:opacity-50 ${FOCUS_RING} ${className}`}
+          >
+            {pendingStatus === status ? "…" : label}
+          </button>
+        ))}
+      </div>
+      {error && <p className="max-w-[220px] text-right text-xs text-red-400">{error}</p>}
+    </div>
+  );
+}
+
 function displayForBet(bet: PlayerBet) {
   return mapBetForDisplay({
     ...bet,
@@ -218,7 +325,7 @@ function DesktopBetRow({ bet, tab }: { bet: PlayerBet; tab: Tab }) {
   const display = displayForBet(bet);
   const isExpress = display.selectionCount > 1;
   const payout = computePotentialPayout(bet);
-  const columnCount = tab === "active" ? 7 : 6;
+  const columnCount = tab === "active" ? 8 : 6;
 
   const eventLabel = isExpress
     ? `Express ×${display.selectionCount}`
@@ -273,6 +380,15 @@ function DesktopBetRow({ bet, tab }: { bet: PlayerBet; tab: Tab }) {
         <td className="py-2 text-right text-slate-200">
           {formatDateTime(tab === "active" ? bet.createdAt : bet.updatedAt)}
         </td>
+        {tab === "active" && (
+          <td className="py-2 pl-4">
+            {/* Active Bets are always CONFIRMED (server-filtered — see
+                app/api/dashboard/players/route.ts) — this per-row guard is
+                defensive only, so the column never renders stray buttons
+                for a row it wasn't intended for. */}
+            {bet.status === "CONFIRMED" && <SettlementActions betId={bet.id} betLabel={eventLabel} />}
+          </td>
+        )}
       </tr>
 
       {isExpress && isOpen && (
@@ -326,6 +442,9 @@ function BetsTable({ bets, tab }: { bets: PlayerBet[]; tab: Tab }) {
               <th className="pb-2 text-right font-normal">
                 {tab === "active" ? "Placed" : "Resolved"}
               </th>
+              {tab === "active" && (
+                <th className="pb-2 pl-4 text-right font-normal">Actions</th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -341,6 +460,9 @@ function BetsTable({ bets, tab }: { bets: PlayerBet[]; tab: Tab }) {
           const display = displayForBet(bet);
           const isExpress = display.selectionCount > 1;
           const payout = computePotentialPayout(bet);
+          const eventLabel = isExpress
+            ? `Express ×${display.selectionCount}`
+            : display.displayTitle;
 
           return (
             <div
@@ -351,11 +473,7 @@ function BetsTable({ bets, tab }: { bets: PlayerBet[]; tab: Tab }) {
                 <div className="min-w-0">
                   <p className="flex items-start gap-1.5 font-semibold text-white">
                     <BetRowIcon isExpress={isExpress} sport={bet.sport} />
-                    <span>
-                      {isExpress
-                        ? `Express ×${display.selectionCount}`
-                        : display.displayTitle}
-                    </span>
+                    <span>{eventLabel}</span>
                   </p>
                   {!isExpress && (
                     <p className="text-sm text-slate-400">
@@ -390,6 +508,12 @@ function BetsTable({ bets, tab }: { bets: PlayerBet[]; tab: Tab }) {
                   )}
                 </span>
               </div>
+
+              {tab === "active" && bet.status === "CONFIRMED" && (
+                <div className="mt-3 flex justify-end border-t border-slate-800/70 pt-3">
+                  <SettlementActions betId={bet.id} betLabel={eventLabel} />
+                </div>
+              )}
             </div>
           );
         })}
