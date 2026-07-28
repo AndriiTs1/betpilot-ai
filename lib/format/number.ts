@@ -13,3 +13,21 @@ export function formatDisplayNumber(value: string): string {
 
   return decPart !== undefined ? `${sign}${grouped}.${decPart}` : `${sign}${grouped}`;
 }
+
+// Same thousand-space grouping as formatDisplayNumber, but for a
+// profit/loss-style figure that must always carry an explicit sign: "+" for
+// positive, "-" for negative (formatDisplayNumber already preserves a
+// leading "-"), and a bare "0" for zero — never "+0" or "-0". Used for
+// Period P/L, where the sign itself is meaningful and must not rely on
+// color alone (a colorblind operator, or a plain-text export, still needs
+// to be able to tell profit from loss).
+export function formatSignedDisplayNumber(value: string): string {
+  const numeric = Number(value);
+
+  if (numeric === 0) return "0";
+  if (!Number.isFinite(numeric)) return value;
+
+  if (value.startsWith("-")) return formatDisplayNumber(value);
+
+  return `+${formatDisplayNumber(value)}`;
+}

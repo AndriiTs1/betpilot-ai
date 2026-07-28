@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { Prisma } from "@/lib/generated/prisma/client";
-import { computeRemainingCredit } from "@/lib/players/credit";
+import { computeRemainingCredit, clampAvailableForDisplay } from "@/lib/players/credit";
 import { requireOperatorApi } from "@/lib/auth/requireOperator";
+import { getCurrentSettlementPeriodBounds } from "@/lib/dashboard/settlementPeriod";
 
 export async function GET(request: NextRequest) {
   const auth = await requireOperatorApi(request);
@@ -15,7 +16,7 @@ export async function GET(request: NextRequest) {
     // total). An explicit loop is easier to verify than a conditional-sum
     // Prisma/SQL expression, and player counts here are small.
     const players = await prisma.player.findMany({
-      select: { creditLimit: true, currentCredit: true },
+      select: { id: true, creditLimit: true, currentCredit: true },
     });
 
     const totalRemainingCredit = players.reduce(
@@ -44,12 +45,9 @@ export async function GET(request: NextRequest) {
     // CONFIRMED = "played", PENDING = "not played". That's not actually
     // whether the underlying match has finished — it will be revisited once
     // settlement (determining win/loss from the real match result) exists.
-    // One query covers both count and sum here (unlike pendingBets above,
-    // which follows the existing count()-then-findMany two-query shape) —
-    // no established pattern to stay consistent with yet for this figure.
     const confirmedBets = await prisma.bet.findMany({
       where: { status: "CONFIRMED" },
-      select: { stake: true },
+      select: { playerId: true, stake: true },
     });
 
     const confirmedCount = confirmedBets.length;
@@ -58,18 +56,42 @@ export async function GET(request: NextRequest) {
       new Prisma.Decimal(0),
     );
 
-    // Stage 6.1 — Available = remaining credit limit minus currently-
-    // confirmed exposure, summed across all players. Algebraically this is
-    // Σ(remaining_i) − Σ(exposure_i) regardless of how exposure is grouped,
-    // so it reuses the two sums already computed above rather than a new
-    // per-player query. Same formula the Mini App and the Players list
-    // already use per-player (app/api/miniapp/me/route.ts) — previously
-    // this KPI only showed totalRemainingCredit, which didn't subtract
-    // exposure and could visibly disagree with the per-player figure for
-    // the same underlying state; added here as a new field (not a rename)
-    // so totalRemainingCredit's own meaning is unchanged for any other
-    // consumer.
-    const totalAvailable = totalRemainingCredit.minus(confirmedSum);
+    // Exposure grouped per player — needed to compute each player's own
+    // Available the same way GET /api/dashboard/players does, so this
+    // aggregate total matches "add up every PlayerCard's Available" exactly,
+    // rather than a total-minus-total shortcut that could silently diverge
+    // from the per-player figures if any single player's raw available ever
+    // went negative (see clampAvailableForDisplay).
+    const exposureByPlayerId = confirmedBets.reduce((map, bet) => {
+      const current = map.get(bet.playerId) ?? new Prisma.Decimal(0);
+      map.set(bet.playerId, current.plus(bet.stake));
+      return map;
+    }, new Map<string, Prisma.Decimal>());
+
+    const totalAvailable = players.reduce((total, player) => {
+      const exposure = exposureByPlayerId.get(player.id) ?? new Prisma.Decimal(0);
+      const rawAvailable = computeRemainingCredit(player).minus(exposure);
+      const clamped = clampAvailableForDisplay(rawAvailable, `player:${player.id}`);
+      return total.plus(clamped);
+    }, new Prisma.Decimal(0));
+
+    // Period P/L — sum of every Transaction (BET_PAYOUT/BET_STAKE/
+    // ADJUSTMENT, written only by lib/bets/settleBet.ts) created since the
+    // current settlement period started. Transaction.amount already carries
+    // the correctly-signed delta (+netProfit for a win, -stake for a loss,
+    // 0 for a void) — this is a straight sum, no re-derivation of the
+    // WIN/LOSS/VOID math, which stays exclusively in settleBet.ts.
+    const { start: periodStart, nextSettlementDate } = getCurrentSettlementPeriodBounds();
+
+    const periodTransactions = await prisma.transaction.findMany({
+      where: { createdAt: { gte: periodStart } },
+      select: { amount: true },
+    });
+
+    const periodPnl = periodTransactions.reduce(
+      (total, transaction) => total.plus(transaction.amount),
+      new Prisma.Decimal(0),
+    );
 
     return NextResponse.json({
       activePlayers: players.length,
@@ -79,6 +101,11 @@ export async function GET(request: NextRequest) {
       pendingBetsSum: pendingBetsSum.toString(),
       confirmedCount,
       confirmedSum: confirmedSum.toString(),
+      periodPnl: periodPnl.toString(),
+      settlementPeriod: {
+        start: periodStart.toISOString(),
+        nextSettlementDate: nextSettlementDate.toISOString(),
+      },
     });
   } catch (err) {
     console.error("GET /api/dashboard/overview failed:", err);

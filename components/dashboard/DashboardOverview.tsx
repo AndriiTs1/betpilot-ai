@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import StatCard from "./StatCard";
 import { DASHBOARD_REFRESH_EVENT } from "@/lib/dashboard/refreshEvent";
+import { formatDisplayNumber, formatSignedDisplayNumber } from "@/lib/format/number";
 
 export default function DashboardOverview() {
   const [activePlayers, setActivePlayers] = useState<number | null>(null);
@@ -11,6 +12,7 @@ export default function DashboardOverview() {
   const [pendingBetsSum, setPendingBetsSum] = useState<string | null>(null);
   const [confirmedCount, setConfirmedCount] = useState<number | null>(null);
   const [confirmedSum, setConfirmedSum] = useState<string | null>(null);
+  const [periodPnl, setPeriodPnl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -35,6 +37,7 @@ export default function DashboardOverview() {
           setPendingBetsSum(data.pendingBetsSum);
           setConfirmedCount(data.confirmedCount);
           setConfirmedSum(data.confirmedSum);
+          setPeriodPnl(data.periodPnl);
         }
       } catch {
         if (!cancelled) {
@@ -69,7 +72,7 @@ export default function DashboardOverview() {
   const playersDescription = error ? "Failed to load" : "Registered players";
 
   const availableValue = error ? "—" : totalAvailable === null ? "…" : totalAvailable;
-  const availableDescription = error ? "Failed to load" : "Remaining, minus exposure";
+  const availableDescription = error ? "Failed to load" : "Remaining credit across players";
 
   const exposureValue = error ? "—" : confirmedSum === null ? "…" : confirmedSum;
   const exposureDescription = error
@@ -83,14 +86,31 @@ export default function DashboardOverview() {
     ? "Failed to load"
     : pendingBetsSum === null
       ? "…"
-      : `Totaling ${pendingBetsSum}`;
+      : `Total stake ${formatDisplayNumber(pendingBetsSum)}`;
+
+  // Pre-signed and pre-grouped ("+1 250" / "-75" / "0") before StatCard's
+  // own formatDisplayNumber() runs on it — safe: formatDisplayNumber treats
+  // an already-space-grouped integer part as non-numeric and returns it
+  // unchanged, so this never double-formats. Kept as one shared formatter
+  // (formatSignedDisplayNumber, in lib/format/number.ts) rather than a
+  // second grouping implementation.
+  const periodPnlValue = error ? "—" : periodPnl === null ? "…" : formatSignedDisplayNumber(periodPnl);
+  const periodPnlDescription = error ? "Failed to load" : "Settled bets this settlement period";
+  const periodPnlToneClass =
+    error || periodPnl === null
+      ? "text-white"
+      : Number(periodPnl) > 0
+        ? "text-green-400"
+        : Number(periodPnl) < 0
+          ? "text-red-400"
+          : "text-white";
 
   return (
-    <section className="grid gap-6 md:grid-cols-2 xl:grid-cols-4">
+    <section className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
       <StatCard title="Players" value={playersValue} description={playersDescription} icon="users" accent="blue" />
 
       <StatCard
-        title="Available"
+        title="Available Credit"
         value={availableValue}
         description={availableDescription}
         icon="credit-card"
@@ -112,6 +132,15 @@ export default function DashboardOverview() {
         icon="hourglass"
         accent="green"
         emphasize={pendingBetsCount !== null && pendingBetsCount > 0}
+      />
+
+      <StatCard
+        title="Current Period P/L"
+        value={periodPnlValue}
+        description={periodPnlDescription}
+        icon="trending-up"
+        accent="blue"
+        valueClassName={periodPnlToneClass}
       />
     </section>
   );

@@ -14,6 +14,8 @@ interface Player {
   available: string;
   exposure: string;
   activeBetsCount: number;
+  pendingBetsCount: number;
+  periodPnl: string;
   nextSettlementDate: string;
   activeBets: PlayerBet[];
   history: PlayerBet[];
@@ -94,8 +96,9 @@ export default function PlayerList() {
               creditLimit={player.creditLimit}
               available={player.available}
               exposure={player.exposure}
-              currentCredit={player.currentCredit}
               activeBetsCount={player.activeBetsCount}
+              pendingBetsCount={player.pendingBetsCount}
+              periodPnl={player.periodPnl}
               nextSettlementDate={player.nextSettlementDate}
               activeBets={player.activeBets}
               history={player.history}

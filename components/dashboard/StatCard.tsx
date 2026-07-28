@@ -7,6 +7,8 @@ interface StatCardProps {
   icon?: string;
   accent?: "blue" | "green";
   emphasize?: boolean;
+  /** Overrides the value's text color — e.g. green/red for a signed P/L figure. Sign (+/-/0) must still be present in `value` itself; color is reinforcement, never the only signal. */
+  valueClassName?: string;
 }
 
 const ACCENT_ICON_COLOR: Record<"blue" | "green", string> = {
@@ -21,6 +23,7 @@ export default function StatCard({
   icon,
   accent = "blue",
   emphasize = false,
+  valueClassName = "text-white",
 }: StatCardProps) {
   return (
     <div
@@ -37,7 +40,7 @@ export default function StatCard({
         {title}
       </p>
 
-      <h2 className="mt-2.5 text-3xl font-bold text-white">{formatDisplayNumber(value)}</h2>
+      <h2 className={`mt-2.5 text-3xl font-bold ${valueClassName}`}>{formatDisplayNumber(value)}</h2>
 
       {description && <p className="mt-1.5 text-sm text-slate-500">{description}</p>}
     </div>

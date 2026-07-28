@@ -8,8 +8,10 @@ import {
   ExpressIcon,
   getDashboardSportIcon,
 } from "@/components/miniapp/sportIcons";
-import { formatDisplayNumber } from "@/lib/format/number";
+import { formatDisplayNumber, formatSignedDisplayNumber } from "@/lib/format/number";
 import { mapBetForDisplay } from "@/lib/bets/mapBetForDisplay";
+import { getSettlementCountdown } from "@/lib/dashboard/settlementCountdown";
+import { computePlayerStatus, type PlayerStatusTone } from "@/lib/dashboard/playerStatus";
 
 const ICON_RENDER_PX = 28;
 
@@ -71,8 +73,9 @@ interface PlayerCardProps {
   creditLimit: string;
   available: string;
   exposure: string;
-  currentCredit: string;
   activeBetsCount: number;
+  pendingBetsCount: number;
+  periodPnl: string;
   nextSettlementDate: string;
   activeBets: PlayerBet[];
   history: PlayerBet[];
@@ -149,19 +152,57 @@ function MiniStat({
   value,
   valueClassName = "text-white",
   format = false,
+  secondary,
 }: {
   label: string;
   value: string;
   valueClassName?: string;
   format?: boolean;
+  /** Optional second line under the value — e.g. a settlement countdown. */
+  secondary?: string;
 }) {
   return (
     <div className="flex h-full flex-col justify-between rounded-xl border border-slate-800/70 bg-slate-950/50 p-3.5 text-center">
       <p className="text-xs text-slate-500">{label}</p>
-      <p className={`mt-2 text-xl font-bold ${valueClassName}`}>
-        {format ? formatDisplayNumber(value) : value}
-      </p>
+      <div className="mt-2">
+        <p className={`text-xl font-bold ${valueClassName}`}>
+          {format ? formatDisplayNumber(value) : value}
+        </p>
+        {secondary && <p className="mt-0.5 text-[11px] text-slate-500">{secondary}</p>}
+      </div>
     </div>
+  );
+}
+
+const PLAYER_STATUS_STYLES: Record<PlayerStatusTone, { border: string; bg: string; text: string; dot: string }> = {
+  red: { border: "border-red-500/25", bg: "bg-red-500/10", text: "text-red-400", dot: "bg-red-400" },
+  amber: { border: "border-amber-500/25", bg: "bg-amber-500/10", text: "text-amber-400", dot: "bg-amber-400" },
+  yellow: { border: "border-yellow-500/25", bg: "bg-yellow-500/10", text: "text-yellow-300", dot: "bg-yellow-400" },
+  blue: { border: "border-blue-500/25", bg: "bg-blue-500/10", text: "text-blue-300", dot: "bg-blue-400" },
+  slate: { border: "border-slate-700/60", bg: "bg-slate-800/40", text: "text-slate-500", dot: "bg-slate-600" },
+  green: { border: "border-green-500/25", bg: "bg-green-500/10", text: "text-green-400", dot: "bg-green-400" },
+};
+
+function PlayerStatusPill({
+  tone,
+  label,
+  description,
+}: {
+  tone: PlayerStatusTone;
+  label: string;
+  description: string;
+}) {
+  const style = PLAYER_STATUS_STYLES[tone];
+
+  return (
+    <span
+      className={`mt-2 inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${style.border} ${style.bg} ${style.text}`}
+      title={description}
+      aria-label={`Player status: ${label}. ${description}`}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${style.dot}`} aria-hidden="true" />
+      {label}
+    </span>
   );
 }
 
@@ -186,46 +227,50 @@ function DesktopBetRow({ bet, tab }: { bet: PlayerBet; tab: Tab }) {
     ? display.selections.map((selection) => selection.event).join(" · ")
     : display.displaySubtitle;
 
+  const oddsDisplay = bet.totalOdds ?? bet.odds;
+
   return (
     <>
-      <tr className="border-t border-slate-800 text-center">
-        <td className="py-2 pr-4 text-white">
+      <tr className="border-t border-slate-800">
+        <td className="max-w-52 truncate py-2 pr-4 text-left text-white" title={eventLabel}>
           {isExpress ? (
             <button
               type="button"
               onClick={() => setIsOpen((current) => !current)}
               aria-expanded={isOpen}
               aria-label={`${isOpen ? "Hide" : "Show"} all ${display.selectionCount} selections`}
-              className={`inline-flex items-center gap-1.5 hover:text-blue-300 ${FOCUS_RING}`}
+              className={`inline-flex max-w-full items-center gap-1.5 hover:text-blue-300 ${FOCUS_RING}`}
             >
               <i
-                className={`ti ti-chevron-${isOpen ? "down" : "right"} text-sm`}
+                className={`ti ti-chevron-${isOpen ? "down" : "right"} shrink-0 text-sm`}
                 aria-hidden="true"
               />
               <BetRowIcon isExpress sport={bet.sport} />
-              {eventLabel}
+              <span className="truncate">{eventLabel}</span>
             </button>
           ) : (
-            <span className="inline-flex items-center gap-1.5">
+            <span className="inline-flex max-w-full items-center gap-1.5">
               <BetRowIcon isExpress={false} sport={bet.sport} />
-              {eventLabel}
+              <span className="truncate">{eventLabel}</span>
             </span>
           )}
         </td>
-        <td className="max-w-60 truncate py-2 pr-4 text-slate-200">
+        <td className="max-w-60 truncate py-2 pr-4 text-left text-slate-200" title={selectionSummary ?? undefined}>
           {selectionSummary}
         </td>
-        <td className="py-2 pr-4 text-white">{bet.stake}</td>
-        <td className="py-2 pr-4 text-slate-200">
-          {bet.totalOdds ?? bet.odds ?? "—"}
+        <td className="py-2 pr-4 text-right tabular-nums text-white">{formatDisplayNumber(bet.stake)}</td>
+        <td className="py-2 pr-4 text-right tabular-nums text-slate-200">
+          {oddsDisplay ? formatDisplayNumber(oddsDisplay) : "—"}
         </td>
         {tab === "active" && (
-          <td className="py-2 pr-4 text-green-400">{payout ?? "—"}</td>
+          <td className="py-2 pr-4 text-right tabular-nums text-green-400">
+            {payout ? formatDisplayNumber(payout) : "—"}
+          </td>
         )}
-        <td className="py-2 pr-4">
+        <td className="py-2 pr-4 text-center">
           <StatusBadge status={bet.status} />
         </td>
-        <td className="py-2 text-slate-200">
+        <td className="py-2 text-right text-slate-200">
           {formatDateTime(tab === "active" ? bet.createdAt : bet.updatedAt)}
         </td>
       </tr>
@@ -255,6 +300,11 @@ function BetsTable({ bets, tab }: { bets: PlayerBet[]; tab: Tab }) {
       <EmptyState
         icon={tab === "active" ? "list-check" : "history"}
         title={tab === "active" ? "No active bets." : "No bet history yet."}
+        description={
+          tab === "active"
+            ? "Confirmed bets will appear here until they're settled."
+            : "Rejected, settled, and void bets will appear here."
+        }
       />
     );
   }
@@ -264,16 +314,16 @@ function BetsTable({ bets, tab }: { bets: PlayerBet[]; tab: Tab }) {
       <div className="hidden overflow-x-auto lg:block">
         <table className="w-full text-left text-sm">
           <thead>
-            <tr className="text-center text-slate-500">
-              <th className="pb-2 pr-4 font-normal">Event</th>
-              <th className="pb-2 pr-4 font-normal">Selection</th>
-              <th className="pb-2 pr-4 font-normal">Stake</th>
-              <th className="pb-2 pr-4 font-normal">Odds</th>
+            <tr className="text-slate-500">
+              <th className="pb-2 pr-4 text-left font-normal">Event</th>
+              <th className="pb-2 pr-4 text-left font-normal">Selection</th>
+              <th className="pb-2 pr-4 text-right font-normal">Stake</th>
+              <th className="pb-2 pr-4 text-right font-normal">Odds</th>
               {tab === "active" && (
-                <th className="pb-2 pr-4 font-normal">Potential payout</th>
+                <th className="pb-2 pr-4 text-right font-normal">Potential payout</th>
               )}
-              <th className="pb-2 pr-4 font-normal">Status</th>
-              <th className="pb-2 font-normal">
+              <th className="pb-2 pr-4 text-center font-normal">Status</th>
+              <th className="pb-2 text-right font-normal">
                 {tab === "active" ? "Placed" : "Resolved"}
               </th>
             </tr>
@@ -329,10 +379,10 @@ function BetsTable({ bets, tab }: { bets: PlayerBet[]; tab: Tab }) {
 
               <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
                 <span className="text-slate-200">
-                  {bet.stake} @ {bet.totalOdds ?? bet.odds ?? "—"}
+                  {formatDisplayNumber(bet.stake)} @ {bet.totalOdds ?? bet.odds ?? "—"}
                 </span>
                 {tab === "active" && payout && (
-                  <span className="text-green-400">Payout {payout}</span>
+                  <span className="text-green-400">Payout {formatDisplayNumber(payout)}</span>
                 )}
                 <span className="text-slate-500">
                   {formatDateTime(
@@ -355,8 +405,9 @@ export default function PlayerCard({
   creditLimit,
   available,
   exposure,
-  currentCredit,
   activeBetsCount,
+  pendingBetsCount,
+  periodPnl,
   nextSettlementDate,
   activeBets,
   history,
@@ -368,15 +419,27 @@ export default function PlayerCard({
   const activeTabId = `${baseId}-tab-active`;
   const historyTabId = `${baseId}-tab-history`;
 
-  const isNegative = currentCredit.startsWith("-");
-  const isZero = Number(currentCredit) === 0;
-  const balanceDisplay =
-    isNegative || isZero ? currentCredit : `+${currentCredit}`;
-  const balanceColor = isNegative
-    ? "text-red-400"
-    : isZero
-      ? "text-white"
-      : "text-green-400";
+  const periodPnlDisplay = formatSignedDisplayNumber(periodPnl);
+  const periodPnlNum = Number(periodPnl);
+  const periodPnlColor =
+    Number.isFinite(periodPnlNum) && periodPnlNum > 0
+      ? "text-green-400"
+      : Number.isFinite(periodPnlNum) && periodPnlNum < 0
+        ? "text-red-400"
+        : "text-white";
+
+  // Computed once here and shared by both the Settlement ministat's
+  // secondary line and the header status pill's "Settlement Due" check —
+  // Stage 9: a single calculation feeding both display spots, not two.
+  const settlementCountdown = getSettlementCountdown(nextSettlementDate);
+
+  const status = computePlayerStatus({
+    available,
+    isSettlementDueOrOverdue: settlementCountdown.tone !== "upcoming",
+    pendingBetsCount,
+    activeBetsCount,
+    hasTelegramLinked: telegramId !== null,
+  });
 
   const bets = activeTab === "active" ? activeBets : history;
 
@@ -398,23 +461,7 @@ export default function PlayerCard({
               Contact: {phoneNumber ?? "—"}
             </p>
 
-            {telegramId ? (
-              <span className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-green-500/25 bg-green-500/10 px-2 py-0.5 text-xs font-medium text-green-400">
-                <span
-                  className="h-1.5 w-1.5 rounded-full bg-green-400"
-                  aria-hidden="true"
-                />
-                Telegram: connected
-              </span>
-            ) : (
-              <span className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-slate-700/60 bg-slate-800/40 px-2 py-0.5 text-xs font-medium text-slate-500">
-                <span
-                  className="h-1.5 w-1.5 rounded-full bg-slate-600"
-                  aria-hidden="true"
-                />
-                Telegram: not linked yet
-              </span>
-            )}
+            <PlayerStatusPill tone={status.tone} label={status.label} description={status.description} />
           </div>
 
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-slate-500 transition-colors duration-200 group-hover:bg-white/5 group-hover:text-slate-300 group-focus-visible:bg-white/5 group-focus-visible:text-slate-300">
@@ -428,20 +475,20 @@ export default function PlayerCard({
         </div>
 
         <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-          <MiniStat label="Limit" value={creditLimit} format />
+          <MiniStat label="Credit Limit" value={creditLimit} format />
           <MiniStat label="Available" value={available} format />
           <MiniStat label="Exposure" value={exposure} format />
           <MiniStat
-            label="Balance"
-            value={balanceDisplay}
-            valueClassName={balanceColor}
-            format
+            label="Period P/L"
+            value={periodPnlDisplay}
+            valueClassName={periodPnlColor}
           />
           <MiniStat label="Active Bets" value={String(activeBetsCount)} />
           <MiniStat
-            label="Settlement"
+            label="Next Settlement"
             value={formatDate(nextSettlementDate)}
             valueClassName="text-blue-300"
+            secondary={settlementCountdown.label}
           />
         </div>
       </button>

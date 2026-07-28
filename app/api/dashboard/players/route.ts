@@ -2,57 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { Prisma } from "@/lib/generated/prisma/client";
 import { requireOperatorApi } from "@/lib/auth/requireOperator";
-import { computeRemainingCredit } from "@/lib/players/credit";
-
-const SETTLEMENT_TIME_ZONE = "Europe/Zurich";
-
-function getZurichToday(): { year: number; month: number; day: number } {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: SETTLEMENT_TIME_ZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(new Date());
-
-  const map: Record<string, string> = {};
-  for (const part of parts) {
-    if (part.type !== "literal") map[part.type] = part.value;
-  }
-
-  return {
-    year: Number(map.year),
-    month: Number(map.month) - 1, // 0-indexed, to match Date's month argument
-    day: Number(map.day),
-  };
-}
-
-// Settlement runs on the 15th and on the last day of the month. Boundaries
-// are built from Europe/Zurich's calendar date (via Intl.DateTimeFormat, not
-// the server's UTC clock), then represented as UTC midnight of that date —
-// simpler than resolving the exact CET/CEST instant, at the cost of up to a
-// ~1-2h imprecision right at the boundary (Zurich midnight isn't UTC
-// midnight). Acceptable for a "next settlement date" display; would need a
-// real offset calculation if bet-level precision at the boundary hour ever
-// matters. Stage 6.1: this date is display-only (shown on the player card)
-// — it no longer bounds which bets are returned (see below).
-function getNextSettlementDate(): Date {
-  const { year, month, day } = getZurichToday();
-
-  if (day <= 15) {
-    return new Date(Date.UTC(year, month, 15));
-  }
-
-  // Day 0 of next month = last calendar day of this month; Date handles
-  // 28/29/30/31 and the December-into-January rollover on its own.
-  return new Date(Date.UTC(year, month + 1, 0));
-}
+import { computeRemainingCredit, clampAvailableForDisplay } from "@/lib/players/credit";
+import { getCurrentSettlementPeriodBounds } from "@/lib/dashboard/settlementPeriod";
 
 export async function GET(request: NextRequest) {
   const auth = await requireOperatorApi(request);
   if (!auth.ok) return auth.response;
 
   try {
-    const nextSettlementDate = getNextSettlementDate();
+    const { start: periodStart, nextSettlementDate } = getCurrentSettlementPeriodBounds();
 
     // Stage 6.1: the player card shows "Active Bets" (CONFIRMED) and
     // "History" (everything else already resolved) as two tabs — PENDING is
@@ -113,9 +71,41 @@ export async function GET(request: NextRequest) {
       return map;
     }, new Map<string, number>());
 
+    // Pending Bets are excluded from the `players` query above (see comment
+    // there), so they need their own count per player — used only for the
+    // header status pill ("Pending Bets"); the pending bet's own full
+    // detail still lives exclusively in GET /api/dashboard/bets/pending.
+    const pendingBets = await prisma.bet.findMany({
+      where: { status: "PENDING" },
+      select: { playerId: true },
+    });
+
+    const pendingBetsCountByPlayerId = pendingBets.reduce((map, bet) => {
+      map.set(bet.playerId, (map.get(bet.playerId) ?? 0) + 1);
+      return map;
+    }, new Map<string, number>());
+
+    // Period P/L per player — sum of this player's Transaction rows
+    // (written only by lib/bets/settleBet.ts) since the current settlement
+    // period started. Same Transaction.amount convention as
+    // GET /api/dashboard/overview's total figure — a straight sum, no
+    // re-derivation of the WIN/LOSS/VOID math.
+    const periodTransactions = await prisma.transaction.findMany({
+      where: { createdAt: { gte: periodStart } },
+      select: { playerId: true, amount: true },
+    });
+
+    const periodPnlByPlayerId = periodTransactions.reduce((map, transaction) => {
+      const current = map.get(transaction.playerId) ?? new Prisma.Decimal(0);
+      map.set(transaction.playerId, current.plus(transaction.amount));
+      return map;
+    }, new Map<string, Prisma.Decimal>());
+
     const serialized = players.map((player) => {
       const exposure = exposureByPlayerId.get(player.id) ?? new Prisma.Decimal(0);
-      const available = computeRemainingCredit(player).minus(exposure);
+      const rawAvailable = computeRemainingCredit(player).minus(exposure);
+      const available = clampAvailableForDisplay(rawAvailable, `player:${player.id}`);
+      const periodPnl = periodPnlByPlayerId.get(player.id) ?? new Prisma.Decimal(0);
 
       const serializeBet = (bet: (typeof player.bets)[number]) => ({
         id: bet.id,
@@ -141,13 +131,21 @@ export async function GET(request: NextRequest) {
         available: available.toString(),
         exposure: exposure.toString(),
         activeBetsCount: activeBetsCountByPlayerId.get(player.id) ?? 0,
+        pendingBetsCount: pendingBetsCountByPlayerId.get(player.id) ?? 0,
+        periodPnl: periodPnl.toString(),
         nextSettlementDate: nextSettlementDate.toISOString(),
         activeBets: player.bets.filter((bet) => bet.status === "CONFIRMED").map(serializeBet),
         history: player.bets.filter((bet) => bet.status !== "CONFIRMED").map(serializeBet),
       };
     });
 
-    return NextResponse.json({ players: serialized });
+    return NextResponse.json({
+      players: serialized,
+      settlementPeriod: {
+        start: periodStart.toISOString(),
+        nextSettlementDate: nextSettlementDate.toISOString(),
+      },
+    });
   } catch (err) {
     console.error("GET /api/dashboard/players failed:", err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
