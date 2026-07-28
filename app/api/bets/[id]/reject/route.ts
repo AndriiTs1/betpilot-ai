@@ -3,7 +3,7 @@ import { prisma } from "@/lib/db/client";
 import { Prisma, type PrismaClient } from "@/lib/generated/prisma/client";
 import { isOperatorAuthorized } from "@/lib/auth/operatorAuth";
 import { serializeBet } from "@/lib/bets/serialize";
-import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
+import { sendBetStatusNotification } from "@/lib/telegram/betStatusNotifications";
 import { escapeHtml } from "@/lib/telegram/escapeHtml";
 import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
 
@@ -67,7 +67,7 @@ export async function handleBetReject(
             ? normalizeSelectionToEnglish({ selection: existing.outcome, sport: existing.sport, event: existing.event })
             : existing.outcome;
 
-        await sendTelegramMessage(
+        await sendBetStatusNotification(
           existing.player.telegramId,
           // Stage 12 — event/outcome are nullable as of this migration (an
           // EXPRESS bet has no single event/outcome), but nothing creates an

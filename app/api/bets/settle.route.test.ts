@@ -418,7 +418,7 @@ test("settle route: extra/unrelated body fields are ignored — only status is c
 // Stage 13.6 — Telegram settlement notifications
 // ---------------------------------------------------------------------
 
-test("settle route: WIN sends exactly one Telegram notification with the correct amounts and balance", async () => {
+test("settle route: WIN does NOT send a Telegram notification (bet status notifications disabled by default), settlement itself still applies", async () => {
   const fake = createFakeDb({
     bet: fakeBet({ event: "Real Madrid vs Barcelona", outcome: "Real Madrid Win", stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("2.10") }),
     playerTelegramId: "555000111",
@@ -427,20 +427,11 @@ test("settle route: WIN sends exactly one Telegram notification with the correct
   const res = await handleSettleBet(settleRequest(BET_ID, { status: "SETTLED_WIN" }), BET_ID, fakeOptions(fake));
   assert.equal(res.status, 200);
 
-  assert.equal(sentTelegramMessages.length, 1);
-  const [msg] = sentTelegramMessages;
-  assert.equal(msg.chatId, "555000111");
-  assert.match(msg.text, /Ставка выиграла/);
-  assert.match(msg.text, /Real Madrid vs Barcelona/);
-  assert.match(msg.text, /Real Madrid Win/);
-  assert.match(msg.text, /Ставка: 100/);
-  assert.match(msg.text, /Коэффициент: 2\.1/);
-  assert.match(msg.text, /Выплата: 210/); // grossPayout
-  assert.match(msg.text, /прибыль: 110/); // netProfit
-  assert.match(msg.text, /Баланс: 110/); // balanceAfter (0 + 110)
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_WIN");
+  assert.equal(sentTelegramMessages.length, 0);
 });
 
-test("settle route: LOSS sends exactly one Telegram notification with the correct lost amount and balance", async () => {
+test("settle route: LOSS does NOT send a Telegram notification, settlement itself still applies", async () => {
   const fake = createFakeDb({
     bet: fakeBet({ event: "Chelsea vs Arsenal", outcome: "Chelsea Win", stake: new Prisma.Decimal(60) }),
     playerTelegramId: "555000111",
@@ -449,15 +440,11 @@ test("settle route: LOSS sends exactly one Telegram notification with the correc
   const res = await handleSettleBet(settleRequest(BET_ID, { status: "SETTLED_LOSS" }), BET_ID, fakeOptions(fake));
   assert.equal(res.status, 200);
 
-  assert.equal(sentTelegramMessages.length, 1);
-  const [msg] = sentTelegramMessages;
-  assert.match(msg.text, /не зашла/);
-  assert.match(msg.text, /Chelsea vs Arsenal/);
-  assert.match(msg.text, /Проигрыш: 60/);
-  assert.match(msg.text, /Баланс: -60/); // balanceAfter (0 - 60)
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_LOSS");
+  assert.equal(sentTelegramMessages.length, 0);
 });
 
-test("settle route: VOID sends exactly one Telegram notification with the returned amount and balance", async () => {
+test("settle route: VOID does NOT send a Telegram notification, settlement itself still applies", async () => {
   const fake = createFakeDb({
     bet: fakeBet({ event: "Liverpool vs Everton", outcome: "Liverpool Win", stake: new Prisma.Decimal(25) }),
     playerTelegramId: "555000111",
@@ -466,40 +453,57 @@ test("settle route: VOID sends exactly one Telegram notification with the return
   const res = await handleSettleBet(settleRequest(BET_ID, { status: "VOID" }), BET_ID, fakeOptions(fake));
   assert.equal(res.status, 200);
 
-  assert.equal(sentTelegramMessages.length, 1);
-  const [msg] = sentTelegramMessages;
-  assert.match(msg.text, /аннулирована/);
-  assert.match(msg.text, /Liverpool vs Everton/);
-  assert.match(msg.text, /Возврат: 25/);
-  assert.match(msg.text, /Баланс: 0/); // VOID never changes currentCredit
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "VOID");
+  assert.equal(sentTelegramMessages.length, 0);
 });
 
-test("settle route: an IDEMPOTENT repeated settlement sends no second notification", async () => {
+test("settle route: with BET_TELEGRAM_NOTIFICATIONS_ENABLED=true, WIN still sends the correct notification (architecture preserved for future re-enable)", async () => {
+  process.env.BET_TELEGRAM_NOTIFICATIONS_ENABLED = "true";
+  try {
+    const fake = createFakeDb({
+      bet: fakeBet({ event: "Real Madrid vs Barcelona", outcome: "Real Madrid Win", stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("2.10") }),
+      playerTelegramId: "555000111",
+    });
+
+    const res = await handleSettleBet(settleRequest(BET_ID, { status: "SETTLED_WIN" }), BET_ID, fakeOptions(fake));
+    assert.equal(res.status, 200);
+
+    assert.equal(sentTelegramMessages.length, 1);
+    const [msg] = sentTelegramMessages;
+    assert.equal(msg.chatId, "555000111");
+    assert.match(msg.text, /Ставка выиграла/);
+    assert.match(msg.text, /Real Madrid vs Barcelona/);
+    assert.match(msg.text, /Выплата: 210/);
+    assert.match(msg.text, /Баланс: 110/);
+  } finally {
+    delete process.env.BET_TELEGRAM_NOTIFICATIONS_ENABLED;
+  }
+});
+
+test("settle route: an IDEMPOTENT repeated settlement sends no notification (already zero, since notifications are disabled by default)", async () => {
   const fake = createFakeDb({ bet: fakeBet(), playerTelegramId: "555000111" });
 
   await handleSettleBet(settleRequest(BET_ID, { status: "SETTLED_WIN" }), BET_ID, fakeOptions(fake));
-  assert.equal(sentTelegramMessages.length, 1);
+  assert.equal(sentTelegramMessages.length, 0);
 
   const second = await handleSettleBet(settleRequest(BET_ID, { status: "SETTLED_WIN" }), BET_ID, fakeOptions(fake));
   assert.equal(second.status, 200);
   const secondBody = await json(second);
   assert.equal((secondBody.result as { kind: string }).kind, "IDEMPOTENT");
 
-  // Still exactly one — the repeat sent none.
-  assert.equal(sentTelegramMessages.length, 1);
+  assert.equal(sentTelegramMessages.length, 0);
 });
 
 test("settle route: a conflicting settlement request sends no notification", async () => {
   const fake = createFakeDb({ bet: fakeBet(), playerTelegramId: "555000111" });
 
   await handleSettleBet(settleRequest(BET_ID, { status: "SETTLED_WIN" }), BET_ID, fakeOptions(fake));
-  assert.equal(sentTelegramMessages.length, 1);
+  assert.equal(sentTelegramMessages.length, 0);
 
   const res = await handleSettleBet(settleRequest(BET_ID, { status: "SETTLED_LOSS" }), BET_ID, fakeOptions(fake));
   assert.equal(res.status, 409);
 
-  // Still exactly one — the conflict sent none.
-  assert.equal(sentTelegramMessages.length, 1);
+  assert.equal(sentTelegramMessages.length, 0);
 });
 
 test("settle route: an error response (bet not found) sends no notification", async () => {
@@ -508,22 +512,27 @@ test("settle route: an error response (bet not found) sends no notification", as
   assert.equal(sentTelegramMessages.length, 0);
 });
 
-test("settle route: a Telegram send failure does not fail settlement — the API still returns success", async () => {
-  const fake = createFakeDb({ bet: fakeBet(), playerTelegramId: "555000111" });
-  global.fetch = (async () => {
-    throw new Error("simulated Telegram API network failure");
-  }) as typeof fetch;
+test("settle route: with BET_TELEGRAM_NOTIFICATIONS_ENABLED=true, a Telegram send failure still does not fail settlement — the API still returns success", async () => {
+  process.env.BET_TELEGRAM_NOTIFICATIONS_ENABLED = "true";
+  try {
+    const fake = createFakeDb({ bet: fakeBet(), playerTelegramId: "555000111" });
+    global.fetch = (async () => {
+      throw new Error("simulated Telegram API network failure");
+    }) as typeof fetch;
 
-  const res = await handleSettleBet(settleRequest(BET_ID, { status: "SETTLED_WIN" }), BET_ID, fakeOptions(fake));
+    const res = await handleSettleBet(settleRequest(BET_ID, { status: "SETTLED_WIN" }), BET_ID, fakeOptions(fake));
 
-  assert.equal(res.status, 200);
-  const body = await json(res);
-  assert.equal(body.success, true);
-  assert.equal((body.result as { kind: string }).kind, "APPLIED");
-  // The Bet/Player/Transaction writes already committed before the
-  // (failed) notification attempt — settlement itself is unaffected.
-  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_WIN");
-  assert.equal(fake._debug.transactions().length, 1);
+    assert.equal(res.status, 200);
+    const body = await json(res);
+    assert.equal(body.success, true);
+    assert.equal((body.result as { kind: string }).kind, "APPLIED");
+    // The Bet/Player/Transaction writes already committed before the
+    // (failed) notification attempt — settlement itself is unaffected.
+    assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_WIN");
+    assert.equal(fake._debug.transactions().length, 1);
+  } finally {
+    delete process.env.BET_TELEGRAM_NOTIFICATIONS_ENABLED;
+  }
 });
 
 test("settle route: a player with no telegramId still settles successfully, with no notification attempt", async () => {

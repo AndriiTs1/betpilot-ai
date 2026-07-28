@@ -240,13 +240,27 @@ test("confirm route: a PENDING bet within credit is confirmed successfully", asy
   assert.equal(fake._debug.getBet(BET_ID)?.status, "CONFIRMED");
 });
 
-test("confirm route: successful confirm notifies the player on Telegram", async () => {
+test("confirm route: successful confirm does NOT notify the player on Telegram (bet status notifications disabled by default)", async () => {
   const fake = createFakeDb({ bets: [fakeBet()], player: fakePlayer({ telegramId: "555000111" }) });
-  await handleBetConfirm(confirmRequest(BET_ID), BET_ID, fakeOptions(fake));
+  const res = await handleBetConfirm(confirmRequest(BET_ID), BET_ID, fakeOptions(fake));
 
-  assert.equal(sentTelegramMessages.length, 1);
-  assert.equal(sentTelegramMessages[0].chatId, "555000111");
-  assert.match(sentTelegramMessages[0].text, /подтверждена/);
+  assert.equal(res.status, 200);
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "CONFIRMED");
+  assert.equal(sentTelegramMessages.length, 0);
+});
+
+test("confirm route: with BET_TELEGRAM_NOTIFICATIONS_ENABLED=true, confirm still notifies the player (architecture preserved for future re-enable)", async () => {
+  process.env.BET_TELEGRAM_NOTIFICATIONS_ENABLED = "true";
+  try {
+    const fake = createFakeDb({ bets: [fakeBet()], player: fakePlayer({ telegramId: "555000111" }) });
+    await handleBetConfirm(confirmRequest(BET_ID), BET_ID, fakeOptions(fake));
+
+    assert.equal(sentTelegramMessages.length, 1);
+    assert.equal(sentTelegramMessages[0].chatId, "555000111");
+    assert.match(sentTelegramMessages[0].text, /подтверждена/);
+  } finally {
+    delete process.env.BET_TELEGRAM_NOTIFICATIONS_ENABLED;
+  }
 });
 
 // ---------------------------------------------------------------------

@@ -171,13 +171,27 @@ test("reject route: a PENDING bet is rejected successfully", async () => {
   assert.equal(fake._debug.getBet(BET_ID)?.status, "REJECTED");
 });
 
-test("reject route: successful reject notifies the player on Telegram", async () => {
+test("reject route: successful reject does NOT notify the player on Telegram (bet status notifications disabled by default)", async () => {
   const fake = createFakeDb({ bet: fakeBet(), telegramId: "555000111" });
-  await handleBetReject(rejectRequest(BET_ID), BET_ID, fakeOptions(fake));
+  const res = await handleBetReject(rejectRequest(BET_ID), BET_ID, fakeOptions(fake));
 
-  assert.equal(sentTelegramMessages.length, 1);
-  assert.equal(sentTelegramMessages[0].chatId, "555000111");
-  assert.match(sentTelegramMessages[0].text, /отклонена/);
+  assert.equal(res.status, 200);
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "REJECTED");
+  assert.equal(sentTelegramMessages.length, 0);
+});
+
+test("reject route: with BET_TELEGRAM_NOTIFICATIONS_ENABLED=true, reject still notifies the player (architecture preserved for future re-enable)", async () => {
+  process.env.BET_TELEGRAM_NOTIFICATIONS_ENABLED = "true";
+  try {
+    const fake = createFakeDb({ bet: fakeBet(), telegramId: "555000111" });
+    await handleBetReject(rejectRequest(BET_ID), BET_ID, fakeOptions(fake));
+
+    assert.equal(sentTelegramMessages.length, 1);
+    assert.equal(sentTelegramMessages[0].chatId, "555000111");
+    assert.match(sentTelegramMessages[0].text, /отклонена/);
+  } finally {
+    delete process.env.BET_TELEGRAM_NOTIFICATIONS_ENABLED;
+  }
 });
 
 // ---------------------------------------------------------------------

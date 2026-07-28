@@ -10,7 +10,7 @@ import {
   BetAlreadyRejectedError,
   SettlementConflictError,
 } from "@/lib/bets/settlementRules";
-import { sendTelegramMessage } from "@/lib/telegram/sendMessage";
+import { sendBetStatusNotification } from "@/lib/telegram/betStatusNotifications";
 import { escapeHtml } from "@/lib/telegram/escapeHtml";
 import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
 
@@ -190,7 +190,7 @@ async function notifySettlementResult(db: PrismaClient, result: AppliedSettleRes
 
     if (!bet?.player.telegramId) return;
 
-    await sendTelegramMessage(bet.player.telegramId, buildSettlementMessage(result, bet));
+    await sendBetStatusNotification(bet.player.telegramId, buildSettlementMessage(result, bet));
   } catch (err) {
     console.error(`POST /api/bets/${result.betId}/settle: failed to notify player via Telegram`, err);
   }
