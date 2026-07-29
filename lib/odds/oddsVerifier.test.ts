@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { verifyOdds, type OddsVerificationInput } from "./oddsVerifier";
+import { verifyOdds, normalizeTeamName, type OddsVerificationInput } from "./oddsVerifier";
 
 // Same fetch-indirection technique as lib/ocr/claudeOcrProvider.test.ts and
 // lib/ai/betParser.test.ts — global.fetch is replaced exactly once with a
@@ -926,4 +926,135 @@ test("Stage 3.1: an unparsable commence_time is handled safely — matched:true 
   assert.equal(result.providerEventId, undefined);
   assert.equal(result.providerSportKey, undefined);
   assert.equal(result.eventStartTime, undefined);
+});
+
+// ---------------------------------------------------------------------
+// Cyrillic team name transliteration — root cause fix for "Гурник Забже —
+// Фенербахче" reporting EVENT_NOT_FOUND ("Odds unavailable") even though
+// the real event (The Odds API id b816383d03cae9b19b43bd2eabc30726,
+// soccer_uefa_champs_league_qualification) genuinely existed. Cyrillic
+// previously normalized to an empty string (everything outside [a-z0-9\s]
+// was stripped with nothing to replace it), so overlapScore() always
+// scored exactly 0. These tests exercise the general transliteration +
+// bounded fuzzy-word-match layer, not a team-specific alias.
+//
+// normalizeTeamName() is asserted against ITS OWN actual deterministic
+// output (computed once and hardcoded here), not against some external
+// "correct" transliteration standard — there is no single correct Latin
+// spelling of a Cyrillic name shared by every Slavic language (see this
+// function's own comment on why Serbian's own "c" for "ц" was deliberately
+// NOT special-cased). What matters for correctness is (a) it is never
+// empty for non-empty Cyrillic input, and (b) it is stable/deterministic —
+// exact matching against a provider's own spelling is the job of the
+// bounded fuzzy word-match layer exercised further below, not this
+// function alone.
+// ---------------------------------------------------------------------
+
+test("normalizeTeamName: Cyrillic input never collapses to an empty string", () => {
+  assert.equal(normalizeTeamName("Гурник Забже"), "gurnik zabzhe");
+  assert.equal(normalizeTeamName("Фенербахче"), "fenerbahche");
+  assert.equal(normalizeTeamName("Динамо Загреб"), "dinamo zagreb");
+  assert.equal(normalizeTeamName("Црвена Звезда"), "tsrvena zvezda");
+  assert.equal(normalizeTeamName("Кайрат Алматы"), "kairat almaty");
+
+  for (const name of ["Гурник Забже", "Фенербахче", "Динамо Загреб", "Црвена Звезда", "Кайрат Алматы"]) {
+    assert.notEqual(normalizeTeamName(name), "", `"${name}" must not normalize to an empty string`);
+  }
+});
+
+test("normalizeTeamName: already-Latin provider spellings are unaffected (no transliteration applied to non-Cyrillic input)", () => {
+  assert.equal(normalizeTeamName("Górnik Zabrze"), "gornik zabrze");
+  assert.equal(normalizeTeamName("Fenerbahce"), "fenerbahce");
+});
+
+test("normalizeTeamName: is deterministic — repeated calls on the same input always produce the same output", () => {
+  const inputs = ["Гурник Забже", "Фенербахче", "Динамо Загреб"];
+  for (const input of inputs) {
+    assert.equal(normalizeTeamName(input), normalizeTeamName(input));
+  }
+});
+
+test("normalizeTeamName: pre-existing popular Cyrillic TEAM_ALIASES entries still resolve exactly as before (regression)", () => {
+  assert.equal(normalizeTeamName("Реал Мадрид"), "real madrid");
+  assert.equal(normalizeTeamName("Барселона"), "barcelona");
+});
+
+test("normalizeTeamName: empty and punctuation-only input safely normalize to an empty string, never throw", () => {
+  assert.equal(normalizeTeamName(""), "");
+  assert.equal(normalizeTeamName("— ??? !!!"), "");
+  assert.equal(normalizeTeamName("   "), "");
+});
+
+// ---------------------------------------------------------------------
+// Event matching — the real diagnosed case: Cyrillic bet text against the
+// provider's own (Latin/English) event listing.
+// ---------------------------------------------------------------------
+
+test("verifyOdds: Cyrillic event text 'Гурник Забже — Фенербахче' matches the provider's 'Górnik Zabrze vs Fenerbahce' listing", async () => {
+  mockEvents([h2hEvent("Górnik Zabrze", "Fenerbahce", standardOutcomes("Górnik Zabrze", "Fenerbahce", 2.6, 2.75))]);
+
+  const result = await verifyOdds(
+    bet({ sport: "champions league qualification", event: "Гурник Забже — Фенербахче", selection: "1", odds: 2.6 }),
+  );
+
+  assert.equal(result.matched, true, `expected the Cyrillic event text to match; note: ${result.note}`);
+  assert.equal(result.sourceOdds, 2.6, "selection '1' must resolve to Górnik Zabrze's price, confirming home/away order is preserved");
+});
+
+test("verifyOdds: Cyrillic event text home/away order is preserved even reversed against the provider's own listing", async () => {
+  mockEvents([h2hEvent("Górnik Zabrze", "Fenerbahce", standardOutcomes("Górnik Zabrze", "Fenerbahce", 2.6, 2.75))]);
+
+  // Player's text lists Fenerbahce first — the opposite of the provider's
+  // home_team/away_team order.
+  const result = await verifyOdds(
+    bet({ sport: "champions league qualification", event: "Фенербахче — Гурник Забже", selection: "1", odds: 2.75 }),
+  );
+
+  assert.equal(result.matched, true);
+  assert.equal(result.sourceOdds, 2.75, "selection '1' must resolve to Fenerbahce (listed first in the parsed text), not the provider's home_team");
+});
+
+test("verifyOdds: outcome matching — selection 'Фенербахче Win' correctly resolves to the provider's 'Fenerbahce' outcome", async () => {
+  mockEvents([h2hEvent("Górnik Zabrze", "Fenerbahce", standardOutcomes("Górnik Zabrze", "Fenerbahce", 2.6, 2.75))]);
+
+  const result = await verifyOdds(
+    bet({
+      sport: "champions league qualification",
+      event: "Гурник Забже — Фенербахче",
+      selection: "Фенербахче Win",
+      odds: 2.75,
+    }),
+  );
+
+  assert.equal(result.matched, true, `expected 'Фенербахче Win' to resolve to the Fenerbahce outcome; note: ${result.note}`);
+  assert.equal(result.sourceOdds, 2.75);
+});
+
+test("verifyOdds: Cyrillic event text does not falsely match a genuinely unrelated event", async () => {
+  mockEvents([h2hEvent("Real Madrid", "Barcelona", standardOutcomes("Real Madrid", "Barcelona", 1.9, 4.1))]);
+
+  const result = await verifyOdds(
+    bet({ sport: "champions league qualification", event: "Гурник Забже — Фенербахче", selection: "1", odds: 2.6 }),
+  );
+
+  assert.equal(result.matched, false);
+  assert.match(result.note ?? "", /No matching event found/);
+});
+
+test("verifyOdds: an empty or punctuation-only event string safely resolves to no match, never throws", async () => {
+  mockEvents([h2hEvent("Górnik Zabrze", "Fenerbahce", standardOutcomes("Górnik Zabrze", "Fenerbahce", 2.6, 2.75))]);
+
+  const result = await verifyOdds(bet({ sport: "champions league qualification", event: "— ??? !!!", selection: "1", odds: 2.6 }));
+
+  assert.equal(result.matched, false);
+  assert.match(result.note ?? "", /No matching event found/);
+});
+
+test("verifyOdds: pre-existing Cyrillic TEAM_ALIASES entries still match the provider's event exactly as before (regression)", async () => {
+  mockEvents([h2hEvent("Real Madrid", "Barcelona", standardOutcomes("Real Madrid", "Barcelona", 1.9, 4.1))]);
+
+  const result = await verifyOdds(bet({ event: "Реал Мадрид vs Барселона", selection: "1", odds: 1.9 }));
+
+  assert.equal(result.matched, true);
+  assert.equal(result.sourceOdds, 1.9);
 });

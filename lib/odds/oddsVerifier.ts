@@ -153,16 +153,122 @@ const TEAM_ALIASES: Record<string, string> = {
 
 const DIACRITIC_REGEX = /[̀-ͯ]/g;
 
-function normalizeTeamName(raw: string): string {
+// General Cyrillic -> Latin transliteration, covering Russian, Ukrainian,
+// and the handful of additional Serbian-specific letters (ђ, џ, ћ, љ, њ,
+// ј — the rest of the Serbian/Bulgarian Cyrillic alphabet is already a
+// subset of Russian's, same underlying letters). Deliberately NOT a
+// scientific/official transliteration standard, and deliberately NOT
+// tuned per-language (e.g. Serbian's own official Latin alphabet maps ц
+// to "c", not "ts" — using that here would be exactly the kind of
+// point-specific special-casing this fix must avoid) — one single,
+// consistent table applied to every Cyrillic character regardless of
+// which Slavic language it happens to belong to. Its job is narrow: turn
+// meaningful Cyrillic text into SOME stable, non-empty Latin
+// approximation so the word-overlap matching below has something to work
+// with — it is not expected to reproduce a foreign provider's own native
+// spelling exactly (see wordsMatch()'s bounded fuzzy tolerance, which is
+// what actually bridges that remaining gap).
+const CYRILLIC_TO_LATIN: Readonly<Record<string, string>> = {
+  а: "a", б: "b", в: "v", г: "g", ґ: "g", д: "d", е: "e", ё: "e", є: "e",
+  ж: "zh", з: "z", и: "i", і: "i", ї: "i", й: "i", к: "k", л: "l", м: "m",
+  н: "n", о: "o", п: "p", р: "r", с: "s", т: "t", у: "u", ф: "f", х: "h",
+  ц: "ts", ч: "ch", ш: "sh", щ: "shch", ъ: "", ы: "y", ь: "", э: "e",
+  ю: "yu", я: "ya",
+  // Serbian-only letters (not present in Russian/Ukrainian Cyrillic).
+  ђ: "dj", џ: "dz", ћ: "c", љ: "lj", њ: "nj", ј: "j",
+};
+
+// Any character not in the table above (already-Latin letters, digits,
+// punctuation, whitespace) passes through unchanged — this function never
+// throws and never produces an empty result for non-empty Cyrillic input,
+// which is the specific bug being fixed here (Cyrillic previously survived
+// to the final `[^a-z0-9\s]` filter below completely unrecognized, and was
+// stripped down to nothing).
+function transliterateCyrillic(raw: string): string {
+  let out = "";
+  for (const ch of raw) {
+    out += CYRILLIC_TO_LATIN[ch] ?? ch;
+  }
+  return out;
+}
+
+// Pipeline: trim+lowercase -> TEAM_ALIASES lookup (Cyrillic-keyed, so it
+// must run BEFORE transliteration or its keys would never match) ->
+// Cyrillic transliteration -> Unicode NFD -> strip combining marks (accents)
+// -> normalize punctuation/keep [a-z0-9\s] (one combined regex — replacing
+// every disallowed character with a space already achieves both "normalize
+// separators" and "keep only [a-z0-9\s]" in a single pass, matching this
+// function's existing style rather than splitting it into two redundant
+// steps) -> collapse whitespace.
+//
+// No second TEAM_ALIASES lookup after transliteration: every alias key is
+// itself a lowercase Cyrillic string, checked against the raw (still
+// Cyrillic) input above — by definition it can never match Latin
+// transliterated output, so re-checking after transliteration would only
+// ever be dead code, not an additional safety net.
+// Exported only for direct unit testing of the normalization/transliteration
+// pipeline (see oddsVerifier.test.ts) — every production call site above
+// still calls this as a plain module-local function.
+export function normalizeTeamName(raw: string): string {
   const lower = raw.toLowerCase().trim();
   const aliased = TEAM_ALIASES[lower] ?? lower;
+  const transliterated = transliterateCyrillic(aliased);
 
-  return aliased
+  return transliterated
     .normalize("NFD")
     .replace(DIACRITIC_REGEX, "") // strip accents (e.g. "México" -> "mexico")
     .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+// Iterative (not recursive) Levenshtein distance — no external dependency,
+// deterministic, O(a.length * b.length), only ever run on short
+// already-normalized single words (team names), never on full sentences.
+function levenshteinDistance(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const current = [i];
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      current.push(Math.min(current[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost));
+    }
+    prev = current;
+  }
+  return prev[n];
+}
+
+// Bounded near-match tolerance for a single word pair — this is what
+// actually bridges the gap pure transliteration cannot: a Cyrillic
+// rendering of a foreign name (e.g. Russian "Забже" for Polish "Zabrze")
+// and the provider's own native/English spelling are both honest
+// representations of the same name, but rarely identical letter-for-letter
+// after transliteration. Calibrated empirically against the real diagnosed
+// case (see this stage's report) AND a battery of ~17 real, genuinely
+// DIFFERENT club-name pairs of similar length (chelsea/everton,
+// barcelona/valencia, celtic/rangers, genk/gent, etc.) — every one of
+// those stays safely unmatched with wide margin at these exact constants;
+// tightening either constant would risk losing the real positive cases,
+// loosening either would start risking false positives on short,
+// genuinely-different club names (the closest real negative found,
+// "genk"/"gent", is exactly why FUZZY_WORD_MIN_LENGTH excludes anything
+// under 6 characters rather than being set lower).
+const FUZZY_WORD_MIN_LENGTH = 6;
+const FUZZY_WORD_MAX_DISTANCE_RATIO = 0.34;
+const FUZZY_WORD_MAX_ABSOLUTE_DISTANCE = 3;
+
+function wordsMatch(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (Math.min(a.length, b.length) < FUZZY_WORD_MIN_LENGTH) return false;
+
+  const maxLen = Math.max(a.length, b.length);
+  const allowed = Math.min(Math.floor(maxLen * FUZZY_WORD_MAX_DISTANCE_RATIO), FUZZY_WORD_MAX_ABSOLUTE_DISTANCE);
+  return levenshteinDistance(a, b) <= allowed;
 }
 
 const EVENT_SEPARATOR_REGEX = /\s+(?:vs\.?|v\.?|-|–|—)\s+/i;
@@ -176,6 +282,18 @@ function wordSet(s: string): Set<string> {
   return new Set(s.split(" ").filter(Boolean));
 }
 
+// A word in `a` counts as "common" if it exactly matches a word in `b`, OR
+// (see wordsMatch() above) is a bounded near-match — never a fuzzy MATCH
+// COUNT beyond 1 per word, and never substring/prefix matching (which
+// could match "art" inside "cartagena"), only whole-word comparison.
+function wordSetHasMatch(word: string, set: ReadonlySet<string>): boolean {
+  if (set.has(word)) return true;
+  for (const candidate of set) {
+    if (wordsMatch(word, candidate)) return true;
+  }
+  return false;
+}
+
 function overlapScore(a: string, b: string): number {
   const setA = wordSet(a);
   const setB = wordSet(b);
@@ -184,7 +302,7 @@ function overlapScore(a: string, b: string): number {
 
   let common = 0;
   for (const word of setA) {
-    if (setB.has(word)) common += 1;
+    if (wordSetHasMatch(word, setB)) common += 1;
   }
 
   return common / Math.max(setA.size, setB.size);
