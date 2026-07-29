@@ -8,6 +8,7 @@ import { buildBetSlipPreview, BetSlipValidationError, type BuildBetSlipPreviewOp
 import { recognizeBetSlipScreenshot, type ScreenshotPipelineDiagnostics } from "@/lib/ocr/recognizeBetSlipScreenshot";
 import { createClaudeOcrProvider } from "@/lib/ocr/claudeOcrProvider";
 import { detectBettingRegion } from "@/lib/ocr/regionDetection";
+import { computeImageHash } from "@/lib/ocr/imageHash";
 import type { OcrFailure, OcrProvider } from "@/lib/ocr/ocrTypes";
 import { ALLOWED_MIME_TYPES, MAX_FILE_SIZE_BYTES, detectImageSignature, type AllowedMimeType } from "@/lib/uploads/imageValidation";
 import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
@@ -274,6 +275,12 @@ export async function handleScreenshotPreview(
     // request.
     const bytes = new Uint8Array(await image.arrayBuffer());
 
+    // Stage 4.2B2 — computed on the raw bytes exactly as received, before
+    // any validation/detection/OCR touches them. Observability only: never
+    // persisted, never changes any downstream decision.
+    const imageHash = computeImageHash(bytes);
+    logScreenshotPipelineEvent("image_received", { imageHash });
+
     const detectedType = detectImageSignature(bytes);
     if (detectedType === null || detectedType !== mimeType) {
       return NextResponse.json({ error: "INVALID_IMAGE_SIGNATURE" }, { status: 415 });
@@ -416,6 +423,7 @@ export async function handleScreenshotPreview(
     logScreenshotPipelineEvent("screenshot_preview_completed", {
       totalDurationMs: Date.now() - totalStartedAt,
       selectionCount: result.preview.selections.length,
+      imageHash,
     });
 
     // Never the OCR text, never the raw parser output — only the same

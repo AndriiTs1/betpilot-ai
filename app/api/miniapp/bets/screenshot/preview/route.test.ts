@@ -616,7 +616,7 @@ test("screenshot preview: an image with oversized pixel dimensions is rejected w
 
   assert.deepEqual(
     parsedLogEvents().map((e) => e.event),
-    ["screenshot_preview_started", "image_metadata_read", "image_too_large"],
+    ["screenshot_preview_started", "image_received", "image_metadata_read", "image_too_large"],
   );
 });
 
@@ -652,6 +652,7 @@ test("screenshot preview: a large full-screen-looking image with a detected regi
   const events = parsedLogEvents();
   assert.deepEqual(events.map((e) => e.event), [
     "screenshot_preview_started",
+    "image_received",
     "image_metadata_read",
     "region_detection_found",
     "crop_applied",
@@ -693,6 +694,7 @@ test("screenshot preview: a large image where no region is found still succeeds,
     parsedLogEvents().map((e) => e.event),
     [
       "screenshot_preview_started",
+      "image_received",
       "image_metadata_read",
       "region_detection_not_found",
       "ocr_succeeded",
@@ -722,6 +724,7 @@ test("screenshot preview: region detection timing out still succeeds via full-im
     parsedLogEvents().map((e) => e.event),
     [
       "screenshot_preview_started",
+      "image_received",
       "image_metadata_read",
       "region_detection_timeout",
       "ocr_succeeded",
@@ -765,6 +768,7 @@ test("screenshot preview: an invalid detected region falls back to full-image OC
     parsedLogEvents().map((e) => e.event),
     [
       "screenshot_preview_started",
+      "image_received",
       "image_metadata_read",
       "region_detection_invalid",
       "ocr_succeeded",
@@ -791,6 +795,7 @@ test("screenshot preview: a successful request logs the full expected event sequ
 
   assert.deepEqual(eventNames, [
     "screenshot_preview_started",
+    "image_received",
     "image_metadata_read",
     "region_detection_skipped",
     "ocr_succeeded",
@@ -820,6 +825,81 @@ test("screenshot preview: a successful request logs the full expected event sequ
   assert.ok(completedEvent.totalDurationMs as number >= 0);
 });
 
+/* -------------------------------------------------------------------------- */
+/* Stage 4.2B2 — imageHash observability                                     */
+/* -------------------------------------------------------------------------- */
+
+test("screenshot preview: image_received is the first logged event and carries a valid SHA-256 imageHash", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  await handleScreenshotPreview(request, baseOptions());
+
+  const events = parsedLogEvents();
+  assert.equal(events[0].event, "screenshot_preview_started");
+  assert.equal(events[1].event, "image_received");
+  assert.match(events[1].imageHash as string, /^[0-9a-f]{64}$/);
+});
+
+test("screenshot preview: the same image uploaded twice (two separate requests) produces the same imageHash both times", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+
+  await handleScreenshotPreview(buildRequest(initData, jpegBytes(), "image/jpeg"), baseOptions());
+  const firstHash = parsedLogEvents().find((e) => e.event === "image_received")!.imageHash;
+
+  loggedLines = [];
+  await handleScreenshotPreview(buildRequest(initData, jpegBytes(), "image/jpeg"), baseOptions());
+  const secondHash = parsedLogEvents().find((e) => e.event === "image_received")!.imageHash;
+
+  assert.equal(firstHash, secondHash);
+});
+
+test("screenshot preview: two genuinely different images produce different imageHash values", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+
+  await handleScreenshotPreview(buildRequest(initData, realJpegBytes, "image/jpeg"), baseOptions());
+  const jpegHash = parsedLogEvents().find((e) => e.event === "image_received")!.imageHash;
+
+  loggedLines = [];
+  await handleScreenshotPreview(buildRequest(initData, realPngBytes, "image/png", "slip.png"), baseOptions());
+  const pngHash = parsedLogEvents().find((e) => e.event === "image_received")!.imageHash;
+
+  assert.notEqual(jpegHash, pngHash);
+});
+
+test("screenshot preview: imageHash is unchanged from image_received through screenshot_preview_completed for the same request", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  await handleScreenshotPreview(request, baseOptions());
+
+  const events = parsedLogEvents();
+  const receivedHash = events.find((e) => e.event === "image_received")!.imageHash;
+  const completedHash = events.find((e) => e.event === "screenshot_preview_completed")!.imageHash;
+
+  assert.ok(receivedHash);
+  assert.equal(receivedHash, completedHash);
+});
+
+test("screenshot preview: imageHash is still logged even when OCR subsequently fails (computed before OCR runs)", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  const ocrProvider = fakeOcrProvider(() => ({
+    kind: "FAILURE",
+    code: "NO_TEXT_FOUND",
+    provider: "fake-ocr-provider",
+    durationMs: 42,
+    safeMessage: "no text",
+  }));
+
+  await handleScreenshotPreview(request, baseOptions({ ocrProvider }));
+
+  const receivedEvent = parsedLogEvents().find((e) => e.event === "image_received");
+  assert.ok(receivedEvent, "image_received must still be logged even though OCR later fails");
+  assert.match(receivedEvent!.imageHash as string, /^[0-9a-f]{64}$/);
+});
+
 test("screenshot preview: OCR failure logs ocr_failed with the failure code and duration, nothing further", async () => {
   const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
   const request = buildRequest(initData, jpegBytes(), "image/jpeg");
@@ -837,9 +917,9 @@ test("screenshot preview: OCR failure logs ocr_failed with the failure code and 
   const events = parsedLogEvents();
   assert.deepEqual(
     events.map((e) => e.event),
-    ["screenshot_preview_started", "image_metadata_read", "region_detection_skipped", "ocr_failed"],
+    ["screenshot_preview_started", "image_received", "image_metadata_read", "region_detection_skipped", "ocr_failed"],
   );
-  const ocrFailed = events[3];
+  const ocrFailed = events[4];
   assert.equal(ocrFailed.failureCode, "NO_TEXT_FOUND");
   assert.equal(typeof ocrFailed.durationMs, "number");
 });
@@ -854,7 +934,7 @@ test("screenshot preview: a parser rejection logs parser_rejected; a parser time
   );
   assert.deepEqual(
     parsedLogEvents().map((e) => e.event),
-    ["screenshot_preview_started", "image_metadata_read", "region_detection_skipped", "ocr_succeeded", "parser_rejected"],
+    ["screenshot_preview_started", "image_received", "image_metadata_read", "region_detection_skipped", "ocr_succeeded", "parser_rejected"],
   );
 
   loggedLines = [];
@@ -866,7 +946,7 @@ test("screenshot preview: a parser rejection logs parser_rejected; a parser time
   );
   assert.deepEqual(
     parsedLogEvents().map((e) => e.event),
-    ["screenshot_preview_started", "image_metadata_read", "region_detection_skipped", "ocr_succeeded", "parser_timed_out"],
+    ["screenshot_preview_started", "image_received", "image_metadata_read", "region_detection_skipped", "ocr_succeeded", "parser_timed_out"],
   );
 });
 
@@ -882,7 +962,7 @@ test("screenshot preview: the bet parser throwing logs parser_failed", async () 
 
   assert.deepEqual(
     parsedLogEvents().map((e) => e.event),
-    ["screenshot_preview_started", "image_metadata_read", "region_detection_skipped", "ocr_succeeded", "parser_failed"],
+    ["screenshot_preview_started", "image_received", "image_metadata_read", "region_detection_skipped", "ocr_succeeded", "parser_failed"],
   );
 });
 

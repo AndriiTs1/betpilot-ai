@@ -11,6 +11,12 @@
 
 export type ScreenshotPipelineEvent =
   | "screenshot_preview_started"
+  // Stage 4.2B2 — fired once per image, immediately after the raw bytes are
+  // obtained (before any OCR/region-detection/crop touches them), by every
+  // screenshot source (Mini App upload, Telegram file download, the
+  // operator debug route). The one common, source-independent checkpoint
+  // that carries imageHash — see lib/ocr/imageHash.ts.
+  | "image_received"
   | "image_metadata_read"
   | "image_too_large"
   | "image_decode_failed"
@@ -61,6 +67,12 @@ export interface ScreenshotPipelineLogMetadata {
   // never its free-text `reason` (that field is deliberately never passed
   // to this logger at all, see lib/ocr/regionDetection.ts).
   regionConfidence?: number;
+  // Stage 4.2B2 — SHA-256 hex digest of the raw, unmodified image bytes
+  // (lib/ocr/imageHash.ts). A hash, not the image itself or any of its
+  // content — safe, non-reversible, no PII. Lets identical uploads be
+  // correlated across separate requests/log lines without ever storing the
+  // image anywhere.
+  imageHash?: string;
 }
 
 export function logScreenshotPipelineEvent(

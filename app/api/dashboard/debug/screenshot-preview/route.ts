@@ -8,6 +8,8 @@ import { recognizeScreenshot } from "@/lib/ocr/recognizeScreenshot";
 import { createClaudeOcrProvider } from "@/lib/ocr/claudeOcrProvider";
 import type { OcrProvider } from "@/lib/ocr/ocrTypes";
 import { ALLOWED_MIME_TYPES, MAX_FILE_SIZE_BYTES, detectImageSignature, type AllowedMimeType } from "@/lib/uploads/imageValidation";
+import { computeImageHash } from "@/lib/ocr/imageHash";
+import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
 
 // Stage 14.4A, Part E — operator-only diagnostic endpoint. Runs a real
 // upload through the *exact same* production modules
@@ -110,6 +112,11 @@ export async function handleScreenshotDebug(
     // buffer is never written to disk, a database, or any storage bucket,
     // here or anywhere downstream.
     const bytes = new Uint8Array(await image.arrayBuffer());
+
+    // Stage 4.2B2 — same checkpoint/algorithm as every other screenshot
+    // source (lib/ocr/imageHash.ts) — observability only.
+    const imageHash = computeImageHash(bytes);
+    logScreenshotPipelineEvent("image_received", { imageHash });
 
     const detectedType = detectImageSignature(bytes);
     if (detectedType === null || detectedType !== mimeType) {

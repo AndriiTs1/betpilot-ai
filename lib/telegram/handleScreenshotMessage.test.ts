@@ -63,15 +63,41 @@ function ocrSuccess(rawText: string): OcrResult {
 
 const originalFetch = global.fetch;
 const originalConsoleError = console.error;
+const originalConsoleLog = console.log;
 const originalEnvToken = process.env.TELEGRAM_BOT_TOKEN;
 let sentMessages: Array<{ chatId: string; text: string }> = [];
 let consoleErrorCalls: unknown[][] = [];
+let loggedLines: unknown[][] = [];
 let downloadRequestCount = 0;
+
+// Stage 4.2B2 — same structured-log capture convention as
+// app/api/miniapp/bets/screenshot/preview/route.test.ts: parses every
+// console.log line that looks like our own JSON event, ignoring anything
+// else.
+function parsedLogEvents(): Array<{ event: string; [key: string]: unknown }> {
+  const events: Array<{ event: string; [key: string]: unknown }> = [];
+  for (const args of loggedLines) {
+    try {
+      const parsed = JSON.parse(String(args[0]));
+      if (parsed && typeof parsed === "object" && typeof parsed.event === "string") {
+        events.push(parsed);
+      }
+    } catch {
+      // not one of ours — ignore
+    }
+  }
+  return events;
+}
 
 test.beforeEach(() => {
   sentMessages = [];
   consoleErrorCalls = [];
+  loggedLines = [];
   downloadRequestCount = 0;
+
+  console.log = (...args: unknown[]) => {
+    loggedLines.push(args);
+  };
 
   // sendTelegramMessage (used for every player-facing reply this module
   // sends) always reads process.env.TELEGRAM_BOT_TOKEN directly — it has no
@@ -113,6 +139,7 @@ test.beforeEach(() => {
 test.afterEach(() => {
   global.fetch = originalFetch;
   console.error = originalConsoleError;
+  console.log = originalConsoleLog;
   if (originalEnvToken !== undefined) {
     process.env.TELEGRAM_BOT_TOKEN = originalEnvToken;
   } else {
@@ -151,6 +178,80 @@ test("handleScreenshotMessage: a valid photo with recognized text returns OCR_SU
   assert.match(sentMessages[0].text, /На следующем этапе BetPilot преобразует этот текст в ставку\.$/);
   // Never claims a bet was created — only that text was recognized.
   assert.doesNotMatch(sentMessages[0].text, /ставка создана/i);
+});
+
+// ---------------------------------------------------------------------
+// Stage 4.2B2 — imageHash observability
+// ---------------------------------------------------------------------
+
+test("handleScreenshotMessage: logs image_received with a SHA-256 imageHash of the downloaded bytes", async () => {
+  const message = baseMessage({
+    photo: [{ file_id: "ph-hash-1", file_unique_id: "u-ph-hash-1", width: 1280, height: 1280, file_size: 2048 }],
+  });
+
+  await handleScreenshotMessage(message, {
+    db: registeredDb(),
+    botToken: BOT_TOKEN,
+    ocrProvider: fakeOcrProvider(() => ocrSuccess("Some text")),
+  });
+
+  const received = parsedLogEvents().find((e) => e.event === "image_received");
+  assert.ok(received, "expected an image_received event");
+  // The mocked download body is always the fixed literal "fake-screenshot-bytes"
+  // (see the global.fetch mock above) — this is its known, stable SHA-256.
+  assert.equal(received!.imageHash, "805c573100313ee62a5354dc59d2e7b68f5635583767d9108b7b8532e97dd700");
+});
+
+test("handleScreenshotMessage: the same downloaded bytes produce the same imageHash across two separate messages", async () => {
+  const message1 = baseMessage({
+    photo: [{ file_id: "ph-hash-2a", file_unique_id: "u-ph-hash-2a", width: 1280, height: 1280, file_size: 2048 }],
+  });
+  const message2 = baseMessage({
+    message_id: 502,
+    photo: [{ file_id: "ph-hash-2b", file_unique_id: "u-ph-hash-2b", width: 1280, height: 1280, file_size: 2048 }],
+  });
+
+  await handleScreenshotMessage(message1, {
+    db: registeredDb(),
+    botToken: BOT_TOKEN,
+    ocrProvider: fakeOcrProvider(() => ocrSuccess("Some text")),
+  });
+  const firstHash = parsedLogEvents().find((e) => e.event === "image_received")!.imageHash;
+
+  loggedLines = [];
+  await handleScreenshotMessage(message2, {
+    db: registeredDb(),
+    botToken: BOT_TOKEN,
+    ocrProvider: fakeOcrProvider(() => ocrSuccess("Some text")),
+  });
+  const secondHash = parsedLogEvents().find((e) => e.event === "image_received")!.imageHash;
+
+  // Both downloads resolve to the identical mocked byte content — the hash
+  // must match, proving the same algorithm/checkpoint is deterministic
+  // across independent Telegram messages.
+  assert.equal(firstHash, secondHash);
+});
+
+test("handleScreenshotMessage: imageHash is logged even when OCR subsequently fails (computed before OCR runs)", async () => {
+  const message = baseMessage({
+    photo: [{ file_id: "ph-hash-3", file_unique_id: "u-ph-hash-3", width: 1280, height: 1280, file_size: 2048 }],
+  });
+
+  await handleScreenshotMessage(message, {
+    db: registeredDb(),
+    botToken: BOT_TOKEN,
+    ocrProvider: fakeOcrProvider(() => ({
+      kind: "FAILURE",
+      code: "NO_TEXT_FOUND",
+      provider: "fake-ocr-provider",
+      durationMs: 1,
+      safeMessage: "no text",
+    })),
+  });
+
+  const received = parsedLogEvents().find((e) => e.event === "image_received");
+  assert.ok(received, "image_received must still be logged even though OCR later fails");
+  assert.match(received!.imageHash as string, /^[0-9a-f]{64}$/);
 });
 
 // ---------------------------------------------------------------------

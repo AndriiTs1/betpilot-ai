@@ -9,6 +9,8 @@ import type { ScreenshotIntake } from "./screenshotIntake";
 import { recognizeScreenshot } from "@/lib/ocr/recognizeScreenshot";
 import { createClaudeOcrProvider } from "@/lib/ocr/claudeOcrProvider";
 import type { OcrFailureCode, OcrProvider, OcrSuccess } from "@/lib/ocr/ocrTypes";
+import { computeImageHash } from "@/lib/ocr/imageHash";
+import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
 
 // Stage 14.1 — Screenshot Intake orchestration. Stage 14.2 added OCR
 // (lib/ocr/recognizeScreenshot.ts) as the last step before replying. This is
@@ -200,6 +202,13 @@ export async function handleScreenshotMessage(
     await sendTelegramMessage(chatId, DOWNLOAD_FAILED_TEXT);
     return { kind: "DOWNLOAD_FAILED" };
   }
+
+  // Stage 4.2B2 — computed on the raw, downloaded bytes exactly as
+  // received from Telegram, before OCR touches them. Same algorithm/same
+  // checkpoint as the Mini App upload route (lib/ocr/imageHash.ts) —
+  // observability only, never persisted, never changes behavior.
+  const imageHash = computeImageHash(downloadResult.download.buffer);
+  logScreenshotPipelineEvent("image_received", { imageHash });
 
   const intake: ScreenshotIntake = {
     source: source.source,
