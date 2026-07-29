@@ -897,7 +897,10 @@ test("screenshot preview: odds NOT_FOUND logs odds_verification_not_found with t
     submittedOdds: 1.9,
     discrepancyPercent: null,
     bookmaker: null,
-    note: "no matching event",
+    // Stage 4.2B1 — matches the exact shape the real verifyOdds() produces
+    // so it classifies as genuine EVENT_NOT_FOUND, not the defensive
+    // PROVIDER_UNAVAILABLE fallback for an unrecognized note shape.
+    note: 'No matching event found for "Test Event" in soccer_epl',
   });
 
   await handleScreenshotPreview(request, baseOptions({ verifyOddsFn: notFoundOdds }));

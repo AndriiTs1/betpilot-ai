@@ -38,7 +38,13 @@ function notFound(submittedOdds: number): OddsCheckResult {
     submittedOdds,
     discrepancyPercent: null,
     bookmaker: null,
-    note: "No matching event found",
+    // Stage 4.2B1 — matches the exact shape lib/odds/oddsVerifier.ts's real
+    // verifyOdds() produces (`No matching event found for "X" in Y`), so
+    // TheOddsApiProvider's classifyLegacyFailureNote() classifies this as a
+    // genuine EVENT_NOT_FOUND, not its defensive PROVIDER_UNAVAILABLE
+    // fallback for an unrecognized note shape — this fixture is meant to
+    // simulate a real "not found", not a provider failure.
+    note: 'No matching event found for "Test Event" in soccer_epl',
   };
 }
 
@@ -241,7 +247,7 @@ test("buildBetSlipPreview: EXPRESS with a leg the provider can't resolve a price
       "Known Odds": verified(2.0, 2.0),
       // A real Step 15G verifyOdds() failed lookup never fabricates a
       // price — submittedOdds stays null, matching the null input odds.
-      "Unknown Odds": { matched: false, withinTolerance: null, sourceOdds: null, submittedOdds: null, discrepancyPercent: null, bookmaker: null, note: "No matching event found" },
+      "Unknown Odds": { matched: false, withinTolerance: null, sourceOdds: null, submittedOdds: null, discrepancyPercent: null, bookmaker: null, note: 'No matching event found for "Unknown Odds" in soccer_epl' },
     }),
   });
 
@@ -443,8 +449,14 @@ test("buildBetSlipPreview: odds check failures never log selection.event, select
     });
 
     // Sanity: both failure paths actually ran (otherwise this test would
-    // trivially "pass" by never exercising the code under test).
-    assert.equal(result.preview.selections[0].oddsStatus, "NOT_FOUND");
+    // trivially "pass" by never exercising the code under test). The first
+    // leg's note doesn't match any recognized classifyLegacyFailureNote()
+    // pattern (it's a synthetic secret string, not a real oddsVerifier.ts
+    // note shape), so it lands on the defensive PROVIDER_UNAVAILABLE
+    // fallback (Stage 4.2B1) rather than NOT_FOUND — the exact status isn't
+    // this test's point, only that both failure paths ran and nothing
+    // secret leaked into logs (checked below).
+    assert.equal(result.preview.selections[0].oddsStatus, "UNAVAILABLE");
     assert.equal(result.preview.selections[1].oddsStatus, "UNAVAILABLE");
     assert.ok(loggedCalls.length >= 2, "expected both odds_check_not_matched and odds_check_rejected to log");
 
@@ -580,7 +592,15 @@ test("DI: supplying both oddsVerificationService and verifyOddsFn is rejected as
 /* Additional parity scenarios                                                */
 /* -------------------------------------------------------------------------- */
 
-test("parity: PROVIDER_TIMEOUT as a normal RETURNED legacy failure (not a throw) maps to NOT_FOUND, same as today", async () => {
+// Stage 4.2B1 — root cause fix (Stage 4.2A audit): a technical provider
+// failure returned (not thrown) by verifyOddsFn now classifies through
+// TheOddsApiProvider's classifyLegacyFailureNote() and survives
+// lib/odds/legacyOddsBridge.ts as reasonCode PROVIDER_TIMEOUT/
+// PROVIDER_UNAVAILABLE, which mapOddsStatus.ts now maps to UNAVAILABLE —
+// no longer indistinguishable from a genuine NOT_FOUND. These two tests
+// used to be named "...maps to NOT_FOUND, same as today", documenting the
+// exact bug this stage fixes; renamed to document the corrected behavior.
+test("PROVIDER_TIMEOUT as a normal RETURNED legacy failure (not a throw) now maps to UNAVAILABLE, not NOT_FOUND", async () => {
   const result = await buildBetSlipPreview(singleSlip(2.0), "player-1", TEST_SECRET, {
     verifyOddsFn: async (): Promise<OddsCheckResult> => ({
       matched: false,
@@ -593,10 +613,10 @@ test("parity: PROVIDER_TIMEOUT as a normal RETURNED legacy failure (not a throw)
     }),
   });
 
-  assert.equal(result.preview.selections[0].oddsStatus, "NOT_FOUND");
+  assert.equal(result.preview.selections[0].oddsStatus, "UNAVAILABLE");
 });
 
-test("parity: PROVIDER_UNAVAILABLE as a normal RETURNED legacy failure (not a throw) maps to NOT_FOUND, same as today", async () => {
+test("PROVIDER_UNAVAILABLE as a normal RETURNED legacy failure (not a throw) now maps to UNAVAILABLE, not NOT_FOUND", async () => {
   const result = await buildBetSlipPreview(singleSlip(2.0), "player-1", TEST_SECRET, {
     verifyOddsFn: async (): Promise<OddsCheckResult> => ({
       matched: false,
@@ -609,7 +629,7 @@ test("parity: PROVIDER_UNAVAILABLE as a normal RETURNED legacy failure (not a th
     }),
   });
 
-  assert.equal(result.preview.selections[0].oddsStatus, "NOT_FOUND");
+  assert.equal(result.preview.selections[0].oddsStatus, "UNAVAILABLE");
 });
 
 test("parity: a genuinely thrown (unexpected) provider exception still maps to UNAVAILABLE, distinct from a returned provider failure", async () => {
@@ -901,7 +921,7 @@ test("Step 15I (B): SINGLE + null odds + provider failure — no odds are fabric
       // A real Step 15G verifyOdds() failed lookup (event/selection/market
       // not found, provider unavailable, etc.) reports submittedOdds: null
       // too — it never fabricates a price just because matching failed.
-      return { matched: false, withinTolerance: null, sourceOdds: null, submittedOdds: null, discrepancyPercent: null, bookmaker: null, note: "No matching event found" };
+      return { matched: false, withinTolerance: null, sourceOdds: null, submittedOdds: null, discrepancyPercent: null, bookmaker: null, note: 'No matching event found for "Manchester City vs Chelsea" in soccer_epl' };
     },
   });
 
@@ -1044,7 +1064,7 @@ test("Step 17 (3): EXPRESS of two null-odds legs, one NOT_FOUND — that leg map
       if (input.event === "Dinamo Zagreb vs Thun") return verified(1.65, 1.65);
       // KuPS vs Sabah Baku — provider genuinely cannot match this event, a
       // real Step 15G verifyOdds() failure never fabricates a price.
-      return { matched: false, withinTolerance: null, sourceOdds: null, submittedOdds: null, discrepancyPercent: null, bookmaker: null, note: "No matching event found" };
+      return { matched: false, withinTolerance: null, sourceOdds: null, submittedOdds: null, discrepancyPercent: null, bookmaker: null, note: 'No matching event found for "KuPS vs Sabah Baku" in soccer_epl' };
     },
   });
 

@@ -316,6 +316,8 @@ test("result mapping: VERIFIED reconstructs matched:true, withinTolerance:true",
     providerEventId: undefined,
     providerSportKey: undefined,
     eventStartTime: undefined,
+    // Stage 4.2B1 — createVerifiedResult() always sets reasonCode "NONE".
+    reasonCode: "NONE",
   });
 });
 
@@ -326,6 +328,7 @@ test("result mapping: ODDS_CHANGED reconstructs matched:true, withinTolerance:fa
   assert.equal(oddsCheck?.matched, true);
   assert.equal(oddsCheck?.withinTolerance, false);
   assert.equal(oddsCheck?.sourceOdds, 1.5);
+  assert.equal(oddsCheck?.reasonCode, "ODDS_OUTSIDE_TOLERANCE");
 });
 
 test("result mapping: FAILED/EVENT_NOT_FOUND reconstructs matched:false (not exception-mapped)", () => {
@@ -336,6 +339,9 @@ test("result mapping: FAILED/EVENT_NOT_FOUND reconstructs matched:false (not exc
   assert.equal(oddsCheck?.matched, false);
   assert.equal(oddsCheck?.withinTolerance, null);
   assert.equal(oddsCheck?.sourceOdds, null);
+  // Stage 4.2B1 — the whole point of this stage: a real "not found" reason
+  // must survive the bridge, not be silently dropped to null/undefined.
+  assert.equal(oddsCheck?.reasonCode, "EVENT_NOT_FOUND");
 });
 
 test("result mapping: FAILED/SELECTION_NOT_FOUND reconstructs matched:false and preserves bookmaker if present", () => {
@@ -344,6 +350,7 @@ test("result mapping: FAILED/SELECTION_NOT_FOUND reconstructs matched:false and 
 
   assert.equal(oddsCheck?.matched, false);
   assert.equal(oddsCheck?.bookmaker, "Bet365");
+  assert.equal(oddsCheck?.reasonCode, "SELECTION_NOT_FOUND");
 });
 
 test("result mapping: FAILED/SPORT_NOT_SUPPORTED reconstructs matched:false", () => {
@@ -352,6 +359,7 @@ test("result mapping: FAILED/SPORT_NOT_SUPPORTED reconstructs matched:false", ()
 
   assert.equal(wasExceptionMapped, false);
   assert.equal(oddsCheck?.matched, false);
+  assert.equal(oddsCheck?.reasonCode, "SPORT_NOT_SUPPORTED");
 });
 
 test("result mapping: FAILED/PROVIDER_TIMEOUT (a real, returned legacy failure) reconstructs matched:false, NOT exception-mapped", () => {
@@ -360,6 +368,9 @@ test("result mapping: FAILED/PROVIDER_TIMEOUT (a real, returned legacy failure) 
 
   assert.equal(wasExceptionMapped, false);
   assert.equal(oddsCheck?.matched, false);
+  // Stage 4.2B1 — root cause fix: this technical failure reason must reach
+  // the caller now, instead of being indistinguishable from EVENT_NOT_FOUND.
+  assert.equal(oddsCheck?.reasonCode, "PROVIDER_TIMEOUT");
 });
 
 test("result mapping: FAILED/PROVIDER_UNAVAILABLE from a normal legacy note (not a thrown exception) reconstructs matched:false, NOT exception-mapped", () => {
@@ -368,6 +379,25 @@ test("result mapping: FAILED/PROVIDER_UNAVAILABLE from a normal legacy note (not
 
   assert.equal(wasExceptionMapped, false);
   assert.equal(oddsCheck?.matched, false);
+  assert.equal(oddsCheck?.reasonCode, "PROVIDER_UNAVAILABLE");
+});
+
+test("result mapping: FAILED/PROVIDER_INVALID_RESPONSE reconstructs matched:false and preserves the reason", () => {
+  const result = createFailedResult({ submittedOdds: "2.15", provider: "THE_ODDS_API", checkedAt: CHECKED_AT, reasonCode: "PROVIDER_INVALID_RESPONSE" });
+  const { oddsCheck, wasExceptionMapped } = verificationResultToLegacyOddsCheck(result, 2.15);
+
+  assert.equal(wasExceptionMapped, false);
+  assert.equal(oddsCheck?.matched, false);
+  assert.equal(oddsCheck?.reasonCode, "PROVIDER_INVALID_RESPONSE");
+});
+
+test("result mapping: FAILED/PROVIDER_RATE_LIMITED reconstructs matched:false and preserves the reason", () => {
+  const result = createFailedResult({ submittedOdds: "2.15", provider: "THE_ODDS_API", checkedAt: CHECKED_AT, reasonCode: "PROVIDER_RATE_LIMITED" });
+  const { oddsCheck, wasExceptionMapped } = verificationResultToLegacyOddsCheck(result, 2.15);
+
+  assert.equal(wasExceptionMapped, false);
+  assert.equal(oddsCheck?.matched, false);
+  assert.equal(oddsCheck?.reasonCode, "PROVIDER_RATE_LIMITED");
 });
 
 test("result mapping: FAILED/PROVIDER_UNAVAILABLE with diagnosticCode ODDS_PROVIDER_UNEXPECTED_ERROR (a thrown verifyOddsFn) reconstructs oddsCheck: null, exception-mapped", () => {
@@ -384,6 +414,7 @@ test("result mapping: NOT_CHECKED reconstructs matched:false", () => {
 
   assert.equal(wasExceptionMapped, false);
   assert.equal(oddsCheck?.matched, false);
+  assert.equal(oddsCheck?.reasonCode, "NOT_CHECKED");
 });
 
 test("result mapping: note is always reconstructed as null (fetched-but-never-read downstream)", () => {
@@ -453,6 +484,7 @@ test("result mapping: a successful null-input lookup (VERIFIED) reconstructs sub
     providerEventId: undefined,
     providerSportKey: undefined,
     eventStartTime: undefined,
+    reasonCode: "NONE",
   });
 });
 

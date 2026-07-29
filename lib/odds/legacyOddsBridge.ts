@@ -354,6 +354,12 @@ export function verificationResultToLegacyOddsCheck(
           providerEventId,
           providerSportKey,
           eventStartTime,
+          // Stage 4.2B1 — carried through unconditionally, same as every
+          // other field derived straight from `result` here: VerificationResult
+          // always has a reasonCode (NONE for VERIFIED, ODDS_OUTSIDE_TOLERANCE
+          // for ODDS_CHANGED), so there's no reason to selectively omit it on
+          // the matched:true branches.
+          reasonCode: result.reasonCode,
         },
         wasExceptionMapped: false,
       };
@@ -371,6 +377,15 @@ export function verificationResultToLegacyOddsCheck(
           providerEventId,
           providerSportKey,
           eventStartTime,
+          // Stage 4.2B1 — root cause fix: this used to be the one place that
+          // silently dropped the classification lib/odds/theOddsApiProvider.ts's
+          // classifyLegacyFailureNote() already computed (PROVIDER_UNAVAILABLE/
+          // PROVIDER_TIMEOUT/PROVIDER_INVALID_RESPONSE/PROVIDER_RATE_LIMITED vs.
+          // EVENT_NOT_FOUND/SELECTION_NOT_FOUND/SPORT_NOT_SUPPORTED/etc.),
+          // making a technical provider failure indistinguishable from a real
+          // "not found" by the time mapOddsStatus.ts saw only matched:false.
+          // Now threaded through so that distinction survives to the UI.
+          reasonCode: result.reasonCode,
         },
         wasExceptionMapped: false,
       };

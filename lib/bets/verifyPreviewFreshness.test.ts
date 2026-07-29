@@ -30,7 +30,12 @@ function notFound(submittedOdds: number): OddsCheckResult {
     submittedOdds,
     discrepancyPercent: null,
     bookmaker: null,
-    note: "No matching event found",
+    // Stage 4.2B1 — matches the exact shape the real verifyOdds() produces
+    // so TheOddsApiProvider's classifyLegacyFailureNote() classifies this
+    // as a genuine EVENT_NOT_FOUND (-> NOT_FOUND), not its defensive
+    // PROVIDER_UNAVAILABLE fallback (-> UNAVAILABLE) for an unrecognized
+    // note shape — this fixture simulates a real "not found".
+    note: 'No matching event found for "Test Event" in soccer_epl',
   };
 }
 

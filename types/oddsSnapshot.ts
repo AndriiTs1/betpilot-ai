@@ -1,3 +1,5 @@
+import type { VerificationReasonCode } from "@/lib/odds/verification";
+
 export interface OddsCheckResult {
   matched: boolean;
 
@@ -36,4 +38,14 @@ export interface OddsCheckResult {
   providerEventId?: string;
   providerSportKey?: string;
   eventStartTime?: string; // ISO 8601, the provider's own commence_time
+
+  // Stage 4.2B1 — the structured reason lib/odds/verification.ts's
+  // VerificationResult already always carries, now threaded through
+  // lib/odds/legacyOddsBridge.ts instead of being discarded. Optional
+  // because older/hand-built OddsCheckResult values (test fixtures, any
+  // future caller bypassing the bridge) simply omit it — mapOddsStatus.ts
+  // treats an absent reasonCode exactly as before this stage (falls back to
+  // NOT_FOUND for matched:false), so this is purely additive and never
+  // changes the meaning of an OddsCheckResult that doesn't set it.
+  reasonCode?: VerificationReasonCode;
 }
