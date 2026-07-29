@@ -231,6 +231,41 @@ test("A: WIN balance/transaction figures come entirely from settleBet's own exis
   assert.equal(fake._debug.transactions()[0]?.amount.toString(), "100");
 });
 
+// Stage 3.5C-FIX — production-like regression: a real bet exactly as
+// production's own betting flow stores it (canonicalSelectionType
+// PARTICIPANT, canonicalParticipant a free-text team name — see
+// lib/odds/legacyOddsBridge.ts) now settles automatically end-to-end,
+// instead of the pre-fix UNSUPPORTED_SELECTION/NO_ACTION dead end a live
+// production audit confirmed for every real bet.
+test("Stage 3.5C-FIX: production-like PARTICIPANT bet ('Fenerbahce Win') settles automatically", async () => {
+  const fake = createFakeDb({
+    bet: fakeBet({
+      canonicalMarketType: "MONEYLINE_2WAY",
+      canonicalSelectionType: "PARTICIPANT",
+      canonicalParticipant: "Fenerbahce",
+    }),
+  });
+  const result = await autoSettleSingleBet(
+    db(fake),
+    input({
+      eventResult: {
+        status: "COMPLETED",
+        homeParticipant: { name: "Górnik Zabrze" },
+        awayParticipant: { name: "Fenerbahce" },
+        homeScore: 0,
+        awayScore: 2,
+      },
+    }),
+  );
+
+  assert.equal(result.kind, "SETTLED");
+  if (result.kind !== "SETTLED") return;
+  assert.equal(result.outcome, "WIN");
+  assert.equal(result.finalStatus, "SETTLED_WIN");
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_WIN");
+  assert.equal(fake._debug.transactionCreateCallCount(), 1);
+});
+
 /* -------------------------------------------------------------------------- */
 /* B. No-action evaluator outcomes                                            */
 /* -------------------------------------------------------------------------- */
@@ -264,10 +299,8 @@ test("B: UNSUPPORTED_MARKET -> NO_ACTION", async () => {
   assert.equal(fake._debug.transactionCreateCallCount(), 0);
 });
 
-test("B: UNSUPPORTED_SELECTION (PARTICIPANT) -> NO_ACTION", async () => {
-  const fake = createFakeDb({
-    bet: fakeBet({ canonicalMarketType: "MONEYLINE_2WAY", canonicalSelectionType: "PARTICIPANT", canonicalParticipant: "Arsenal" }),
-  });
+test("B: double-chance selection type (still genuinely unsupported) -> NO_ACTION", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ canonicalSelectionType: "HOME_OR_DRAW" }) });
   const result = await autoSettleSingleBet(db(fake), input());
 
   assert.equal(result.kind, "NO_ACTION");

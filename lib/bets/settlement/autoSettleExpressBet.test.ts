@@ -279,6 +279,99 @@ test("WIN + VOID: exact worked example — settles WIN using the adjusted effect
 });
 
 /* -------------------------------------------------------------------------- */
+/* Stage 3.5C-FIX — PARTICIPANT legs (production-like: two free-text        */
+/* team-name selections, exactly how production's real betting flow stores  */
+/* an EXPRESS today — see lib/odds/legacyOddsBridge.ts).                    */
+/* -------------------------------------------------------------------------- */
+
+function participantSelections(): FakeSelectionRow[] {
+  return [
+    fakeSelection({
+      id: "leg-A",
+      providerEventId: EVENT_A,
+      canonicalMarketType: "MONEYLINE_2WAY",
+      canonicalSelectionType: "PARTICIPANT",
+      canonicalParticipant: "Górnik Zabrze",
+      odds: new Prisma.Decimal("2.00"),
+    }),
+    fakeSelection({
+      id: "leg-B",
+      providerEventId: EVENT_B,
+      canonicalMarketType: "MONEYLINE_2WAY",
+      canonicalSelectionType: "PARTICIPANT",
+      canonicalParticipant: "Fenerbahce",
+      odds: new Prisma.Decimal("1.50"),
+    }),
+  ];
+}
+
+test("Stage 3.5C-FIX: two PARTICIPANT legs, both WIN -> EXPRESS WON", async () => {
+  const fake = createFakeDb({ bet: fakeExpressBet({}, participantSelections()) });
+  const results: EventResultEntryInput[] = [
+    { providerEventId: EVENT_A, eventResult: eventResult({ homeParticipant: { name: "Górnik Zabrze" }, awayParticipant: { name: "FC Thun" }, homeScore: 2, awayScore: 0 }) },
+    { providerEventId: EVENT_B, eventResult: eventResult({ homeParticipant: { name: "Real Betis" }, awayParticipant: { name: "Fenerbahce" }, homeScore: 0, awayScore: 1 }) },
+  ];
+
+  const result = await autoSettleExpressBet(db(fake), input(results));
+
+  assert.equal(result.kind, "SETTLED");
+  if (result.kind !== "SETTLED") return;
+  assert.equal(result.outcome, "WIN");
+  assert.equal(result.effectiveOdds?.toString(), "3"); // 2.00 * 1.50
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_WIN");
+});
+
+test("Stage 3.5C-FIX: one PARTICIPANT leg LOSS -> EXPRESS LOST", async () => {
+  const fake = createFakeDb({ bet: fakeExpressBet({}, participantSelections()) });
+  const results: EventResultEntryInput[] = [
+    { providerEventId: EVENT_A, eventResult: eventResult({ homeParticipant: { name: "Górnik Zabrze" }, awayParticipant: { name: "FC Thun" }, homeScore: 2, awayScore: 0 }) },
+    // Fenerbahce (away) loses this one.
+    { providerEventId: EVENT_B, eventResult: eventResult({ homeParticipant: { name: "Real Betis" }, awayParticipant: { name: "Fenerbahce" }, homeScore: 2, awayScore: 0 }) },
+  ];
+
+  const result = await autoSettleExpressBet(db(fake), input(results));
+
+  assert.equal(result.kind, "SETTLED");
+  if (result.kind !== "SETTLED") return;
+  assert.equal(result.outcome, "LOSS");
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_LOSS");
+});
+
+test("Stage 3.5C-FIX: one PARTICIPANT leg not yet completed -> EXPRESS stays unsettled (WAITING via NO_ACTION)", async () => {
+  const fake = createFakeDb({ bet: fakeExpressBet({}, participantSelections()) });
+  const results: EventResultEntryInput[] = [
+    { providerEventId: EVENT_A, eventResult: eventResult({ homeParticipant: { name: "Górnik Zabrze" }, awayParticipant: { name: "FC Thun" }, homeScore: 2, awayScore: 0 }) },
+    { providerEventId: EVENT_B, eventResult: eventResult({ status: "IN_PROGRESS", homeParticipant: { name: "Real Betis" }, awayParticipant: { name: "Fenerbahce" }, homeScore: 0, awayScore: 0 }) },
+  ];
+
+  const result = await autoSettleExpressBet(db(fake), input(results));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.aggregate.kind, "WAITING");
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "CONFIRMED");
+  assert.equal(fake._debug.transactions().length, 0);
+});
+
+test("Stage 3.5C-FIX: PARTICIPANT WIN + PARTICIPANT VOID recomputes effectiveOdds correctly", async () => {
+  const fake = createFakeDb({ bet: fakeExpressBet({}, participantSelections()) });
+  const results: EventResultEntryInput[] = [
+    // Górnik Zabrze (home) wins.
+    { providerEventId: EVENT_A, eventResult: eventResult({ homeParticipant: { name: "Górnik Zabrze" }, awayParticipant: { name: "FC Thun" }, homeScore: 2, awayScore: 0 }) },
+    // Fenerbahce leg: MONEYLINE_2WAY draw -> VOID, excluded from the product.
+    { providerEventId: EVENT_B, eventResult: eventResult({ homeParticipant: { name: "Real Betis" }, awayParticipant: { name: "Fenerbahce" }, homeScore: 1, awayScore: 1 }) },
+  ];
+
+  const result = await autoSettleExpressBet(db(fake), input(results));
+
+  assert.equal(result.kind, "SETTLED");
+  if (result.kind !== "SETTLED") return;
+  assert.equal(result.outcome, "WIN");
+  assert.equal(result.effectiveOdds?.toString(), "2"); // only the winning 2.00 leg — VOID leg excluded
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_WIN");
+});
+
+/* -------------------------------------------------------------------------- */
 /* WAITING / UNSUPPORTED / INVALID_DATA -> NO_ACTION, settleBet never called  */
 /* -------------------------------------------------------------------------- */
 

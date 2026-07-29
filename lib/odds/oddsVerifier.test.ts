@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { verifyOdds, normalizeTeamName, type OddsVerificationInput } from "./oddsVerifier";
+import { verifyOdds, type OddsVerificationInput } from "./oddsVerifier";
+import { normalizeTeamName } from "./teamNameMatcher";
 
 // Same fetch-indirection technique as lib/ocr/claudeOcrProvider.test.ts and
 // lib/ai/betParser.test.ts — global.fetch is replaced exactly once with a

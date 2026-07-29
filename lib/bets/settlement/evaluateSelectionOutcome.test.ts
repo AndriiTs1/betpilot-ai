@@ -236,12 +236,24 @@ test("selection: unsupported market (TOTALS)", () => {
   assertOutcome(r, "UNSUPPORTED", "UNSUPPORTED_MARKET");
 });
 
-test("selection: unsupported selection type (PARTICIPANT on MONEYLINE_2WAY — today's tennis shape)", () => {
+// Stage 3.5C-FIX — PARTICIPANT is no longer categorically UNSUPPORTED_SELECTION
+// (production audit: 100% of real bets with any canonical fields at all
+// were PARTICIPANT, zero were HOME/AWAY/DRAW — rejecting it outright meant
+// automatic settlement could never succeed for a real bet). It is now
+// resolved structurally to an effective HOME/AWAY side — see section G below
+// for the full resolution test matrix. Double-chance selection types
+// (HOME_OR_DRAW/DRAW_OR_AWAY/HOME_OR_AWAY) remain genuinely out of scope.
+test("selection: double-chance selection types remain unsupported (HOME_OR_DRAW)", () => {
+  const r = evaluateSelectionOutcome(eventResult(), selection({ marketType: "MONEYLINE_3WAY", selectionType: "HOME_OR_DRAW" }));
+  assertOutcome(r, "UNSUPPORTED", "UNSUPPORTED_SELECTION");
+});
+
+test("selection: PARTICIPANT on a genuinely unsupported market (TOTALS) is still UNSUPPORTED_MARKET, not attempted", () => {
   const r = evaluateSelectionOutcome(
     eventResult(),
-    selection({ marketType: "MONEYLINE_2WAY", selectionType: "PARTICIPANT", participant: { name: "Arsenal" } }),
+    selection({ marketType: "TOTALS" as MarketType, selectionType: "PARTICIPANT", participant: { name: "Arsenal" } }),
   );
-  assertOutcome(r, "UNSUPPORTED", "UNSUPPORTED_SELECTION");
+  assertOutcome(r, "UNSUPPORTED", "UNSUPPORTED_MARKET");
 });
 
 test("selection: unsupported period", () => {
@@ -308,6 +320,113 @@ test("purity: identical input always returns an equal (deep-equal) result", () =
   const r2 = evaluateSelectionOutcome(event, sel);
 
   assert.deepEqual(r1, r2);
+});
+
+/* -------------------------------------------------------------------------- */
+/* G. PARTICIPANT resolution (Stage 3.5C-FIX)                                 */
+/* -------------------------------------------------------------------------- */
+
+test("PARTICIPANT: matches home, home wins -> WIN", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeScore: 2, awayScore: 1 }),
+    selection({ marketType: "MONEYLINE_3WAY", selectionType: "PARTICIPANT", participant: { name: "Arsenal" } }),
+  );
+  assertOutcome(r, "WIN", "WIN_HOME_PARTICIPANT");
+});
+
+test("PARTICIPANT: matches home, home loses -> LOSS", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeScore: 0, awayScore: 1 }),
+    selection({ marketType: "MONEYLINE_3WAY", selectionType: "PARTICIPANT", participant: { name: "Arsenal" } }),
+  );
+  assertOutcome(r, "LOSS", "LOSS_HOME_PARTICIPANT");
+});
+
+test("PARTICIPANT: matches away, away wins -> WIN", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeScore: 0, awayScore: 2 }),
+    selection({ marketType: "MONEYLINE_3WAY", selectionType: "PARTICIPANT", participant: { name: "Chelsea" } }),
+  );
+  assertOutcome(r, "WIN", "WIN_AWAY_PARTICIPANT");
+});
+
+test("PARTICIPANT: matches away, away loses -> LOSS", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeScore: 2, awayScore: 0 }),
+    selection({ marketType: "MONEYLINE_3WAY", selectionType: "PARTICIPANT", participant: { name: "Chelsea" } }),
+  );
+  assertOutcome(r, "LOSS", "LOSS_AWAY_PARTICIPANT");
+});
+
+test("PARTICIPANT: Cyrillic participant name matches the Latin provider home name", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({
+      homeParticipant: { name: "Górnik Zabrze" },
+      awayParticipant: { name: "Fenerbahce" },
+      homeScore: 2,
+      awayScore: 0,
+    }),
+    selection({ marketType: "MONEYLINE_3WAY", selectionType: "PARTICIPANT", participant: { name: "Гурник Забже" } }),
+  );
+  assertOutcome(r, "WIN", "WIN_HOME_PARTICIPANT");
+});
+
+test("PARTICIPANT: Cyrillic participant name matches the Latin provider away name", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({
+      homeParticipant: { name: "Górnik Zabrze" },
+      awayParticipant: { name: "Fenerbahce" },
+      homeScore: 0,
+      awayScore: 1,
+    }),
+    selection({ marketType: "MONEYLINE_3WAY", selectionType: "PARTICIPANT", participant: { name: "Фенербахче" } }),
+  );
+  assertOutcome(r, "WIN", "WIN_AWAY_PARTICIPANT");
+});
+
+test("PARTICIPANT: matches neither side -> INVALID_DATA(PARTICIPANT_MISMATCH), never guessed", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Chelsea" } }),
+    selection({ marketType: "MONEYLINE_3WAY", selectionType: "PARTICIPANT", participant: { name: "Liverpool" } }),
+  );
+  assertOutcome(r, "INVALID_DATA", "PARTICIPANT_MISMATCH");
+});
+
+test("PARTICIPANT: matches BOTH sides -> INVALID_DATA(AMBIGUOUS_PARTICIPANT_MATCH), never guessed", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Real Madrid" }, awayParticipant: { name: "Real Madrid Castilla" } }),
+    selection({ marketType: "MONEYLINE_3WAY", selectionType: "PARTICIPANT", participant: { name: "Real Madrid" } }),
+  );
+  assertOutcome(r, "INVALID_DATA", "AMBIGUOUS_PARTICIPANT_MATCH");
+});
+
+test("PARTICIPANT: missing participant field entirely -> INVALID_DATA(MISSING_PARTICIPANT_NAME)", () => {
+  const r = evaluateSelectionOutcome(eventResult(), selection({ marketType: "MONEYLINE_3WAY", selectionType: "PARTICIPANT" }));
+  assertOutcome(r, "INVALID_DATA", "MISSING_PARTICIPANT_NAME");
+});
+
+test("PARTICIPANT: whitespace-only participant name -> INVALID_DATA(MISSING_PARTICIPANT_NAME)", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult(),
+    selection({ marketType: "MONEYLINE_3WAY", selectionType: "PARTICIPANT", participant: { name: "   " } }),
+  );
+  assertOutcome(r, "INVALID_DATA", "MISSING_PARTICIPANT_NAME");
+});
+
+test("PARTICIPANT: draw result in MONEYLINE_3WAY gives LOSS, same rule a real HOME selection already gets", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeScore: 1, awayScore: 1 }),
+    selection({ marketType: "MONEYLINE_3WAY", selectionType: "PARTICIPANT", participant: { name: "Arsenal" } }),
+  );
+  assertOutcome(r, "LOSS", "LOSS_HOME_PARTICIPANT");
+});
+
+test("PARTICIPANT: draw result in MONEYLINE_2WAY is VOID, same rule a real HOME selection already gets", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeScore: 1, awayScore: 1 }),
+    selection({ marketType: "MONEYLINE_2WAY", selectionType: "PARTICIPANT", participant: { name: "Arsenal" } }),
+  );
+  assertOutcome(r, "VOID", "VOID_DRAW_TWO_WAY_MARKET");
 });
 
 test("purity: repeated calls across every event status produce stable results (no hidden clock/state dependency)", () => {
