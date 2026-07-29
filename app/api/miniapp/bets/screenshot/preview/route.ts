@@ -9,6 +9,13 @@ import { recognizeBetSlipScreenshot, type ScreenshotPipelineDiagnostics } from "
 import { createClaudeOcrProvider } from "@/lib/ocr/claudeOcrProvider";
 import { detectBettingRegion } from "@/lib/ocr/regionDetection";
 import { computeImageHash } from "@/lib/ocr/imageHash";
+import {
+  findScreenshotRecognition,
+  createScreenshotRecognition,
+  findFreshScreenshotVerification,
+  createScreenshotVerification,
+  type ScreenshotRecognitionRecord,
+} from "@/lib/bets/screenshotRecognitionService";
 import type { OcrFailure, OcrProvider } from "@/lib/ocr/ocrTypes";
 import { ALLOWED_MIME_TYPES, MAX_FILE_SIZE_BYTES, detectImageSignature, type AllowedMimeType } from "@/lib/uploads/imageValidation";
 import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
@@ -175,6 +182,11 @@ export interface HandleScreenshotPreviewOptions {
   // Claude call. Defaults to the real detectBettingRegion.
   detectRegion?: typeof detectBettingRegion;
   rateLimiter?: RequestRateLimiter;
+  // Stage 4.2B3 — test-only override of VERIFICATION_TTL_MS (production
+  // never sets this, always gets the real default). Lets a test prove TTL
+  // expiry behavior deterministically (a tiny TTL that's already elapsed by
+  // the time of a second call) without waiting out the real 60s window.
+  verificationTtlMs?: number;
 }
 
 // Injectable so tests can supply a fake db/OCR provider/bet parser/odds
@@ -297,138 +309,196 @@ export async function handleScreenshotPreview(
       return rateLimitedResponse(rateLimitDecision.retryAfterSeconds);
     }
 
-    const ocrProvider = options.ocrProvider ?? createClaudeOcrProvider();
-    const detectRegion = options.detectRegion ?? detectBettingRegion;
+    // Stage 4.2B3 — reuse an existing immutable recognition for this exact
+    // (player, image) pair when one exists: OCR and the AI parser (both
+    // unmodified, unchanged below) are skipped entirely. Only a genuine
+    // cache MISS reaches them.
+    let recognitionRecord: ScreenshotRecognitionRecord | null = await findScreenshotRecognition(
+      db,
+      player.id,
+      imageHash,
+    );
 
-    // Adaptive two-stage recognition: small/already-cropped images reach
-    // the exact same recognizeScreenshot() call as before this stage
-    // existed; a large full-screen screenshot additionally gets a region
-    // detected and cropped first (lib/ocr/recognizeBetSlipScreenshot.ts).
-    // Every failure of the region-detection stage itself falls through to
-    // full-image OCR rather than failing the request.
-    const recognition = await recognizeBetSlipScreenshot({
-      intake: { mimeType, originalFilename: image.name || undefined },
-      buffer: Buffer.from(bytes),
-      provider: ocrProvider,
-      detectRegion,
-    });
-
-    if (recognition.diagnostics.metadataDecodeFailed) {
-      // Log-only — sharp couldn't read dimensions, so the size-based
-      // region-detection heuristic was skipped, but the request still
-      // proceeds through plain OCR on the original buffer below (Step 2C's
-      // "do not fail solely because region detection failed", extended to
-      // the metadata-read step it depends on).
-      logScreenshotPipelineEvent("image_decode_failed");
+    if (recognitionRecord) {
+      logScreenshotPipelineEvent("recognition_reused");
     } else {
-      logScreenshotPipelineEvent("image_metadata_read", {
-        durationMs: recognition.diagnostics.metadataMs,
-        imageWidth: recognition.diagnostics.imageWidth ?? undefined,
-        imageHeight: recognition.diagnostics.imageHeight ?? undefined,
+      const ocrProvider = options.ocrProvider ?? createClaudeOcrProvider();
+      const detectRegion = options.detectRegion ?? detectBettingRegion;
+
+      // Adaptive two-stage recognition: small/already-cropped images reach
+      // the exact same recognizeScreenshot() call as before this stage
+      // existed; a large full-screen screenshot additionally gets a region
+      // detected and cropped first (lib/ocr/recognizeBetSlipScreenshot.ts).
+      // Every failure of the region-detection stage itself falls through to
+      // full-image OCR rather than failing the request.
+      const recognition = await recognizeBetSlipScreenshot({
+        intake: { mimeType, originalFilename: image.name || undefined },
+        buffer: Buffer.from(bytes),
+        provider: ocrProvider,
+        detectRegion,
       });
-    }
 
-    if (recognition.kind === "IMAGE_TOO_LARGE") {
-      logScreenshotPipelineEvent("image_too_large", {
-        imageWidth: recognition.diagnostics.imageWidth ?? undefined,
-        imageHeight: recognition.diagnostics.imageHeight ?? undefined,
-      });
-      return NextResponse.json({ error: "IMAGE_TOO_LARGE" }, { status: 413 });
-    }
-
-    logRegionDetectionOutcome(recognition.diagnostics);
-
-    const ocrResult = recognition.ocrResult;
-
-    if (ocrResult.kind === "FAILURE") {
-      // Structured code only — never the provider's own safeMessage, and
-      // never the image bytes or any OCR text (there is none to log here).
-      console.error("POST /api/miniapp/bets/screenshot/preview: OCR failed:", ocrResult.code);
-      logScreenshotPipelineEvent("ocr_failed", { durationMs: ocrResult.durationMs, failureCode: ocrResult.code });
-      return mapOcrFailureToResponse(ocrResult);
-    }
-
-    logScreenshotPipelineEvent("ocr_succeeded", { durationMs: ocrResult.durationMs });
-
-    const parseBetSlip = options.parseBetSlip ?? parseBetSlipMessage;
-
-    const parserStartedAt = Date.now();
-    let parsed: ParseBetSlipResult;
-    try {
-      parsed = await parseBetSlip(ocrResult.normalizedText, "OCR");
-    } catch (err) {
-      console.error("POST /api/miniapp/bets/screenshot/preview: bet parser threw:", err);
-      logScreenshotPipelineEvent("parser_failed", { durationMs: Date.now() - parserStartedAt, parserMode: "OCR" });
-      return NextResponse.json({ error: "AI_UNAVAILABLE" }, { status: 502 });
-    }
-    const parserDurationMs = Date.now() - parserStartedAt;
-
-    if (!parsed.valid) {
-      // parsed.error can contain provider/model/timeout/SDK detail — log it
-      // server-side only, never in the response, and never the OCR text
-      // that produced it.
-      console.error("POST /api/miniapp/bets/screenshot/preview: parse failed:", parsed.error);
-
-      // A parser-layer timeout gets its own honest response — never
-      // reported as an image-quality problem — same distinction the old
-      // image-specific parser made. Every other parse failure (rejected,
-      // no tool call, malformed fields, non-timeout API error) is folded
-      // into the single IMAGE_NOT_RECOGNIZED code and the single
-      // parser_rejected log event, because ParseBetSlipResult — shared
-      // with the text-bet flow, which already treats every other parse
-      // failure identically as PARSE_FAILED — carries no finer-grained
-      // discriminated reason beyond the timeout code for those cases.
-      if (parsed.code === "timeout") {
-        logScreenshotPipelineEvent("parser_timed_out", { durationMs: parserDurationMs, parserMode: "OCR" });
-        return NextResponse.json({ error: "AI_TIMEOUT" }, { status: 504 });
+      if (recognition.diagnostics.metadataDecodeFailed) {
+        // Log-only — sharp couldn't read dimensions, so the size-based
+        // region-detection heuristic was skipped, but the request still
+        // proceeds through plain OCR on the original buffer below (Step 2C's
+        // "do not fail solely because region detection failed", extended to
+        // the metadata-read step it depends on).
+        logScreenshotPipelineEvent("image_decode_failed");
+      } else {
+        logScreenshotPipelineEvent("image_metadata_read", {
+          durationMs: recognition.diagnostics.metadataMs,
+          imageWidth: recognition.diagnostics.imageWidth ?? undefined,
+          imageHeight: recognition.diagnostics.imageHeight ?? undefined,
+        });
       }
-      logScreenshotPipelineEvent("parser_rejected", { durationMs: parserDurationMs, parserMode: "OCR" });
-      return NextResponse.json({ error: "IMAGE_NOT_RECOGNIZED" }, { status: 422 });
-    }
 
-    // parseBetSlipMessage()'s success shape already *is* ParsedBetSlip — no
-    // normalization step, unlike the old normalizeParsedImageBet().
-    const slip: ParsedBetSlip = { type: parsed.type, stake: parsed.stake, selections: parsed.selections };
-
-    logScreenshotPipelineEvent("parser_succeeded", {
-      durationMs: parserDurationMs,
-      parserMode: "OCR",
-      selectionCount: slip.selections.length,
-    });
-
-    const oddsStartedAt = Date.now();
-    let result;
-    try {
-      result = await buildBetSlipPreview(slip, player.id, previewTokenSecret, {
-        verifyOddsFn: options.verifyOddsFn,
-      });
-    } catch (err) {
-      if (err instanceof BetSlipValidationError) {
-        console.error("POST /api/miniapp/bets/screenshot/preview: invalid bet slip:", err.code, err.message);
-        return NextResponse.json({ error: "INVALID_BET_SLIP", detail: err.code }, { status: 422 });
+      if (recognition.kind === "IMAGE_TOO_LARGE") {
+        logScreenshotPipelineEvent("image_too_large", {
+          imageWidth: recognition.diagnostics.imageWidth ?? undefined,
+          imageHeight: recognition.diagnostics.imageHeight ?? undefined,
+        });
+        return NextResponse.json({ error: "IMAGE_TOO_LARGE" }, { status: 413 });
       }
-      throw err;
-    }
-    const oddsDurationMs = Date.now() - oddsStartedAt;
 
-    const oddsStatuses = result.preview.selections.map((s) => s.oddsStatus);
-    logScreenshotPipelineEvent(aggregateOddsVerificationEvent(result.preview.selections), {
-      durationMs: oddsDurationMs,
-      selectionCount: result.preview.selections.length,
-      // A deduplicated summary of the enum statuses observed — never the
-      // selections themselves (no event/selection/odds/stake content).
-      oddsVerificationStatus: [...new Set(oddsStatuses)].join(","),
-    });
+      logRegionDetectionOutcome(recognition.diagnostics);
+
+      const ocrResult = recognition.ocrResult;
+
+      if (ocrResult.kind === "FAILURE") {
+        // Structured code only — never the provider's own safeMessage, and
+        // never the image bytes or any OCR text (there is none to log here).
+        console.error("POST /api/miniapp/bets/screenshot/preview: OCR failed:", ocrResult.code);
+        logScreenshotPipelineEvent("ocr_failed", { durationMs: ocrResult.durationMs, failureCode: ocrResult.code });
+        return mapOcrFailureToResponse(ocrResult);
+      }
+
+      logScreenshotPipelineEvent("ocr_succeeded", { durationMs: ocrResult.durationMs });
+
+      const parseBetSlip = options.parseBetSlip ?? parseBetSlipMessage;
+
+      const parserStartedAt = Date.now();
+      let parsed: ParseBetSlipResult;
+      try {
+        parsed = await parseBetSlip(ocrResult.normalizedText, "OCR");
+      } catch (err) {
+        console.error("POST /api/miniapp/bets/screenshot/preview: bet parser threw:", err);
+        logScreenshotPipelineEvent("parser_failed", { durationMs: Date.now() - parserStartedAt, parserMode: "OCR" });
+        return NextResponse.json({ error: "AI_UNAVAILABLE" }, { status: 502 });
+      }
+      const parserDurationMs = Date.now() - parserStartedAt;
+
+      if (!parsed.valid) {
+        // parsed.error can contain provider/model/timeout/SDK detail — log it
+        // server-side only, never in the response, and never the OCR text
+        // that produced it.
+        console.error("POST /api/miniapp/bets/screenshot/preview: parse failed:", parsed.error);
+
+        // A parser-layer timeout gets its own honest response — never
+        // reported as an image-quality problem — same distinction the old
+        // image-specific parser made. Every other parse failure (rejected,
+        // no tool call, malformed fields, non-timeout API error) is folded
+        // into the single IMAGE_NOT_RECOGNIZED code and the single
+        // parser_rejected log event, because ParseBetSlipResult — shared
+        // with the text-bet flow, which already treats every other parse
+        // failure identically as PARSE_FAILED — carries no finer-grained
+        // discriminated reason beyond the timeout code for those cases.
+        if (parsed.code === "timeout") {
+          logScreenshotPipelineEvent("parser_timed_out", { durationMs: parserDurationMs, parserMode: "OCR" });
+          return NextResponse.json({ error: "AI_TIMEOUT" }, { status: 504 });
+        }
+        logScreenshotPipelineEvent("parser_rejected", { durationMs: parserDurationMs, parserMode: "OCR" });
+        return NextResponse.json({ error: "IMAGE_NOT_RECOGNIZED" }, { status: 422 });
+      }
+
+      // parseBetSlipMessage()'s success shape already *is* ParsedBetSlip — no
+      // normalization step, unlike the old normalizeParsedImageBet().
+      const parsedSlip: ParsedBetSlip = { type: parsed.type, stake: parsed.stake, selections: parsed.selections };
+
+      logScreenshotPipelineEvent("parser_succeeded", {
+        durationMs: parserDurationMs,
+        parserMode: "OCR",
+        selectionCount: parsedSlip.selections.length,
+      });
+
+      // Only a genuinely successful parse is ever worth persisting as a
+      // recognition — nothing above this line that returns early ever
+      // reaches here.
+      recognitionRecord = await createScreenshotRecognition(db, {
+        playerId: player.id,
+        imageHash,
+        parsedBet: parsedSlip,
+        ocrText: ocrResult.normalizedText,
+      });
+      logScreenshotPipelineEvent("recognition_created");
+    }
+
+    const slip = recognitionRecord.parsedBet;
+
+    // Stage 4.2B3 — explicit Refresh Odds: an optional form field no
+    // existing caller ever sends (fully backward compatible default:
+    // absent -> normal TTL-based reuse, identical to today's single-pass
+    // behavior on a cache miss). Never affects recognition reuse above —
+    // only which verification is served.
+    const refreshRaw = formData.get("refresh");
+    const forceRefresh = refreshRaw === "true" || refreshRaw === "1";
+
+    const now = new Date();
+    const cachedVerification = forceRefresh
+      ? null
+      : await findFreshScreenshotVerification(db, recognitionRecord.id, now);
+
+    let previewResult: { preview: Awaited<ReturnType<typeof buildBetSlipPreview>>["preview"]; previewToken: string | null };
+
+    if (cachedVerification) {
+      logScreenshotPipelineEvent("verification_reused");
+      previewResult = { preview: cachedVerification.preview, previewToken: cachedVerification.previewToken };
+    } else {
+      const oddsStartedAt = Date.now();
+      let built;
+      try {
+        built = await buildBetSlipPreview(slip, player.id, previewTokenSecret, {
+          verifyOddsFn: options.verifyOddsFn,
+        });
+      } catch (err) {
+        if (err instanceof BetSlipValidationError) {
+          console.error("POST /api/miniapp/bets/screenshot/preview: invalid bet slip:", err.code, err.message);
+          return NextResponse.json({ error: "INVALID_BET_SLIP", detail: err.code }, { status: 422 });
+        }
+        throw err;
+      }
+      const oddsDurationMs = Date.now() - oddsStartedAt;
+
+      const oddsStatuses = built.preview.selections.map((s) => s.oddsStatus);
+      logScreenshotPipelineEvent(aggregateOddsVerificationEvent(built.preview.selections), {
+        durationMs: oddsDurationMs,
+        selectionCount: built.preview.selections.length,
+        // A deduplicated summary of the enum statuses observed — never the
+        // selections themselves (no event/selection/odds/stake content).
+        oddsVerificationStatus: [...new Set(oddsStatuses)].join(","),
+      });
+
+      await createScreenshotVerification(db, {
+        recognitionId: recognitionRecord.id,
+        preview: built.preview,
+        previewToken: built.previewToken,
+        now,
+        ttlMs: options.verificationTtlMs,
+      });
+      logScreenshotPipelineEvent("verification_created");
+
+      previewResult = { preview: built.preview, previewToken: built.previewToken };
+    }
 
     logScreenshotPipelineEvent("screenshot_preview_completed", {
       totalDurationMs: Date.now() - totalStartedAt,
-      selectionCount: result.preview.selections.length,
+      selectionCount: previewResult.preview.selections.length,
       imageHash,
     });
 
     // Never the OCR text, never the raw parser output — only the same
     // { preview, previewToken } shape the text-bet flow already returns.
-    return NextResponse.json(result);
+    return NextResponse.json(previewResult);
   } catch (err) {
     console.error("POST /api/miniapp/bets/screenshot/preview failed:", err);
     return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });

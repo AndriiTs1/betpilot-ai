@@ -37,6 +37,16 @@ export type ScreenshotPipelineEvent =
   | "odds_verification_not_found"
   | "odds_verification_failed"
   | "screenshot_preview_completed"
+  // Stage 4.2B3 — recognition (OCR + AI parser output) and verification
+  // (odds check) cache outcomes. "_reused" means the existing, unmodified
+  // OCR/parser/odds-verification call was skipped entirely in favor of an
+  // already-persisted row (lib/bets/screenshotRecognitionService.ts);
+  // "_created" means it ran and a new row was persisted. Exactly one of
+  // each pair fires per request.
+  | "recognition_reused"
+  | "recognition_created"
+  | "verification_reused"
+  | "verification_created"
   // lib/bets/buildBetSlipPreview.ts's own per-selection odds-check outcome
   // — deliberately distinct names from the odds_verification_* aggregate
   // events above (those fire once per request, from the route; these fire

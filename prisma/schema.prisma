@@ -110,10 +110,12 @@ model Player {
   creditLimit   Decimal @default(10000) @db.Decimal(18, 6)
   currentCredit Decimal @default(0) @db.Decimal(18, 6) // + player is up, - player owes
 
-  wallet       Wallet?
-  bets         Bet[]
-  messages     Message[]
-  transactions Transaction[]
+  wallet                 Wallet?
+  bets                   Bet[]
+  messages               Message[]
+  transactions           Transaction[]
+  // Stage 4.2B3
+  screenshotRecognitions ScreenshotRecognition[]
 
   @@index([operatorId])
 }
@@ -279,4 +281,83 @@ model Message {
   createdAt DateTime @default(now())
 
   @@index([playerId])
+}
+
+// Stage 4.2B3 — the immutable half of the screenshot pipeline's
+// recognition/verification split (Stage 4.2A's own architecture verdict).
+// Represents "what OCR + the AI parser read from this exact image", scoped
+// per player (same isolation convention as every other model here — two
+// different players uploading byte-identical bytes get two separate rows,
+// never a cross-player cache hit). Never updated after creation: no code
+// path calls `update` on this model. imageHash is lib/ocr/imageHash.ts's
+// SHA-256 of the raw, unprocessed bytes (Stage 4.2B2) — the identity key
+// that lets a repeat upload skip OCR/the AI parser entirely.
+//
+// @@unique([playerId, imageHash]) is also this model's concurrency guard:
+// two simultaneous uploads of the same image by the same player both
+// attempt to `create`; the database — not application code — guarantees
+// only one row ever exists, and the loser's create() throws P2025/P2002,
+// which the service layer catches and re-reads instead of erroring.
+model ScreenshotRecognition {
+  id       String @id @default(cuid())
+  playerId String
+  player   Player @relation(fields: [playerId], references: [id])
+
+  imageHash String
+
+  // The exact lib/bets/betSlip.ts ParsedBetSlip shape ({ type, stake,
+  // selections }) the AI parser produced — never re-derived, never
+  // normalized further here. Storing the whole structure as one JSON value
+  // (rather than separate typed columns) keeps this model minimal and
+  // avoids inventing a second, parallel column-based encoding of a shape
+  // that already exists as a TypeScript type.
+  parsedBet Json
+
+  // The OCR-normalized text this recognition was built from — diagnostic
+  // only (mirrors what the operator debug route already returns directly in
+  // its own HTTP response), never read by any decision-making code.
+  // Nullable so a future recognition source that skips OCR entirely (none
+  // exists today) isn't forced to fabricate a value.
+  ocrText String?
+
+  createdAt DateTime @default(now())
+
+  verifications ScreenshotVerification[]
+
+  @@unique([playerId, imageHash])
+  @@index([playerId])
+}
+
+// Stage 4.2B3 — the versioned, time-dependent half: one row per odds
+// verification pass against an (immutable) ScreenshotRecognition. Never
+// updated after creation either — a re-check (TTL expiry or an explicit
+// Refresh Odds request) always creates a NEW row rather than mutating an
+// old one, so "what did the odds look like at time T" stays a real,
+// reconstructable fact rather than being overwritten in place.
+model ScreenshotVerification {
+  id            String                @id @default(cuid())
+  recognitionId String
+  recognition   ScreenshotRecognition @relation(fields: [recognitionId], references: [id], onDelete: Cascade)
+
+  // The exact lib/bets/buildBetSlipPreview.ts BetSlipPreview shape — same
+  // "store the existing TypeScript shape as JSON" choice as
+  // ScreenshotRecognition.parsedBet, for the same reason.
+  preview Json
+
+  // buildBetSlipPreview()'s own signed token for this exact preview
+  // snapshot — reused as-is (never re-signed) whenever this verification
+  // row is served from cache, so "same verification version" also means
+  // "same token", never a fresh one minted for identical content. Nullable
+  // for the same reason buildBetSlipPreview.ts's own previewToken already
+  // is: an EXPRESS with any leg's odds still unknown signs no token at all.
+  previewToken String?
+
+  createdAt DateTime @default(now())
+  // TTL boundary (lib/bets/screenshotRecognitionService.ts's
+  // VERIFICATION_TTL_MS) — a verification is only ever reused while
+  // `expiresAt > now`; past that, the next preview request creates a fresh
+  // row rather than serving stale odds indefinitely.
+  expiresAt DateTime
+
+  @@index([recognitionId, createdAt])
 }

@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import sharp from "sharp";
 import { NextRequest } from "next/server";
-import type { PrismaClient } from "@/lib/generated/prisma/client";
+import { Prisma, type PrismaClient } from "@/lib/generated/prisma/client";
 import { handleScreenshotPreview } from "./route";
 import type { ParseBetSlipResult } from "@/lib/ai/betParser";
+import type { BuildBetSlipPreviewOptions } from "@/lib/bets/buildBetSlipPreview";
 import type { OcrProvider, OcrResult } from "@/lib/ocr/ocrTypes";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import type { RegionDetectionOutcome } from "@/lib/ocr/regionDetection";
@@ -49,7 +50,53 @@ interface FakePlayerRow {
   telegramId: string | null;
 }
 
-function fakeDb(players: FakePlayerRow[]): PrismaClient {
+// Stage 4.2B3 — in-memory fakes for the two new models, same hand-written,
+// no-mocking-library convention as every other Prisma fake in this
+// codebase (see e.g. lib/bets/settleBet.test.ts). Stateful across calls on
+// the SAME returned object — a test constructs one db instance and reuses
+// it across two `handleScreenshotPreview` calls to exercise reuse/TTL/
+// concurrency, exactly as production reuses one `prisma` singleton across
+// requests.
+interface FakeScreenshotRecognitionRow {
+  id: string;
+  playerId: string;
+  imageHash: string;
+  parsedBet: unknown;
+  ocrText: string | null;
+  createdAt: Date;
+}
+
+interface FakeScreenshotVerificationRow {
+  id: string;
+  recognitionId: string;
+  preview: unknown;
+  previewToken: string | null;
+  createdAt: Date;
+  expiresAt: Date;
+}
+
+export interface FakeDbDebug {
+  recognitions: FakeScreenshotRecognitionRow[];
+  verifications: FakeScreenshotVerificationRow[];
+  recognitionCreateAttempts: () => number;
+  verificationCreateCount: () => number;
+}
+
+function screenshotRecognitionUniqueViolation(): Prisma.PrismaClientKnownRequestError {
+  return new Prisma.PrismaClientKnownRequestError("Unique constraint failed on the fields: (`playerId`,`imageHash`)", {
+    code: "P2002",
+    clientVersion: "test",
+    meta: { modelName: "ScreenshotRecognition" },
+  });
+}
+
+function fakeDb(players: FakePlayerRow[]): PrismaClient & { _debug: FakeDbDebug } {
+  const recognitions: FakeScreenshotRecognitionRow[] = [];
+  const verifications: FakeScreenshotVerificationRow[] = [];
+  let nextId = 1;
+  let recognitionCreateAttempts = 0;
+  let verificationCreateCount = 0;
+
   return {
     player: {
       findUnique: async ({ where }: { where: { telegramId: string } }) => {
@@ -57,10 +104,75 @@ function fakeDb(players: FakePlayerRow[]): PrismaClient {
         return found ? { id: found.id } : null;
       },
     },
-  } as unknown as PrismaClient;
+    screenshotRecognition: {
+      findUnique: async ({
+        where,
+      }: {
+        where: { playerId_imageHash: { playerId: string; imageHash: string } };
+      }) => {
+        const { playerId, imageHash } = where.playerId_imageHash;
+        return recognitions.find((r) => r.playerId === playerId && r.imageHash === imageHash) ?? null;
+      },
+      create: async ({
+        data,
+      }: {
+        data: { playerId: string; imageHash: string; parsedBet: unknown; ocrText: string | null };
+      }) => {
+        recognitionCreateAttempts += 1;
+        const conflict = recognitions.find((r) => r.playerId === data.playerId && r.imageHash === data.imageHash);
+        if (conflict) throw screenshotRecognitionUniqueViolation();
+
+        const row: FakeScreenshotRecognitionRow = {
+          id: `sr-${nextId++}`,
+          playerId: data.playerId,
+          imageHash: data.imageHash,
+          parsedBet: data.parsedBet,
+          ocrText: data.ocrText ?? null,
+          createdAt: new Date(),
+        };
+        recognitions.push(row);
+        return row;
+      },
+    },
+    screenshotVerification: {
+      findFirst: async ({
+        where,
+      }: {
+        where: { recognitionId: string; expiresAt: { gt: Date } };
+      }) => {
+        const matches = verifications
+          .filter((v) => v.recognitionId === where.recognitionId && v.expiresAt.getTime() > where.expiresAt.gt.getTime())
+          .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+        return matches[0] ?? null;
+      },
+      create: async ({
+        data,
+      }: {
+        data: { recognitionId: string; preview: unknown; previewToken: string | null; createdAt: Date; expiresAt: Date };
+      }) => {
+        verificationCreateCount += 1;
+        const row: FakeScreenshotVerificationRow = {
+          id: `sv-${nextId++}`,
+          recognitionId: data.recognitionId,
+          preview: data.preview,
+          previewToken: data.previewToken ?? null,
+          createdAt: data.createdAt,
+          expiresAt: data.expiresAt,
+        };
+        verifications.push(row);
+        return row;
+      },
+    },
+    _debug: {
+      recognitions,
+      verifications,
+      recognitionCreateAttempts: () => recognitionCreateAttempts,
+      verificationCreateCount: () => verificationCreateCount,
+    },
+  } as unknown as PrismaClient & { _debug: FakeDbDebug };
 }
 
-function registeredDb(): PrismaClient {
+function registeredDb(): PrismaClient & { _debug: FakeDbDebug } {
   return fakeDb([{ id: PLAYER_ID, telegramId: String(PLAYER_TELEGRAM_ID) }]);
 }
 
@@ -658,7 +770,9 @@ test("screenshot preview: a large full-screen-looking image with a detected regi
     "crop_applied",
     "ocr_succeeded",
     "parser_succeeded",
+    "recognition_created",
     "odds_verification_succeeded",
+    "verification_created",
     "screenshot_preview_completed",
   ]);
   const regionEvent = events.find((e) => e.event === "region_detection_found")!;
@@ -699,7 +813,9 @@ test("screenshot preview: a large image where no region is found still succeeds,
       "region_detection_not_found",
       "ocr_succeeded",
       "parser_succeeded",
+      "recognition_created",
       "odds_verification_succeeded",
+      "verification_created",
       "screenshot_preview_completed",
     ],
   );
@@ -729,7 +845,9 @@ test("screenshot preview: region detection timing out still succeeds via full-im
       "region_detection_timeout",
       "ocr_succeeded",
       "parser_succeeded",
+      "recognition_created",
       "odds_verification_succeeded",
+      "verification_created",
       "screenshot_preview_completed",
     ],
   );
@@ -773,7 +891,9 @@ test("screenshot preview: an invalid detected region falls back to full-image OC
       "region_detection_invalid",
       "ocr_succeeded",
       "parser_succeeded",
+      "recognition_created",
       "odds_verification_succeeded",
+      "verification_created",
       "screenshot_preview_completed",
     ],
   );
@@ -800,7 +920,9 @@ test("screenshot preview: a successful request logs the full expected event sequ
     "region_detection_skipped",
     "ocr_succeeded",
     "parser_succeeded",
+    "recognition_created",
     "odds_verification_succeeded",
+    "verification_created",
     "screenshot_preview_completed",
   ]);
 
@@ -1254,4 +1376,246 @@ test("screenshot preview: INVALID_IMAGE_SIGNATURE is unchanged and does not cons
     baseOptions({ rateLimiter: limiter }),
   );
   assert.equal(followUp.status, 200, "quota must not have been consumed by the invalid-signature rejection");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Stage 4.2B3 — persistent recognition & verification snapshot             */
+/* -------------------------------------------------------------------------- */
+
+function buildRequestWithFields(
+  initData: string,
+  fileBytes: Uint8Array,
+  mimeType: string,
+  extraFields: Record<string, string> = {},
+  filename = "slip.jpg",
+): NextRequest {
+  const file = new File([fileBytes], filename, { type: mimeType });
+  const formData = new FormData();
+  formData.set("image", file, filename);
+  for (const [key, value] of Object.entries(extraFields)) {
+    formData.set(key, value);
+  }
+
+  return new NextRequest("https://example.com/api/miniapp/bets/screenshot/preview", {
+    method: "POST",
+    headers: { authorization: `tma ${initData}` },
+    body: formData,
+  });
+}
+
+function countingOcrProvider(rawText: string): { provider: OcrProvider; count: () => number } {
+  let calls = 0;
+  const provider = fakeOcrProvider(() => {
+    calls += 1;
+    return ocrSuccess(rawText);
+  });
+  return { provider, count: () => calls };
+}
+
+function countingParseBetSlip(result: ParseBetSlipResult): {
+  parseBetSlip: typeof import("@/lib/ai/betParser").parseBetSlipMessage;
+  count: () => number;
+} {
+  let calls = 0;
+  const parseBetSlip = (async () => {
+    calls += 1;
+    return result;
+  }) as typeof import("@/lib/ai/betParser").parseBetSlipMessage;
+  return { parseBetSlip, count: () => calls };
+}
+
+test("Stage 4.2B3: the same image uploaded twice reuses recognition — OCR and the AI parser run only once", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const db = registeredDb();
+  const ocr = countingOcrProvider("Real Madrid vs Barcelona\nReal Madrid Win\nOdds 1.9\nStake 50");
+  const parser = countingParseBetSlip(singleSlip());
+
+  const first = await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ db, ocrProvider: ocr.provider, parseBetSlip: parser.parseBetSlip }),
+  );
+  assert.equal(first.status, 200);
+
+  const second = await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ db, ocrProvider: ocr.provider, parseBetSlip: parser.parseBetSlip }),
+  );
+  assert.equal(second.status, 200);
+
+  assert.equal(ocr.count(), 1, "OCR must not run again for the same image");
+  assert.equal(parser.count(), 1, "the AI parser must not run again for the same image");
+  assert.equal(db._debug.recognitions.length, 1);
+});
+
+test("Stage 4.2B3: recognition reuse logs recognition_reused on the second call, recognition_created only on the first", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const db = registeredDb();
+
+  await handleScreenshotPreview(buildRequest(initData, jpegBytes(), "image/jpeg"), baseOptions({ db }));
+  const firstEvents = parsedLogEvents().map((e) => e.event);
+  assert.ok(firstEvents.includes("recognition_created"));
+  assert.ok(!firstEvents.includes("recognition_reused"));
+
+  loggedLines = [];
+  await handleScreenshotPreview(buildRequest(initData, jpegBytes(), "image/jpeg"), baseOptions({ db }));
+  const secondEvents = parsedLogEvents().map((e) => e.event);
+  assert.ok(secondEvents.includes("recognition_reused"));
+  assert.ok(!secondEvents.includes("recognition_created"));
+  assert.ok(!secondEvents.includes("ocr_succeeded"), "OCR must not run on a recognition cache hit");
+  assert.ok(!secondEvents.includes("parser_succeeded"), "the parser must not run on a recognition cache hit");
+});
+
+test("Stage 4.2B3: a second identical upload within the verification TTL reuses the verification — odds are not re-checked", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const db = registeredDb();
+  let verifyCallCount = 0;
+  const countingVerifyOddsFn: BuildBetSlipPreviewOptions["verifyOddsFn"] = async () => {
+    verifyCallCount += 1;
+    return fakeVerifyOddsFn();
+  };
+
+  const first = await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ db, verifyOddsFn: countingVerifyOddsFn }),
+  );
+  const second = await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ db, verifyOddsFn: countingVerifyOddsFn }),
+  );
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(verifyCallCount, 1, "odds must be checked only once while the verification is still fresh");
+  assert.equal(db._debug.verificationCreateCount(), 1);
+
+  const firstBody = await first.json();
+  const secondBody = await second.json();
+  // Backward compatibility: the reused response has the exact same shape
+  // and content as a freshly-computed one, including the same previewToken.
+  assert.deepEqual(secondBody, firstBody);
+});
+
+test("Stage 4.2B3: once the verification TTL has elapsed, the next request creates a new verification — odds ARE re-checked", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const db = registeredDb();
+  let verifyCallCount = 0;
+  const countingVerifyOddsFn: BuildBetSlipPreviewOptions["verifyOddsFn"] = async () => {
+    verifyCallCount += 1;
+    return fakeVerifyOddsFn();
+  };
+
+  await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ db, verifyOddsFn: countingVerifyOddsFn, verificationTtlMs: 5 }),
+  );
+  assert.equal(verifyCallCount, 1);
+
+  await new Promise((resolve) => setTimeout(resolve, 20)); // comfortably past the 5ms TTL
+
+  const second = await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ db, verifyOddsFn: countingVerifyOddsFn, verificationTtlMs: 5 }),
+  );
+
+  assert.equal(second.status, 200);
+  assert.equal(verifyCallCount, 2, "odds must be re-checked once the previous verification has expired");
+  assert.equal(db._debug.verificationCreateCount(), 2);
+  // Recognition itself is completely unaffected by verification expiry.
+  assert.equal(db._debug.recognitionCreateAttempts(), 1);
+});
+
+test("Stage 4.2B3: explicit Refresh Odds forces a new verification even well within the TTL, without re-running OCR/parser", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const db = registeredDb();
+  const ocr = countingOcrProvider("Real Madrid vs Barcelona\nReal Madrid Win\nOdds 1.9\nStake 50");
+  let verifyCallCount = 0;
+  const countingVerifyOddsFn: BuildBetSlipPreviewOptions["verifyOddsFn"] = async () => {
+    verifyCallCount += 1;
+    return fakeVerifyOddsFn();
+  };
+
+  await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ db, ocrProvider: ocr.provider, verifyOddsFn: countingVerifyOddsFn }),
+  );
+  assert.equal(verifyCallCount, 1);
+
+  const refreshed = await handleScreenshotPreview(
+    buildRequestWithFields(initData, jpegBytes(), "image/jpeg", { refresh: "true" }),
+    baseOptions({ db, ocrProvider: ocr.provider, verifyOddsFn: countingVerifyOddsFn }),
+  );
+
+  assert.equal(refreshed.status, 200);
+  assert.equal(verifyCallCount, 2, "Refresh Odds must force a brand-new odds check, ignoring the still-valid TTL");
+  assert.equal(db._debug.verificationCreateCount(), 2);
+  // Recognition is immutable — Refresh Odds never touches it, and OCR never re-runs.
+  assert.equal(db._debug.recognitionCreateAttempts(), 1);
+  assert.equal(ocr.count(), 1);
+
+  const events = parsedLogEvents().map((e) => e.event);
+  assert.ok(events.includes("verification_created"));
+  assert.ok(!events.includes("verification_reused"));
+});
+
+test("Stage 4.2B3: two genuinely different images for the same player create two separate recognitions, never sharing a cache hit", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const db = registeredDb();
+
+  await handleScreenshotPreview(
+    buildRequest(initData, realJpegBytes, "image/jpeg"),
+    baseOptions({ db, parseBetSlip: fakeParseBetSlip(singleSlip()) }),
+  );
+  await handleScreenshotPreview(
+    buildRequest(initData, realPngBytes, "image/png", "slip.png"),
+    baseOptions({ db, parseBetSlip: fakeParseBetSlip(singleSlip({ selections: [
+      { sport: "Football", event: "Inter vs Milan", market: null, selection: "Inter Win", submittedOdds: 2.1 },
+    ] })) }),
+  );
+
+  assert.equal(db._debug.recognitions.length, 2);
+  assert.notEqual(db._debug.recognitions[0].imageHash, db._debug.recognitions[1].imageHash);
+});
+
+test("Stage 4.2B3: reopening the preview for an already-recognized image never triggers OCR again, even on a fresh verification (TTL expired)", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const db = registeredDb();
+  const ocr = countingOcrProvider("Real Madrid vs Barcelona\nReal Madrid Win\nOdds 1.9\nStake 50");
+
+  await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ db, ocrProvider: ocr.provider, verificationTtlMs: 5 }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  // "Reopening the preview" — verification TTL has lapsed (so odds DO get
+  // re-checked), but this must never re-trigger OCR: recognition is a
+  // completely separate, immutable concern.
+  await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ db, ocrProvider: ocr.provider, verificationTtlMs: 5 }),
+  );
+
+  assert.equal(ocr.count(), 1);
+  assert.equal(db._debug.recognitionCreateAttempts(), 1);
+  assert.equal(db._debug.verificationCreateCount(), 2);
+});
+
+test("Stage 4.2B3: two concurrent uploads of the same brand-new image never create more than one recognition row", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const db = registeredDb();
+
+  const [resultA, resultB] = await Promise.all([
+    handleScreenshotPreview(buildRequest(initData, jpegBytes(), "image/jpeg"), baseOptions({ db })),
+    handleScreenshotPreview(buildRequest(initData, jpegBytes(), "image/jpeg"), baseOptions({ db })),
+  ]);
+
+  assert.equal(resultA.status, 200);
+  assert.equal(resultB.status, 200);
+  assert.equal(db._debug.recognitions.length, 1, "exactly one recognition must exist regardless of how many requests raced to create it");
+
+  const bodyA = await resultA.json();
+  const bodyB = await resultB.json();
+  // Both concurrent callers must see the SAME recognized bet content —
+  // neither silently got a different, discarded parse.
+  assert.deepEqual(bodyA.preview.selections, bodyB.preview.selections);
 });
