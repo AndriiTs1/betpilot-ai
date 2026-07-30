@@ -200,44 +200,98 @@ type EventMatchResult =
   | { readonly kind: "NOT_FOUND" }
   | { readonly kind: "AMBIGUOUS" };
 
+// Bugfix (production incident, single-team query e.g. "Arsenal" with no
+// stated opponent): the previous no-teams branch scored the query against
+// the CONCATENATED "home away" string, so the opponent's own name words
+// inflated the comparison's denominator and mathematically capped the score
+// at 1/(number of team-name words) — always below EVENT_MATCH_THRESHOLD for
+// any two-word-or-longer opponent, even for a perfect single-team match.
+// Fixed by scoring the query against home and away SEPARATELY and taking
+// the max — exactly how the two-teams branch already treats forward/backward
+// pairing, just for one side instead of two.
+interface EventCandidate {
+  readonly event: OddsApiEvent;
+  readonly score: number;
+  // Exact, whole-string normalized equality — the strongest possible
+  // signal (req. 7), checked structurally rather than inferred from score
+  // alone: two different candidates can both reach score 1.0 (all words
+  // fuzzy-matched) without either being a literal exact name match, and an
+  // exact match must still win over such a candidate.
+  readonly isExact: boolean;
+  readonly isFuture: boolean;
+}
+
+function isFutureEvent(event: OddsApiEvent): boolean {
+  if (!event.commence_time) return false;
+  const ms = Date.parse(event.commence_time);
+  if (Number.isNaN(ms)) return false;
+  return ms > Date.now();
+}
+
 function findMatchingEvent(events: OddsApiEvent[], betEvent: string): EventMatchResult {
   const teams = splitEventTeams(betEvent);
-
-  let best: { event: OddsApiEvent; score: number } | null = null;
-  // True only while `best` has at least one OTHER, genuinely different
-  // event (distinct provider id) tied at the exact same score — reset
-  // whenever a strictly higher score dethrones it.
-  let tiedWithBest = false;
+  const candidates: EventCandidate[] = [];
 
   for (const event of events) {
     const home = normalizeTeamName(event.home_team);
     const away = normalizeTeamName(event.away_team);
 
     let score: number;
+    let isExact: boolean;
 
     if (teams) {
+      // Unchanged from before this fix — Bet.event order (player's
+      // team1/team2) may not match the API's home/away order.
       const [t1, t2] = teams.map(normalizeTeamName);
-      // Bet.event order (player's team1/team2) may not match the API's home/away order.
       const forward = (overlapScore(t1, home) + overlapScore(t2, away)) / 2;
       const backward = (overlapScore(t1, away) + overlapScore(t2, home)) / 2;
       score = Math.max(forward, backward);
+      isExact = (t1 === home && t2 === away) || (t1 === away && t2 === home);
     } else {
-      score = overlapScore(normalizeTeamName(betEvent), `${home} ${away}`);
+      // The fix: compare the single-team query against home and away
+      // independently, never against their concatenation.
+      const query = normalizeTeamName(betEvent);
+      const homeScore = overlapScore(query, home);
+      const awayScore = overlapScore(query, away);
+      score = Math.max(homeScore, awayScore);
+      isExact = query === home || query === away;
     }
 
     if (score < EVENT_MATCH_THRESHOLD) continue;
 
-    if (!best || score > best.score) {
-      best = { event, score };
-      tiedWithBest = false;
-    } else if (score === best.score && event.id !== best.event.id) {
-      tiedWithBest = true;
-    }
+    candidates.push({ event, score, isExact, isFuture: isFutureEvent(event) });
   }
 
-  if (!best) return { kind: "NOT_FOUND" };
-  if (tiedWithBest) return { kind: "AMBIGUOUS" };
-  return { kind: "FOUND", event: best.event };
+  if (candidates.length === 0) return { kind: "NOT_FOUND" };
+
+  // Tier 1 (req. 7) — an exact normalized name match beats every fuzzy
+  // candidate outright, regardless of raw score.
+  const exactCandidates = candidates.filter((c) => c.isExact);
+  let pool = exactCandidates.length > 0 ? exactCandidates : candidates;
+
+  // Tier 2 (req. 7) — highest score within the pool; only true ties at the
+  // max score continue past this point (mirrors the old exact-equality tie
+  // rule, never a "close enough" fuzzy tolerance).
+  const maxScore = Math.max(...pool.map((c) => c.score));
+  pool = pool.filter((c) => c.score === maxScore);
+
+  // Tier 3 (req. 7 & 8) — a future event beats a past/unknown one; a past
+  // event is never allowed to win against a future alternative. If none of
+  // the tied candidates is confidently future (e.g. no commence_time at
+  // all, as in most existing fixtures), the pool is left as-is — there is
+  // nothing to prefer one over the other for.
+  const futureInPool = pool.filter((c) => c.isFuture);
+  if (futureInPool.length > 0) {
+    pool = futureInPool;
+  }
+
+  // Defense-in-depth: the same provider event id should never itself cause
+  // a false ambiguity (callers already dedupe by id before this function
+  // runs, but this function must not rely on that alone).
+  const distinctIds = new Set(pool.map((c) => c.event.id));
+  if (distinctIds.size > 1) return { kind: "AMBIGUOUS" };
+
+  return { kind: "FOUND", event: pool[0].event };
 }
 
 // Step 16B — real-world provider data quality issue, confirmed live: The

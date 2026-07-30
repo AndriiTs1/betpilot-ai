@@ -1059,3 +1059,118 @@ test("verifyOdds: pre-existing Cyrillic TEAM_ALIASES entries still match the pro
   assert.equal(result.matched, true);
   assert.equal(result.sourceOdds, 1.9);
 });
+
+/* -------------------------------------------------------------------------- */
+/* Production bugfix regression — single-team event matching                  */
+/* -------------------------------------------------------------------------- */
+// Root cause: findMatchingEvent()'s no-explicit-opponent branch used to score
+// the query against the CONCATENATED "home away" string, so the opponent's
+// own name words inflated the denominator and capped the score below
+// EVENT_MATCH_THRESHOLD for any multi-word opponent — even for a perfect
+// single-team match (e.g. "Arsenal" against "Arsenal vs Coventry City").
+// Fixed by scoring the query against home/away separately (max of the two),
+// plus an exact-match/future-preference ranking tier so multiple candidates
+// are never silently guessed.
+
+function footballFixtures(soccerEplEvents: unknown[]): Record<string, unknown[]> {
+  const fixtures = Object.fromEntries(ALL_FOOTBALL_SPORT_KEYS.map((key) => [key, []])) as Record<string, unknown[]>;
+  fixtures.soccer_epl = soccerEplEvents;
+  return fixtures;
+}
+
+test("Regression: single-team query 'Arsenal' finds Arsenal vs Coventry City", async () => {
+  mockEventsBySportKey(footballFixtures([h2hEventWithId("evt-arsenal-1", "Arsenal", "Coventry City", standardOutcomes("Arsenal", "Coventry City", 1.16, 15.98))]));
+
+  const result = await verifyOdds(bet({ sport: "football", event: "Arsenal", selection: "Arsenal Win", odds: null }));
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(result.sourceOdds, 1.16);
+});
+
+test("Regression: single-team query 'Coventry' finds the same Arsenal vs Coventry City event", async () => {
+  mockEventsBySportKey(footballFixtures([h2hEventWithId("evt-arsenal-2", "Arsenal", "Coventry City", standardOutcomes("Arsenal", "Coventry City", 1.16, 15.98))]));
+
+  const result = await verifyOdds(bet({ sport: "football", event: "Coventry", selection: "Coventry City Win", odds: null }));
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(result.sourceOdds, 15.98);
+});
+
+test("Regression: a multi-word single-team query ('Manchester United') works, not only single-word team names", async () => {
+  mockEventsBySportKey(footballFixtures([h2hEventWithId("evt-mu-1", "Manchester United", "Chelsea", standardOutcomes("Manchester United", "Chelsea", 2.0, 3.5))]));
+
+  const result = await verifyOdds(bet({ sport: "football", event: "Manchester United", selection: "Manchester United Win", odds: null }));
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(result.sourceOdds, 2.0);
+});
+
+test("Regression: a weak/unrelated single-team query stays below threshold — NOT_FOUND, not guessed", async () => {
+  mockEventsBySportKey(footballFixtures([h2hEventWithId("evt-arsenal-3", "Arsenal", "Coventry City", standardOutcomes("Arsenal", "Coventry City", 1.16, 15.98))]));
+
+  const result = await verifyOdds(bet({ sport: "football", event: "West Ham", selection: "West Ham Win", odds: null }));
+
+  assert.equal(result.matched, false);
+  assert.match(result.note ?? "", /No matching event found/);
+});
+
+test("Regression: an exact single-team match wins over a weaker fuzzy candidate, never flagged ambiguous", async () => {
+  mockEventsBySportKey(
+    footballFixtures([
+      // Exact match for "Arsenal".
+      h2hEventWithId("evt-arsenal-exact", "Arsenal", "Coventry City", standardOutcomes("Arsenal", "Coventry City", 1.16, 15.98)),
+      // A different, real club whose name merely CONTAINS "Arsenal" as one
+      // of two words — a genuine fuzzy candidate (score 0.5, clears
+      // threshold) but never a literal exact match.
+      h2hEventWithId("evt-arsenal-sarandi", "Arsenal Sarandi", "River Plate", standardOutcomes("Arsenal Sarandi", "River Plate", 4.0, 1.8)),
+    ]),
+  );
+
+  const result = await verifyOdds(bet({ sport: "football", event: "Arsenal", selection: "Arsenal Win", odds: null }));
+
+  assert.equal(result.matched, true, result.note ?? "expected the exact match to win, not an ambiguity");
+  assert.equal(result.sourceOdds, 1.16, "must resolve to the exact 'Arsenal' match, not 'Arsenal Sarandi'");
+});
+
+test("Regression: two equally exact future matches for the same team name return AMBIGUOUS, never guessed", async () => {
+  const future1 = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  const future2 = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+
+  mockEventsBySportKey(
+    footballFixtures([
+      h2hEventWithId("evt-arsenal-friendly-1", "Arsenal", "Coventry City", standardOutcomes("Arsenal", "Coventry City", 1.16, 15.98), future1),
+      h2hEventWithId("evt-arsenal-friendly-2", "Arsenal", "Girona", standardOutcomes("Arsenal", "Girona", 1.3, 9.0), future2),
+    ]),
+  );
+
+  const result = await verifyOdds(bet({ sport: "football", event: "Arsenal", selection: "Arsenal Win", odds: null }));
+
+  assert.equal(result.matched, false);
+  assert.match(result.note ?? "", /Ambiguous event match/);
+});
+
+test("Regression: a past match never wins over a future match for the same team name", async () => {
+  const past = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const future = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+  mockEventsBySportKey(
+    footballFixtures([
+      h2hEventWithId("evt-arsenal-past", "Arsenal", "Everton", standardOutcomes("Arsenal", "Everton", 1.5, 6.0), past),
+      h2hEventWithId("evt-arsenal-future", "Arsenal", "Coventry City", standardOutcomes("Arsenal", "Coventry City", 1.16, 15.98), future),
+    ]),
+  );
+
+  const result = await verifyOdds(bet({ sport: "football", event: "Arsenal", selection: "Arsenal Win", odds: null }));
+
+  assert.equal(result.matched, true, result.note ?? "expected the future match to be selected");
+  assert.equal(result.sourceOdds, 1.16, "must resolve to the FUTURE Arsenal vs Coventry City match, not the past Arsenal vs Everton one");
+});
+
+test("Regression: an explicit two-team query ('Team A vs Team B') is completely unaffected by the single-team fix", async () => {
+  mockEventsBySportKey(footballFixtures([h2hEventWithId("evt-arsenal-4", "Arsenal", "Coventry City", standardOutcomes("Arsenal", "Coventry City", 1.16, 15.98))]));
+
+  const result = await verifyOdds(bet({ sport: "football", event: "Arsenal vs Coventry City", selection: "Arsenal Win", odds: null }));
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(result.sourceOdds, 1.16);
+});
