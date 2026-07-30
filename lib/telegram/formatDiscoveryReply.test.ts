@@ -6,6 +6,7 @@ import type { ResolveQueryResult, ResolvedEventCandidate } from "@/lib/odds/disc
 
 function makeCandidate(overrides: Partial<ResolvedEventCandidate> = {}): ResolvedEventCandidate {
   return {
+    provider: "THE_ODDS_API",
     providerEventId: "secret-provider-event-id-12345",
     sportKey: "soccer_epl",
     league: "English Premier League",

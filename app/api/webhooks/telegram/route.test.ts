@@ -648,6 +648,7 @@ function uniqueFindTelegramId(): string {
 
 function makeCandidate(overrides: Partial<ResolvedEventCandidate> = {}): ResolvedEventCandidate {
   return {
+    provider: "THE_ODDS_API",
     providerEventId: "evt-route-1",
     sportKey: "soccer_epl",
     league: "English Premier League",

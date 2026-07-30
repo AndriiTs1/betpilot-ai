@@ -10,12 +10,13 @@
 import type { CanonicalEvent, CanonicalParticipant, CanonicalSelection, MarketType, Period, Sport, SelectionType } from "./domain";
 import type { VerificationReasonCode, VerificationResult } from "./verification";
 
-// Only one provider exists today. This union is deliberately a closed set
-// (not a bare `string`) so a typo can't silently create a new "provider"
-// at compile time — extending it for a second provider is a pure-additive
-// change, per docs/ODDS_PROVIDER_DESIGN.md Section 2's "a second provider
-// must be addable without touching preview business rules."
-export type ProviderName = "THE_ODDS_API";
+// Stage 10 — extended to a second real provider (Sportmonks, football
+// vertical slice). This union is deliberately a closed set (not a bare
+// `string`) so a typo can't silently create a new "provider" at compile
+// time — this is the pure-additive change docs/ODDS_PROVIDER_DESIGN.md
+// Section 2 anticipated ("a second provider must be addable without
+// touching preview business rules").
+export type ProviderName = "THE_ODDS_API" | "SPORTMONKS";
 
 /* -------------------------------------------------------------------------- */
 /* Provider references (never appear on CanonicalEvent/CanonicalSelection)    */

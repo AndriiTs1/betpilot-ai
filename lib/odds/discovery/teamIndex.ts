@@ -26,7 +26,7 @@
 // Discovery Engine stage — independent state per instance, DI for the
 // injected EventCatalog dependency so tests never touch the real network.
 
-import type { ProviderEventCandidate } from "@/lib/odds/oddsProvider";
+import type { ProviderEventCandidate, ProviderName } from "@/lib/odds/oddsProvider";
 import { eventCatalog as defaultEventCatalog, type EventCatalog, type EventCatalogFailureReason, type GetEventCatalogOptions } from "./eventCatalog";
 
 export type TeamRole = "HOME" | "AWAY";
@@ -39,6 +39,13 @@ export interface TeamIndexEntry {
   // resolution is explicitly Stage 7's job, not this one's.
   readonly canonicalName: string;
   readonly normalizedName: string;
+  // Stage 10 — which provider this occurrence came from. Combined with
+  // providerEventId this forms the real, composite event identity
+  // (provider, providerEventId): providerEventId alone is only unique
+  // within one provider's own ID namespace, never guaranteed unique across
+  // providers (see lib/odds/discovery/candidateResolver.ts's own
+  // composite-key joins, which this field exists to support).
+  readonly provider: ProviderName;
   readonly providerEventId: string;
   readonly sportKey: string;
   readonly league: string | null;
@@ -116,6 +123,7 @@ function extractEntriesFromCandidate(candidate: ProviderEventCandidate): TeamInd
     {
       canonicalName: home.name,
       normalizedName: normalizeTeamNameForIndex(home.name),
+      provider: reference.provider,
       providerEventId: reference.eventId,
       sportKey,
       league,
@@ -124,6 +132,7 @@ function extractEntriesFromCandidate(candidate: ProviderEventCandidate): TeamInd
     {
       canonicalName: away.name,
       normalizedName: normalizeTeamNameForIndex(away.name),
+      provider: reference.provider,
       providerEventId: reference.eventId,
       sportKey,
       league,

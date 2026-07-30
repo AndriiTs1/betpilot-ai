@@ -18,6 +18,7 @@ function entry(overrides: Partial<TeamIndexEntry> = {}): TeamIndexEntry {
   return {
     canonicalName: "Arsenal",
     normalizedName: "arsenal",
+    provider: "THE_ODDS_API",
     providerEventId: "evt-1",
     sportKey: "soccer_epl",
     league: "Premier League",

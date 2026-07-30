@@ -64,6 +64,7 @@ test("build(): each entry carries the minimum required fields", async () => {
   assert.deepEqual(home, {
     canonicalName: "Arsenal",
     normalizedName: "arsenal",
+    provider: "THE_ODDS_API",
     providerEventId: "evt-42",
     sportKey: "soccer_epl",
     league: "Premier League",
@@ -72,6 +73,7 @@ test("build(): each entry carries the minimum required fields", async () => {
   assert.deepEqual(away, {
     canonicalName: "Chelsea",
     normalizedName: "chelsea",
+    provider: "THE_ODDS_API",
     providerEventId: "evt-42",
     sportKey: "soccer_epl",
     league: "Premier League",

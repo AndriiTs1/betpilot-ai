@@ -24,6 +24,17 @@ import type { TeamIndex, TeamIndexEntry, BuildTeamIndexResult } from "./teamInde
 import type { TeamAliasIndex, BuildTeamAliasIndexResult } from "./teamAliasIndex";
 import { teamIndex as defaultTeamIndex } from "./teamIndex";
 import { teamAliasIndex as defaultTeamAliasIndex } from "./teamAliasIndex";
+import type { ProviderName } from "@/lib/odds/oddsProvider";
+
+// Stage 10 — the real, composite event identity. providerEventId alone is
+// only unique within one provider's own ID namespace; a Team Index that
+// ever held entries from more than one provider could otherwise conflate
+// two different real-world events that happen to share a raw ID. Every
+// join/dedup below keys on this composite string, never on providerEventId
+// alone.
+function eventKey(provider: ProviderName, providerEventId: string): string {
+  return `${provider}:${providerEventId}`;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Public types                                                               */
@@ -40,6 +51,9 @@ export type CandidateMatchMethod = "EXACT" | "NORMALIZED" | "CURATED_ALIAS" | "F
 // sides of a given providerEventId by filtering that list itself — no
 // change to Team Index was needed or made.
 export interface ResolvedEventCandidate {
+  // Stage 10 — see eventKey() above: providerEventId alone is not a
+  // globally unique identity, only (provider, providerEventId) together is.
+  readonly provider: ProviderName;
   readonly providerEventId: string;
   readonly sportKey: string;
   readonly league: string | null;
@@ -279,6 +293,7 @@ function weakerMethod(a: CandidateMatchMethod, b: CandidateMatchMethod): Candida
 }
 
 function buildCandidate(
+  provider: ProviderName,
   providerEventId: string,
   method: CandidateMatchMethod,
   score: number,
@@ -286,11 +301,13 @@ function buildCandidate(
   diagnostics: readonly string[],
   teamIndexInstance: Pick<TeamIndex, "getAllTeams">,
 ): ResolvedEventCandidate {
-  const related = teamIndexInstance.getAllTeams().filter((e) => e.providerEventId === providerEventId);
+  const key = eventKey(provider, providerEventId);
+  const related = teamIndexInstance.getAllTeams().filter((e) => eventKey(e.provider, e.providerEventId) === key);
   const home = related.find((e) => e.role === "HOME")?.canonicalName ?? null;
   const away = related.find((e) => e.role === "AWAY")?.canonicalName ?? null;
 
   return {
+    provider,
     providerEventId,
     sportKey: related[0]?.sportKey ?? "",
     league: related[0]?.league ?? null,
@@ -311,9 +328,12 @@ function buildCandidatesFromResolution(
   resolution: PartResolution,
   teamIndexInstance: Pick<TeamIndex, "getAllTeams">,
 ): ResolvedEventCandidate[] {
-  const uniqueEventIds = [...new Set(resolution.entries.map((e) => e.providerEventId))];
-  return uniqueEventIds.map((id) =>
-    buildCandidate(id, resolution.matchMethod, resolution.score, resolution.matchedTeamNames, resolution.diagnostics, teamIndexInstance),
+  const seen = new Map<string, { provider: ProviderName; providerEventId: string }>();
+  for (const e of resolution.entries) {
+    seen.set(eventKey(e.provider, e.providerEventId), { provider: e.provider, providerEventId: e.providerEventId });
+  }
+  return [...seen.values()].map(({ provider, providerEventId }) =>
+    buildCandidate(provider, providerEventId, resolution.matchMethod, resolution.score, resolution.matchedTeamNames, resolution.diagnostics, teamIndexInstance),
   );
 }
 
@@ -321,8 +341,9 @@ function dedupeCandidatesByEventId(candidates: readonly ResolvedEventCandidate[]
   const seen = new Set<string>();
   const result: ResolvedEventCandidate[] = [];
   for (const candidate of candidates) {
-    if (seen.has(candidate.providerEventId)) continue;
-    seen.add(candidate.providerEventId);
+    const key = eventKey(candidate.provider, candidate.providerEventId);
+    if (seen.has(key)) continue;
+    seen.add(key);
     result.push(candidate);
   }
   return result;
@@ -419,11 +440,11 @@ export function createCandidateResolver(options: CreateCandidateResolverOptions 
       };
     }
 
-    const firstEventIds = new Set(firstResolution.entries.map((e) => e.providerEventId));
-    const secondEventIds = new Set(secondResolution.entries.map((e) => e.providerEventId));
-    const commonEventIds = [...firstEventIds].filter((id) => secondEventIds.has(id));
+    const firstByKey = new Map(firstResolution.entries.map((e) => [eventKey(e.provider, e.providerEventId), e] as const));
+    const secondKeys = new Set(secondResolution.entries.map((e) => eventKey(e.provider, e.providerEventId)));
+    const commonEntries = [...firstByKey.values()].filter((e) => secondKeys.has(eventKey(e.provider, e.providerEventId)));
 
-    if (commonEventIds.length === 0) {
+    if (commonEntries.length === 0) {
       return { kind: "NOT_FOUND", reason: `no common event found for "${rawFirst}" and "${rawSecond}"` };
     }
 
@@ -432,8 +453,8 @@ export function createCandidateResolver(options: CreateCandidateResolverOptions 
     const combinedNames = [...new Set([...firstResolution.matchedTeamNames, ...secondResolution.matchedTeamNames])];
     const combinedDiagnostics = [...firstResolution.diagnostics, ...secondResolution.diagnostics];
 
-    const candidates = commonEventIds.map((id) =>
-      buildCandidate(id, combinedMethod, combinedScore, combinedNames, combinedDiagnostics, teamIndexInstance),
+    const candidates = commonEntries.map((e) =>
+      buildCandidate(e.provider, e.providerEventId, combinedMethod, combinedScore, combinedNames, combinedDiagnostics, teamIndexInstance),
     );
 
     if (candidates.length === 1) {

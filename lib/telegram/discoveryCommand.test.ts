@@ -17,6 +17,7 @@ test.afterEach(() => {
 
 function makeCandidate(overrides: Partial<ResolvedEventCandidate> = {}): ResolvedEventCandidate {
   return {
+    provider: "THE_ODDS_API",
     providerEventId: "evt-1",
     sportKey: "soccer_epl",
     league: "English Premier League",

@@ -4,6 +4,12 @@ import type { PrismaClient } from "@/lib/generated/prisma/client";
 import { verifyInitData } from "@/lib/telegram/verifyInitData";
 import { parseBetSlipMessage } from "@/lib/ai/betParser";
 import { buildBetSlipPreview, BetSlipValidationError, type BuildBetSlipPreviewOptions } from "@/lib/bets/buildBetSlipPreview";
+import {
+  buildSportmonksFootballPreview,
+  isSportmonksFootballPreviewEnabled,
+  type BuildSportmonksFootballPreviewOptions,
+  type SportmonksFootballPreviewResult,
+} from "@/lib/bets/buildSportmonksFootballPreview";
 import { createRequestRateLimiter, safeCheckAndRecord, type RequestRateLimiter } from "@/lib/rateLimit/requestRateLimiter";
 import { rateLimitedResponse } from "@/lib/rateLimit/rateLimitResponse";
 
@@ -62,6 +68,47 @@ export interface HandleTextPreviewOptions {
   parseBetSlip?: typeof parseBetSlipMessage;
   verifyOddsFn?: BuildBetSlipPreviewOptions["verifyOddsFn"];
   rateLimiter?: RequestRateLimiter;
+  // Stage 10 — DI seam for the Sportmonks football vertical slice, same
+  // shape convention as verifyOddsFn above. Production never overrides
+  // this; tests inject fakes so no real Sportmonks network call is ever
+  // reachable from a test.
+  sportmonksPreviewOptions?: BuildSportmonksFootballPreviewOptions;
+}
+
+// Stage 10 — maps every non-SUCCESS, non-NOT_APPLICABLE outcome of the
+// Sportmonks football path to the same {error, detail} response shape this
+// route already uses elsewhere. NOT_APPLICABLE is handled by the caller
+// (falls through to the existing buildBetSlipPreview() pipeline) and never
+// reaches this function.
+function sportmonksFootballErrorResponse(result: Exclude<SportmonksFootballPreviewResult, { kind: "SUCCESS" | "NOT_APPLICABLE" }>): NextResponse {
+  switch (result.kind) {
+    case "TEAM_NOT_FOUND":
+      return NextResponse.json({ error: "EVENT_NOT_FOUND", detail: "Команда или матч не найдены." }, { status: 422 });
+    case "AMBIGUOUS":
+      return NextResponse.json(
+        { error: "AMBIGUOUS_EVENT", detail: "Найдено несколько подходящих событий. Уточните запрос." },
+        { status: 422 },
+      );
+    case "INVALID_QUERY":
+      return NextResponse.json({ error: "INVALID_BET_SLIP", detail: "INVALID_QUERY" }, { status: 422 });
+    case "UNSUPPORTED_SELECTION":
+      return NextResponse.json(
+        { error: "UNSUPPORTED_SELECTION", detail: "Поддерживаются только исходы: победа хозяев, ничья, победа гостей." },
+        { status: 422 },
+      );
+    case "ALREADY_STARTED":
+      return NextResponse.json(
+        { error: "EVENT_ALREADY_STARTED", detail: "Матч уже начался. Выберите другое событие." },
+        { status: 422 },
+      );
+    case "ODDS_UNAVAILABLE":
+      return NextResponse.json(
+        { error: "ODDS_UNAVAILABLE", detail: "Коэффициент на выбранный исход сейчас недоступен." },
+        { status: 422 },
+      );
+    case "FAILED":
+      return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
+  }
 }
 
 export async function handleTextPreview(
@@ -161,6 +208,27 @@ export async function handleTextPreview(
         { error: "PARSE_FAILED", detail: "Unable to understand the bet message" },
         { status: 422 },
       );
+    }
+
+    // Stage 10 — football vertical slice, gated behind
+    // SPORTMONKS_FOOTBALL_PREVIEW_ENABLED (default false: this block is
+    // never reached and behavior is byte-for-byte identical to before this
+    // stage). Routing rule: football SINGLE bets go through Sportmonks
+    // exclusively when the flag is on (never silently falling back to The
+    // Odds API on a Sportmonks-side miss — see
+    // buildSportmonksFootballPreview's own NOT_APPLICABLE vs. typed-failure
+    // distinction); every other sport, and EXPRESS bets, are entirely
+    // unaffected and keep using the existing buildBetSlipPreview() pipeline
+    // below, unchanged.
+    if (isSportmonksFootballPreviewEnabled()) {
+      const sportmonksResult = await buildSportmonksFootballPreview(parsed, options.sportmonksPreviewOptions);
+      if (sportmonksResult.kind === "SUCCESS") {
+        return NextResponse.json({ preview: sportmonksResult.preview, previewToken: null });
+      }
+      if (sportmonksResult.kind !== "NOT_APPLICABLE") {
+        return sportmonksFootballErrorResponse(sportmonksResult);
+      }
+      // NOT_APPLICABLE (not a SINGLE football bet) — falls through below.
     }
 
     let result;

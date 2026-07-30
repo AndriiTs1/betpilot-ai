@@ -8,6 +8,9 @@ import type { ParseBetSlipResult } from "@/lib/ai/betParser";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import type { OddsVerificationInput } from "@/lib/odds/oddsVerifier";
 import { createRequestRateLimiter, type RequestRateLimiter } from "@/lib/rateLimit/requestRateLimiter";
+import type { CandidateResolver, ResolvedEventCandidate } from "@/lib/odds/discovery/candidateResolver";
+import type { SportmonksFixtureByIdResult } from "@/lib/odds/providers/sportmonks/sportmonksFixturesAdapter";
+import type { SportmonksOddsFetchResult } from "@/lib/odds/providers/sportmonks/sportmonksOddsAdapter";
 
 // Step 13B — this route previously had no test file and no DI seam at all
 // (a bare `export async function POST`, unlike its screenshot/preview and
@@ -462,4 +465,348 @@ test("Step 15J.3 (F): a successful preview is completely unaffected by the new t
   const body = await response.json();
   assert.equal(body.preview.type, "SINGLE");
   assert.equal(typeof body.previewToken, "string");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Stage 10 — Sportmonks football vertical slice, feature-flag gated         */
+/* -------------------------------------------------------------------------- */
+// buildSportmonksFootballPreview's own resolution/side-mapping/odds logic is
+// fully covered by lib/bets/buildSportmonksFootballPreview.test.ts against
+// fakes. These tests only prove the ROUTE respects the flag and wires the
+// new path in correctly, without disturbing the existing pipeline.
+
+function juventusCandidate(overrides: Partial<ResolvedEventCandidate> = {}): ResolvedEventCandidate {
+  return {
+    provider: "SPORTMONKS",
+    providerEventId: "19743018",
+    sportKey: "sportmonks:1101",
+    league: "Club Friendlies 1",
+    commenceTime: null,
+    homeTeam: "Juventus",
+    awayTeam: "Nice",
+    matchedTeamNames: ["Juventus"],
+    matchMethod: "EXACT",
+    score: 1,
+    diagnostics: [],
+    ...overrides,
+  };
+}
+
+function fakeSportmonksResolver(overrides: Partial<Pick<CandidateResolver, "buildDependencies" | "resolve">> = {}): Pick<CandidateResolver, "buildDependencies" | "resolve"> {
+  return {
+    buildDependencies: async () => ({ status: "SUCCESS" }),
+    resolve: () => ({ kind: "TEAM_RESOLVED", candidate: juventusCandidate() }),
+    ...overrides,
+  };
+}
+
+function fakeSportmonksFixtureById(): (id: string) => Promise<SportmonksFixtureByIdResult> {
+  return async () => ({
+    status: "SUCCESS",
+    fixture: {
+      provider: "SPORTMONKS",
+      providerEventId: "19743018",
+      sport: "FOOTBALL",
+      leagueId: 1101,
+      leagueName: "Club Friendlies 1",
+      stageName: "Regular Season",
+      homeTeamId: "625",
+      homeTeamName: "Juventus",
+      awayTeamId: "450",
+      awayTeamName: "Nice",
+      commenceTime: "2026-07-31T16:00:00.000Z",
+      stateId: 1,
+    },
+  });
+}
+
+function fakeSportmonksOdds(): (id: string) => Promise<SportmonksOddsFetchResult> {
+  return async () => ({
+    status: "SUCCESS",
+    snapshot: {
+      provider: "SPORTMONKS",
+      providerEventId: "19743018",
+      bookmakerId: "13",
+      bookmakerName: "Coral",
+      marketId: 1,
+      marketName: "Fulltime Result",
+      homeOdds: "1.55",
+      drawOdds: "3.75",
+      awayOdds: "5.00",
+      updatedAt: "2026-07-30 16:47:15",
+    },
+  });
+}
+
+function sportmonksOptions(overrides: Record<string, unknown> = {}) {
+  return {
+    resolver: fakeSportmonksResolver(),
+    fetchFixtureById: fakeSportmonksFixtureById(),
+    fetchOdds: fakeSportmonksOdds(),
+    now: () => Date.parse("2026-07-30T18:00:00Z"),
+    ...overrides,
+  };
+}
+
+test("Stage 10: flag OFF (unset) — a football message uses the existing The Odds API pipeline unchanged", async () => {
+  delete process.env.SPORTMONKS_FOOTBALL_PREVIEW_ENABLED;
+  let sportmonksResolverCalled = false;
+
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const response = await handleTextPreview(
+    buildRequest(initData, { message: "Real Madrid to win vs Barcelona, 1.9, 50" }),
+    baseOptions({
+      sportmonksPreviewOptions: sportmonksOptions({
+        resolver: fakeSportmonksResolver({
+          buildDependencies: async () => {
+            sportmonksResolverCalled = true;
+            return { status: "SUCCESS" };
+          },
+        }),
+      }),
+    }),
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(typeof body.previewToken, "string", "old pipeline still signs a real previewToken");
+  assert.equal(sportmonksResolverCalled, false, "Sportmonks path must never be touched when the flag is off");
+});
+
+test("Stage 10: flag ON — a football SINGLE bet resolves through Sportmonks and returns a null previewToken", async () => {
+  process.env.SPORTMONKS_FOOTBALL_PREVIEW_ENABLED = "true";
+  let oddsApiVerifyCalled = false;
+
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const response = await handleTextPreview(
+    buildRequest(initData, { message: "Juventus победа 100" }),
+    baseOptions({
+      parseBetSlip: fakeParseBetSlip({
+        valid: true,
+        type: "SINGLE",
+        stake: 100,
+        selections: [{ sport: "Football", event: "Juventus", market: null, selection: "Juventus победа", submittedOdds: null }],
+      }),
+      verifyOddsFn: fakeVerifyOddsFn(() => {
+        oddsApiVerifyCalled = true;
+      }),
+      sportmonksPreviewOptions: sportmonksOptions(),
+    }),
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.preview.type, "SINGLE");
+  assert.equal(body.preview.selections[0].event, "Juventus vs Nice");
+  assert.equal(body.preview.selections[0].currentOdds, 1.55);
+  assert.equal(body.previewToken, null, "Sportmonks path must never sign a previewToken");
+  assert.equal(oddsApiVerifyCalled, false, "The Odds API must never be called for a flag-on football SINGLE");
+});
+
+test("Stage 10: flag ON — a non-football bet is completely unaffected and still uses the old pipeline", async () => {
+  process.env.SPORTMONKS_FOOTBALL_PREVIEW_ENABLED = "true";
+  let sportmonksResolverCalled = false;
+
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const response = await handleTextPreview(
+    buildRequest(initData, { message: "Lakers to win vs Celtics, 1.9, 50" }),
+    baseOptions({
+      parseBetSlip: fakeParseBetSlip({
+        valid: true,
+        type: "SINGLE",
+        stake: 50,
+        selections: [{ sport: "Basketball", event: "Lakers vs Celtics", market: null, selection: "Lakers Win", submittedOdds: 1.9 }],
+      }),
+      sportmonksPreviewOptions: sportmonksOptions({
+        resolver: fakeSportmonksResolver({
+          buildDependencies: async () => {
+            sportmonksResolverCalled = true;
+            return { status: "SUCCESS" };
+          },
+        }),
+      }),
+    }),
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(typeof body.previewToken, "string", "non-football still goes through the old, token-signing pipeline");
+  assert.equal(sportmonksResolverCalled, false, "Sportmonks path must never be touched for a non-football sport");
+});
+
+test("Stage 10: flag ON — an EXPRESS bet is completely unaffected (NOT_APPLICABLE falls through)", async () => {
+  process.env.SPORTMONKS_FOOTBALL_PREVIEW_ENABLED = "true";
+
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const response = await handleTextPreview(
+    buildRequest(initData, { message: "Real Madrid win 1.9 and Barcelona win 2.1, express 50" }),
+    baseOptions({
+      parseBetSlip: fakeParseBetSlip({
+        valid: true,
+        type: "EXPRESS",
+        stake: 50,
+        selections: [
+          { sport: "Football", event: "Real Madrid vs X", market: null, selection: "Real Madrid Win", submittedOdds: 1.9 },
+          { sport: "Football", event: "Barcelona vs Y", market: null, selection: "Barcelona Win", submittedOdds: 2.1 },
+        ],
+      }),
+      sportmonksPreviewOptions: sportmonksOptions(),
+    }),
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.preview.type, "EXPRESS");
+});
+
+test("Stage 10: flag ON — team not found via Sportmonks returns a safe 422, never falls back to The Odds API", async () => {
+  process.env.SPORTMONKS_FOOTBALL_PREVIEW_ENABLED = "true";
+  let oddsApiVerifyCalled = false;
+
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const response = await handleTextPreview(
+    buildRequest(initData, { message: "Nonexistent FC to win, 50" }),
+    baseOptions({
+      parseBetSlip: fakeParseBetSlip({
+        valid: true,
+        type: "SINGLE",
+        stake: 50,
+        selections: [{ sport: "Football", event: "Nonexistent FC", market: null, selection: "Nonexistent FC Win", submittedOdds: null }],
+      }),
+      verifyOddsFn: fakeVerifyOddsFn(() => {
+        oddsApiVerifyCalled = true;
+      }),
+      sportmonksPreviewOptions: sportmonksOptions({
+        resolver: fakeSportmonksResolver({ resolve: () => ({ kind: "NOT_FOUND", reason: "x" }) }),
+      }),
+    }),
+  );
+
+  assert.equal(response.status, 422);
+  const body = await response.json();
+  assert.equal(body.error, "EVENT_NOT_FOUND");
+  assert.equal(oddsApiVerifyCalled, false);
+});
+
+test("Stage 10: flag ON — an already-started fixture returns the exact required Russian message", async () => {
+  process.env.SPORTMONKS_FOOTBALL_PREVIEW_ENABLED = "true";
+
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const response = await handleTextPreview(
+    buildRequest(initData, { message: "Juventus победа 100" }),
+    baseOptions({
+      parseBetSlip: fakeParseBetSlip({
+        valid: true,
+        type: "SINGLE",
+        stake: 100,
+        selections: [{ sport: "Football", event: "Juventus", market: null, selection: "Juventus победа", submittedOdds: null }],
+      }),
+      sportmonksPreviewOptions: sportmonksOptions({
+        fetchFixtureById: async () => ({
+          status: "SUCCESS",
+          fixture: {
+            provider: "SPORTMONKS",
+            providerEventId: "19743018",
+            sport: "FOOTBALL",
+            leagueId: 1101,
+            leagueName: "Club Friendlies 1",
+            stageName: "Regular Season",
+            homeTeamId: "625",
+            homeTeamName: "Juventus",
+            awayTeamId: "450",
+            awayTeamName: "Nice",
+            commenceTime: "2026-07-31T16:00:00.000Z",
+            stateId: 2,
+          },
+        }),
+      }),
+    }),
+  );
+
+  assert.equal(response.status, 422);
+  const body = await response.json();
+  assert.equal(body.error, "EVENT_ALREADY_STARTED");
+  assert.equal(body.detail, "Матч уже начался. Выберите другое событие.");
+});
+
+test("Stage 10: flag ON — empty odds returns the exact required Russian message", async () => {
+  process.env.SPORTMONKS_FOOTBALL_PREVIEW_ENABLED = "true";
+
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const response = await handleTextPreview(
+    buildRequest(initData, { message: "Juventus победа 100" }),
+    baseOptions({
+      parseBetSlip: fakeParseBetSlip({
+        valid: true,
+        type: "SINGLE",
+        stake: 100,
+        selections: [{ sport: "Football", event: "Juventus", market: null, selection: "Juventus победа", submittedOdds: null }],
+      }),
+      sportmonksPreviewOptions: sportmonksOptions({ fetchOdds: async () => ({ status: "EMPTY" }) }),
+    }),
+  );
+
+  assert.equal(response.status, 422);
+  const body = await response.json();
+  assert.equal(body.error, "ODDS_UNAVAILABLE");
+  assert.equal(body.detail, "Коэффициент на выбранный исход сейчас недоступен.");
+});
+
+test("Stage 10: flag ON — an ambiguous team returns a safe 422, no candidate is guessed", async () => {
+  process.env.SPORTMONKS_FOOTBALL_PREVIEW_ENABLED = "true";
+
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const response = await handleTextPreview(
+    buildRequest(initData, { message: "Real to win, 50" }),
+    baseOptions({
+      parseBetSlip: fakeParseBetSlip({
+        valid: true,
+        type: "SINGLE",
+        stake: 50,
+        selections: [{ sport: "Football", event: "Real", market: null, selection: "Real Win", submittedOdds: null }],
+      }),
+      sportmonksPreviewOptions: sportmonksOptions({
+        resolver: fakeSportmonksResolver({
+          resolve: () => ({
+            kind: "AMBIGUOUS",
+            candidates: [juventusCandidate(), juventusCandidate({ providerEventId: "2" })],
+            reason: "x",
+          }),
+        }),
+      }),
+    }),
+  );
+
+  assert.equal(response.status, 422);
+  const body = await response.json();
+  assert.equal(body.error, "AMBIGUOUS_EVENT");
+});
+
+test("Stage 10: no Bet is ever created and no balance field is ever touched by this route (db has no bet/player-write methods)", async () => {
+  process.env.SPORTMONKS_FOOTBALL_PREVIEW_ENABLED = "true";
+  const readOnlyDb = {
+    player: {
+      findUnique: async () => ({ id: PLAYER_ID }),
+      // Deliberately no update/create — a call to either throws.
+    },
+  } as unknown as PrismaClient;
+
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const response = await handleTextPreview(
+    buildRequest(initData, { message: "Juventus победа 100" }),
+    baseOptions({
+      db: readOnlyDb,
+      parseBetSlip: fakeParseBetSlip({
+        valid: true,
+        type: "SINGLE",
+        stake: 100,
+        selections: [{ sport: "Football", event: "Juventus", market: null, selection: "Juventus победа", submittedOdds: null }],
+      }),
+      sportmonksPreviewOptions: sportmonksOptions(),
+    }),
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.preview.type, "SINGLE");
 });
