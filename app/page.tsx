@@ -1,5 +1,6 @@
 import DashboardOverview from "@/components/dashboard/DashboardOverview";
 import BetQueue from "@/components/bets/BetQueue";
+import ManualReviewQueue from "@/components/bets/ManualReviewQueue";
 import PlayerList from "@/components/players/PlayerList";
 import { requireOperatorPage } from "@/lib/auth/requireOperator";
 
@@ -25,6 +26,8 @@ export default async function Home() {
         <DashboardOverview />
 
         <BetQueue />
+
+        <ManualReviewQueue />
 
         <PlayerList />
       </div>

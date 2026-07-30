@@ -11,9 +11,9 @@
 // every financial decision is delegated entirely to autoSettleSingleBet()/
 // autoSettleExpressBet(), unmodified.
 
-import type { PrismaClient } from "@/lib/generated/prisma/client";
-import { autoSettleSingleBet } from "./autoSettleSingleBet";
-import { autoSettleExpressBet, type EventResultEntryInput } from "./autoSettleExpressBet";
+import { SettlementReviewStatus, type PrismaClient } from "@/lib/generated/prisma/client";
+import { autoSettleSingleBet, type AutoSettleSingleBetResult } from "./autoSettleSingleBet";
+import { autoSettleExpressBet, type AutoSettleExpressBetResult, type EventResultEntryInput } from "./autoSettleExpressBet";
 import type { CanonicalEventResult } from "./eventResultDomain";
 import {
   extractProviderEventKey,
@@ -23,6 +23,14 @@ import {
   type ProviderEventKey,
 } from "./pollingEventKey";
 import { fetchProviderScores, type ScoresFetchResult } from "@/lib/odds/providers/theOddsApi/scoresAdapter";
+import {
+  classifyEventNotFound,
+  classifyExpressNoActionAggregate,
+  classifyNoActionReasonCode,
+  classifyRejectionReasonCode,
+  classifySettleFailureCode,
+  type BetClassification,
+} from "./classifySettlementFailure";
 
 /* -------------------------------------------------------------------------- */
 /* Constants                                                                  */
@@ -36,7 +44,12 @@ import { fetchProviderScores, type ScoresFetchResult } from "@/lib/odds/provider
 // provider is willing to answer, this one describes our own decision about
 // how long to keep trying before leaving a bet for Stage 3.7/manual
 // review. Coincidence, not a wiring dependency.
-const POLLING_LOOKBACK_MS = 3 * 24 * 60 * 60 * 1000;
+//
+// Exported (Stage 4.3.4) so escalateExpiredPolling.ts computes its own
+// windowStart from this exact same constant — the one shared source of
+// truth for "what counts as expired," never a second, independently
+// maintained copy of the value.
+export const POLLING_LOOKBACK_MS = 3 * 24 * 60 * 60 * 1000;
 
 // Implementation safety limit, NOT a confirmed provider limit — no
 // official maximum eventIds-per-request count is documented anywhere in
@@ -57,6 +70,14 @@ const DEFAULT_ELIGIBLE_BET_LIMIT = 200;
 // is simple enough not to need a dependency for this.
 const DEFAULT_SETTLEMENT_CONCURRENCY = 5;
 
+// Stage 4.3.3 — the one named threshold for every BET_TRANSIENT class
+// (MISSING_SCORE, EVENT_NOT_FOUND, DB_ERROR/UNEXPECTED_ERROR). Chosen to
+// roughly match POLLING_LOOKBACK_MS above (3 cron cycles ≈ 3 days at the
+// current once-daily schedule) — no magic numbers scattered elsewhere in
+// this file; every place that needs "has this bet retried enough" reads
+// this one constant.
+const MAX_AUTO_RETRY_ATTEMPTS = 3;
+
 /* -------------------------------------------------------------------------- */
 /* Report contract                                                            */
 /* -------------------------------------------------------------------------- */
@@ -72,6 +93,15 @@ export interface PollingReport {
   readonly rejected: number;
   readonly conflicts: number;
   readonly failed: number;
+  // Stage 4.3.3 additions — purely additive, every field above is
+  // unchanged in meaning and trigger condition. These three overlap with
+  // (never replace) the buckets above: a bet counted in noAction/rejected/
+  // failed above may ALSO be counted in one of these three, when its
+  // underlying cause was bet-level (not a cycle-level provider failure —
+  // those only ever move providerFailures, never these three).
+  readonly transientFailures: number;
+  readonly permanentReviewFailures: number;
+  readonly escalatedToManualReview: number;
 }
 
 export interface PollConfirmedBetResultsInput {
@@ -134,6 +164,13 @@ async function loadEligibleSingleBets(db: PrismaClient, now: Date, limit: number
       type: "SINGLE",
       status: "CONFIRMED",
       eventStartTime: { lte: now, gte: windowStart },
+      // Stage 4.3.3 — excludes only NEEDS_REVIEW/RESOLVED bets (a bet
+      // never has any OTHER settlementReviewStatus value); narrows the
+      // existing eligibility set, never widens it. A bet already flagged
+      // for manual review is only ever re-attempted through the future
+      // manual-retry action (Stage 4.3.5+, not built yet), never through
+      // this automatic query again.
+      settlementReviewStatus: null,
     },
     select: { id: true, providerName: true, providerSportKey: true, providerEventId: true, eventStartTime: true },
     orderBy: { eventStartTime: "asc" },
@@ -154,6 +191,9 @@ async function loadEligibleExpressBets(db: PrismaClient, now: Date, limit: numbe
       // a partial view — only the *event-key collection* step (below)
       // decides which specific legs get a provider request attempted.
       selections: { some: { eventStartTime: { lte: now, gte: windowStart } } },
+      // Stage 4.3.3 — same exclusion as loadEligibleSingleBets() above,
+      // same rationale.
+      settlementReviewStatus: null,
     },
     select: {
       id: true,
@@ -181,6 +221,21 @@ type SettlementTask =
 
 type TaskOutcome = "settled" | "noAction" | "rejected" | "conflict" | "failed";
 
+// Stage 4.3.3 — every task additionally reports which classification
+// category (if any) drove its bet-level tracking write this cycle, and
+// whether that write newly escalated the bet to NEEDS_REVIEW THIS cycle.
+// Both are undefined whenever no bet-level classification applies at all
+// (SETTLED, CONFLICT/NOT_FOUND, or a cycle-level provider failure) — purely
+// additive detail the outer aggregator below folds into the three new
+// PollingReport counters, on top of (never instead of) the existing
+// settled/noAction/rejected/conflicts/failed buckets, which keep their
+// exact original trigger conditions.
+interface TaskResult {
+  readonly outcome: TaskOutcome;
+  readonly classificationCategory?: BetClassification["category"];
+  readonly didEscalate?: boolean;
+}
+
 function chunk<T>(items: readonly T[], size: number): readonly T[][] {
   const chunks: T[][] = [];
   for (let i = 0; i < items.length; i += size) {
@@ -189,27 +244,185 @@ function chunk<T>(items: readonly T[], size: number): readonly T[][] {
   return chunks;
 }
 
+// Stage 4.3.3 — the one place that writes any of Bet's six settlement-
+// tracking fields. Always called OUTSIDE and never from within settleBet()'s
+// own $transaction (settleBet.ts is not modified by this stage) — every
+// write here is its own best-effort, non-transactional update, same
+// accepted-race reasoning this file's own Stage 3.5A header already
+// documents for the settlement pass itself: a rare concurrent double-write
+// (two overlapping cycles touching the same bet) produces a harmless,
+// accepted inaccuracy in these tracking fields (e.g. one extra +1 on
+// settlementRetryCount, or two identical NEEDS_REVIEW writes), never a
+// financial one — settleBet()'s own atomic conditional update remains the
+// sole source of financial idempotency, completely untouched.
+async function applyBetLevelClassification(
+  db: PrismaClient,
+  betId: string,
+  classification: BetClassification,
+  technicalCode: string,
+  technicalMessage: string,
+  now: Date,
+): Promise<{ readonly category: BetClassification["category"]; readonly didEscalate: boolean }> {
+  switch (classification.category) {
+    case "WAITING": {
+      // Not an error — never touches settlementRetryCount or
+      // settlementReviewStatus/Reason. lastSettlementErrorMessage is
+      // deliberately NOT written here (Stage 4.3 v3's explicit "don't
+      // record WAITING as a misleading technical error" instruction) —
+      // only the informational code + a fresh timestamp.
+      await db.bet.update({
+        where: { id: betId },
+        data: { lastSettlementAttemptAt: now, lastSettlementErrorCode: technicalCode },
+      });
+      return { category: "WAITING", didEscalate: false };
+    }
+
+    case "BET_TRANSIENT": {
+      // Atomic increment, then read the POST-increment count back (Prisma
+      // update() always returns the full updated row) to decide whether
+      // this attempt just crossed MAX_AUTO_RETRY_ATTEMPTS — two sequential
+      // writes only when the threshold is actually crossed, one otherwise.
+      const updated = await db.bet.update({
+        where: { id: betId },
+        data: {
+          settlementRetryCount: { increment: 1 },
+          lastSettlementAttemptAt: now,
+          lastSettlementErrorCode: technicalCode,
+          lastSettlementErrorMessage: technicalMessage,
+        },
+        select: { settlementRetryCount: true },
+      });
+
+      if (updated.settlementRetryCount >= MAX_AUTO_RETRY_ATTEMPTS) {
+        await db.bet.update({
+          where: { id: betId },
+          data: {
+            settlementReviewStatus: SettlementReviewStatus.NEEDS_REVIEW,
+            settlementReviewReason: classification.maxRetriesReason,
+          },
+        });
+        return { category: "BET_TRANSIENT", didEscalate: true };
+      }
+      return { category: "BET_TRANSIENT", didEscalate: false };
+    }
+
+    case "BET_PERMANENT_REVIEW": {
+      // settlementRetryCount is deliberately omitted from this write's
+      // data — a bet that already accrued transient retries before landing
+      // on a permanent reason keeps that count exactly as-is (never reset,
+      // never incremented further here); it becomes purely historical once
+      // reviewStatus is set.
+      await db.bet.update({
+        where: { id: betId },
+        data: {
+          lastSettlementAttemptAt: now,
+          lastSettlementErrorCode: technicalCode,
+          lastSettlementErrorMessage: technicalMessage,
+          settlementReviewStatus: SettlementReviewStatus.NEEDS_REVIEW,
+          settlementReviewReason: classification.reason,
+        },
+      });
+      return { category: "BET_PERMANENT_REVIEW", didEscalate: true };
+    }
+
+    case "CONFLICT_NO_ACTION": {
+      // Never a retry, never a review, no Bet write at all — a resolved
+      // race (settleBet()'s own CONFLICT paths) or the structurally-
+      // impossible-except-via-race UNSUPPORTED_BET_STATUS rejection (see
+      // classifyRejectionReasonCode()'s own comment). A structured log
+      // line is the only allowed side effect.
+      console.warn(`pollConfirmedBetResults: bet ${betId} — ${technicalCode} (resolved race, no action taken)`);
+      return { category: "CONFLICT_NO_ACTION", didEscalate: false };
+    }
+
+    case "TERMINAL_OUTCOME":
+    case "CYCLE_PROVIDER_FAILURE":
+      // Never actually reached: TERMINAL_OUTCOME is handled entirely by
+      // settleBet() via the existing autoSettleSingleBet()/
+      // autoSettleExpressBet() call (nothing left for this function to
+      // write), and CYCLE_PROVIDER_FAILURE is decided and handled at the
+      // fetch-loop level, before any per-bet task runs at all — this
+      // function is never invoked with it. Present only so the switch
+      // stays exhaustive.
+      return { category: classification.category, didEscalate: false };
+  }
+}
+
 async function runTask(
   db: PrismaClient,
   task: SettlementTask,
   resultsByEventId: ReadonlyMap<string, CanonicalEventResult>,
+  cycleFailureEventIds: ReadonlySet<string>,
   eventResultsArray: readonly EventResultEntryInput[],
-): Promise<TaskOutcome> {
+  now: Date,
+): Promise<TaskResult> {
   if (task.kind === "SINGLE") {
     const eventResult = resultsByEventId.get(task.key.providerEventId);
-    // No result available for this SINGLE bet's one required event this
-    // cycle (batch failed, event missing from the response, etc.) —
-    // autoSettleSingleBet() has no "optional eventResult" shape to call it
-    // with honestly, so it is simply not called at all. Never synthesized
-    // as NOT_STARTED — the task's own explicit prohibition.
-    if (!eventResult) return "noAction";
 
-    const result = await autoSettleSingleBet(db, {
+    if (!eventResult) {
+      if (cycleFailureEventIds.has(task.key.providerEventId)) {
+        // This event's chunk failed entirely this cycle — a cycle-level
+        // provider failure, never a bet-level one (Stage 4.3 v3's central
+        // rule). No Bet write, no classification recorded at all. Never
+        // synthesized as NOT_STARTED — the task's own long-standing
+        // explicit prohibition.
+        return { outcome: "noAction" };
+      }
+      // The chunk fetched successfully, but this specific id simply wasn't
+      // present in the response — a genuine bet-level "not found (yet)"
+      // signal, distinct from a cycle-level failure.
+      const applied = await applyBetLevelClassification(
+        db,
+        task.betId,
+        classifyEventNotFound(),
+        "EVENT_NOT_FOUND",
+        "Provider response did not include this event this cycle.",
+        now,
+      );
+      return { outcome: "noAction", classificationCategory: applied.category, didEscalate: applied.didEscalate };
+    }
+
+    const result: AutoSettleSingleBetResult = await autoSettleSingleBet(db, {
       betId: task.betId,
       eventResult,
       expectedProviderEventId: task.key.providerEventId,
     });
-    return mapSingleOutcome(result.kind);
+
+    if (result.kind === "NO_ACTION") {
+      const applied = await applyBetLevelClassification(
+        db,
+        task.betId,
+        classifyNoActionReasonCode(result.reasonCode),
+        result.reasonCode,
+        `Selection outcome evaluator returned ${result.reasonCode}.`,
+        now,
+      );
+      return { outcome: "noAction", classificationCategory: applied.category, didEscalate: applied.didEscalate };
+    }
+    if (result.kind === "REJECTED") {
+      const applied = await applyBetLevelClassification(
+        db,
+        task.betId,
+        classifyRejectionReasonCode(result.reasonCode),
+        result.reasonCode,
+        `Settlement rejected: ${result.reasonCode}.`,
+        now,
+      );
+      return { outcome: "rejected", classificationCategory: applied.category, didEscalate: applied.didEscalate };
+    }
+    if (result.kind === "FAILED") {
+      const applied = await applyBetLevelClassification(
+        db,
+        task.betId,
+        classifySettleFailureCode(result.reasonCode),
+        result.reasonCode,
+        `Settlement failed: ${result.reasonCode}.`,
+        now,
+      );
+      return { outcome: "failed", classificationCategory: applied.category, didEscalate: applied.didEscalate };
+    }
+    // SETTLED / CONFLICT / NOT_FOUND — unchanged, no tracking-field write.
+    return { outcome: mapSingleOutcome(result.kind) };
   }
 
   // EXPRESS — always attempted, even with zero/partial results available;
@@ -220,8 +433,45 @@ async function runTask(
   // bet's own legs") — extra, irrelevant entries are already proven safe
   // to pass (Stage 3.4B's own "extra unmatched providerEventId is ignored"
   // behavior).
-  const result = await autoSettleExpressBet(db, { betId: task.betId, eventResults: eventResultsArray });
-  return mapExpressOutcome(result.kind);
+  const result: AutoSettleExpressBetResult = await autoSettleExpressBet(db, {
+    betId: task.betId,
+    eventResults: eventResultsArray,
+  });
+
+  if (result.kind === "NO_ACTION") {
+    const applied = await applyBetLevelClassification(
+      db,
+      task.betId,
+      classifyExpressNoActionAggregate(result.aggregate),
+      result.aggregate.kind,
+      `Express aggregate outcome: ${result.aggregate.kind}.`,
+      now,
+    );
+    return { outcome: "noAction", classificationCategory: applied.category, didEscalate: applied.didEscalate };
+  }
+  if (result.kind === "REJECTED") {
+    const applied = await applyBetLevelClassification(
+      db,
+      task.betId,
+      classifyRejectionReasonCode(result.reasonCode),
+      result.reasonCode,
+      `Settlement rejected: ${result.reasonCode}.`,
+      now,
+    );
+    return { outcome: "rejected", classificationCategory: applied.category, didEscalate: applied.didEscalate };
+  }
+  if (result.kind === "FAILED") {
+    const applied = await applyBetLevelClassification(
+      db,
+      task.betId,
+      classifySettleFailureCode(result.reasonCode),
+      result.reasonCode,
+      `Settlement failed: ${result.reasonCode}.`,
+      now,
+    );
+    return { outcome: "failed", classificationCategory: applied.category, didEscalate: applied.didEscalate };
+  }
+  return { outcome: mapExpressOutcome(result.kind) };
 }
 
 function mapSingleOutcome(kind: string): TaskOutcome {
@@ -277,6 +527,9 @@ export async function pollConfirmedBetResults(
       rejected: 0,
       conflicts: 0,
       failed: 0,
+      transientFailures: 0,
+      permanentReviewFailures: 0,
+      escalatedToManualReview: 0,
     };
   }
 
@@ -311,6 +564,13 @@ export async function pollConfirmedBetResults(
   // avoiding any risk of a provider request storm without needing a
   // concurrency-limiting dependency.
   const resultsByEventId = new Map<string, CanonicalEventResult>();
+  // Stage 4.3.3 — every providerEventId whose containing chunk FAILED
+  // entirely this cycle. Consulted by runTask() to distinguish a
+  // cycle-level provider failure (this set) from a bet-level "chunk
+  // succeeded, but this id wasn't in the response" (NOT in this set, NOT
+  // in resultsByEventId either) — only the latter is ever classified as a
+  // bet-level EVENT_NOT_FOUND retry.
+  const cycleFailureEventIds = new Set<string>();
   let providerRequests = 0;
   let providerFailures = 0;
 
@@ -325,9 +585,21 @@ export async function pollConfirmedBetResults(
 
       if (fetchResult.status === "FAILED") {
         providerFailures += 1;
-        // This batch's events simply stay absent from resultsByEventId —
-        // every dependent bet naturally resolves to WAITING/NO_ACTION
-        // downstream, exactly as a missing individual event would.
+        for (const providerEventId of idChunk) {
+          cycleFailureEventIds.add(providerEventId);
+        }
+        // Stage 4.3 v3's central rule: a cycle-level provider failure NEVER
+        // touches any bet's settlement-tracking fields, regardless of how
+        // many bets this chunk's ids belong to — one structured log line is
+        // the only allowed side effect. This batch's events simply stay
+        // absent from resultsByEventId — every dependent bet naturally
+        // resolves to WAITING/NO_ACTION downstream, exactly as a missing
+        // individual event would, with no per-bet write either way.
+        console.warn(
+          `pollConfirmedBetResults: provider fetch failed for sport=${group.providerSportKey} ` +
+            `(${idChunk.length} event id(s)) — reason=${fetchResult.reason}. ` +
+            `No bet-level settlement state changed for these ids this cycle.`,
+        );
         continue;
       }
 
@@ -344,23 +616,30 @@ export async function pollConfirmedBetResults(
   // Bounded-concurrency settlement pass — chunked Promise.allSettled, never
   // one unbounded Promise.all. One bet throwing/failing/conflicting never
   // stops any other bet in the same or a later chunk.
-  const outcomes: TaskOutcome[] = [];
+  const taskResults: TaskResult[] = [];
   for (const taskChunk of chunk(tasks, concurrency)) {
     const settled = await Promise.allSettled(
-      taskChunk.map((task) => runTask(db, task, resultsByEventId, eventResultsArray)),
+      taskChunk.map((task) => runTask(db, task, resultsByEventId, cycleFailureEventIds, eventResultsArray, now)),
     );
     for (const outcome of settled) {
-      outcomes.push(outcome.status === "fulfilled" ? outcome.value : "failed");
+      taskResults.push(outcome.status === "fulfilled" ? outcome.value : { outcome: "failed" });
     }
   }
 
   const counts = { settled: 0, noAction: 0, rejected: 0, conflicts: 0, failed: 0 };
-  for (const outcome of outcomes) {
-    if (outcome === "settled") counts.settled += 1;
-    else if (outcome === "noAction") counts.noAction += 1;
-    else if (outcome === "rejected") counts.rejected += 1;
-    else if (outcome === "conflict") counts.conflicts += 1;
+  let transientFailures = 0;
+  let permanentReviewFailures = 0;
+  let escalatedToManualReview = 0;
+  for (const taskResult of taskResults) {
+    if (taskResult.outcome === "settled") counts.settled += 1;
+    else if (taskResult.outcome === "noAction") counts.noAction += 1;
+    else if (taskResult.outcome === "rejected") counts.rejected += 1;
+    else if (taskResult.outcome === "conflict") counts.conflicts += 1;
     else counts.failed += 1;
+
+    if (taskResult.classificationCategory === "BET_TRANSIENT") transientFailures += 1;
+    else if (taskResult.classificationCategory === "BET_PERMANENT_REVIEW") permanentReviewFailures += 1;
+    if (taskResult.didEscalate) escalatedToManualReview += 1;
   }
 
   return {
@@ -370,5 +649,8 @@ export async function pollConfirmedBetResults(
     providerRequests,
     providerFailures,
     ...counts,
+    transientFailures,
+    permanentReviewFailures,
+    escalatedToManualReview,
   };
 }

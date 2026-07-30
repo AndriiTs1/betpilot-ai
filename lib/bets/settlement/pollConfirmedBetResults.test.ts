@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Prisma, type BetStatus, type PrismaClient } from "@/lib/generated/prisma/client";
+import {
+  Prisma,
+  SettlementReviewReason,
+  SettlementReviewStatus,
+  type BetStatus,
+  type PrismaClient,
+} from "@/lib/generated/prisma/client";
 import { pollConfirmedBetResults, type PollConfirmedBetResultsInput } from "./pollConfirmedBetResults";
 import type { ScoresFetchResult } from "@/lib/odds/providers/theOddsApi/scoresAdapter";
 import type { CanonicalEventResult } from "./eventResultDomain";
@@ -45,6 +51,13 @@ interface FakeBetRow {
   canonicalParticipant: string | null;
   canonicalPeriod: string | null;
   selections: FakeSelectionRow[];
+  // Stage 4.3.3
+  settlementRetryCount: number;
+  lastSettlementAttemptAt: Date | null;
+  lastSettlementErrorCode: string | null;
+  lastSettlementErrorMessage: string | null;
+  settlementReviewStatus: SettlementReviewStatus | null;
+  settlementReviewReason: SettlementReviewReason | null;
 }
 
 interface FakePlayerRow {
@@ -96,6 +109,12 @@ function fakeSingleBet(overrides: Partial<FakeBetRow> = {}): FakeBetRow {
     canonicalParticipant: null,
     canonicalPeriod: "FULL_GAME",
     selections: [],
+    settlementRetryCount: 0,
+    lastSettlementAttemptAt: null,
+    lastSettlementErrorCode: null,
+    lastSettlementErrorMessage: null,
+    settlementReviewStatus: null,
+    settlementReviewReason: null,
     ...overrides,
   };
 }
@@ -135,6 +154,12 @@ function fakeExpressBet(selections: FakeSelectionRow[], overrides: Partial<FakeB
     canonicalParticipant: null,
     canonicalPeriod: null,
     selections,
+    settlementRetryCount: 0,
+    lastSettlementAttemptAt: null,
+    lastSettlementErrorCode: null,
+    lastSettlementErrorMessage: null,
+    settlementReviewStatus: null,
+    settlementReviewReason: null,
     ...overrides,
   };
 }
@@ -150,6 +175,7 @@ interface FindManyArgs {
     status: string;
     eventStartTime?: FieldFilter;
     selections?: { some: { eventStartTime: FieldFilter } };
+    settlementReviewStatus?: null;
   };
   orderBy: Record<string, "asc" | "desc">;
   take: number;
@@ -193,6 +219,14 @@ function createFakeDb(seed: { bets?: FakeBetRow[]; playerCurrentCredit?: Prisma.
       const filter = args.where.selections.some.eventStartTime;
       rows = rows.filter((b) => b.selections.some((sel) => matchesRange(sel.eventStartTime, filter)));
     }
+    // Stage 4.3.3 — the exact eligibility exclusion pollConfirmedBetResults.ts
+    // now applies: `settlementReviewStatus: null` in the where-clause
+    // excludes any row whose settlementReviewStatus is NOT null (i.e.
+    // NEEDS_REVIEW or RESOLVED), narrowing the existing filter set, never
+    // widening it.
+    if ("settlementReviewStatus" in args.where) {
+      rows = rows.filter((b) => b.settlementReviewStatus === null);
+    }
 
     const orderField = Object.keys(args.orderBy)[0] as "eventStartTime" | "id";
     rows = [...rows].sort((a, b) => {
@@ -234,8 +268,35 @@ function createFakeDb(seed: { bets?: FakeBetRow[]; playerCurrentCredit?: Prisma.
     },
   };
 
+  // Stage 4.3.3 — the top-level, non-transactional bet.update() the new
+  // settlement-tracking writes use (deliberately separate from tx.bet.update
+  // above, which is settleBet()'s own atomic conditional-on-status update —
+  // never reused for this, matching production exactly: these are two
+  // different call sites, one inside $transaction, one never inside it).
+  // Supports exactly the two shapes pollConfirmedBetResults.ts's
+  // applyBetLevelClassification() actually sends: a plain field assignment,
+  // and settlementRetryCount's `{ increment: 1 }`.
+  const topLevelUpdate = async ({
+    where,
+    data,
+  }: {
+    where: { id: string };
+    data: Partial<Omit<FakeBetRow, "settlementRetryCount">> & { settlementRetryCount?: number | { increment: number } };
+  }) => {
+    const bet = bets.get(where.id);
+    if (!bet) throw p2025();
+
+    const { settlementRetryCount, ...rest } = data;
+    Object.assign(bet, rest);
+    if (settlementRetryCount !== undefined) {
+      bet.settlementRetryCount =
+        typeof settlementRetryCount === "number" ? settlementRetryCount : bet.settlementRetryCount + settlementRetryCount.increment;
+    }
+    return { ...bet };
+  };
+
   return {
-    bet: { findUnique, findMany },
+    bet: { findUnique, findMany, update: topLevelUpdate },
     $transaction: async <T>(fn: (t: typeof tx) => Promise<T>) => fn(tx),
     _debug: {
       getBet: (id: string) => bets.get(id),
@@ -292,6 +353,7 @@ test("empty eligible result: provider is never called", async () => {
   assert.deepEqual(report, {
     scannedBets: 0, eligibleBets: 0, uniqueEvents: 0, providerRequests: 0, providerFailures: 0,
     settled: 0, noAction: 0, rejected: 0, conflicts: 0, failed: 0,
+    transientFailures: 0, permanentReviewFailures: 0, escalatedToManualReview: 0,
   });
 });
 
@@ -746,4 +808,209 @@ test("no direct Transaction/balance writes outside settleBet()'s own path — pr
 
   assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "100"); // 50*3.00 - 50, exact settleBet() math
   assert.equal(fake._debug.transactions().length, 1);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Stage 4.3.3 — cycle-level vs bet-level classification                     */
+/* -------------------------------------------------------------------------- */
+
+test("1. failed provider chunk affecting N bets: providerFailures increments, zero settlement-field changes on any of them", async () => {
+  const bets = Array.from({ length: 3 }, (_, i) => fakeSingleBet({ id: `single-${i}`, providerEventId: `e${i}` }));
+  const fake = createFakeDb({ bets });
+  const fetchFn = fakeFetchScores({ soccer_epl: { status: "FAILED", reason: "HTTP_5XX" } });
+
+  const report = await pollConfirmedBetResults(db(fake), input({ fetchScoresFn: fetchFn }));
+
+  assert.equal(report.providerFailures, 1);
+  assert.equal(report.transientFailures, 0);
+  assert.equal(report.permanentReviewFailures, 0);
+  assert.equal(report.escalatedToManualReview, 0);
+  for (const bet of bets) {
+    const row = fake._debug.getBet(bet.id);
+    assert.equal(row?.status, "CONFIRMED");
+    assert.equal(row?.settlementRetryCount, 0);
+    assert.equal(row?.lastSettlementAttemptAt, null);
+    assert.equal(row?.lastSettlementErrorCode, null);
+    assert.equal(row?.lastSettlementErrorMessage, null);
+    assert.equal(row?.settlementReviewStatus, null);
+    assert.equal(row?.settlementReviewReason, null);
+  }
+});
+
+test("2. successful chunk missing one id: only that bet gets an EVENT_NOT_FOUND retry, the other settles normally", async () => {
+  const foundBet = fakeSingleBet({ id: "single-found", providerEventId: "e-found" });
+  const missingBet = fakeSingleBet({ id: "single-missing", providerEventId: "e-missing" });
+  const fake = createFakeDb({ bets: [foundBet, missingBet] });
+  const fetchFn = fakeFetchScores({
+    soccer_epl: successResult([{ providerEventId: "e-found", eventResult: eventResult({ homeScore: 2, awayScore: 0 }) }]), // e-missing absent, chunk itself succeeded
+  });
+
+  const report = await pollConfirmedBetResults(db(fake), input({ fetchScoresFn: fetchFn }));
+
+  assert.equal(report.providerFailures, 0);
+  assert.equal(report.settled, 1);
+  assert.equal(fake._debug.getBet("single-found")?.status, "SETTLED_WIN");
+  assert.equal(fake._debug.getBet("single-found")?.settlementRetryCount, 0);
+
+  const missingRow = fake._debug.getBet("single-missing");
+  assert.equal(missingRow?.status, "CONFIRMED");
+  assert.equal(missingRow?.settlementRetryCount, 1);
+  assert.equal(missingRow?.lastSettlementErrorCode, "EVENT_NOT_FOUND");
+  assert.equal(missingRow?.settlementReviewStatus, null);
+  assert.equal(report.transientFailures, 1);
+});
+
+test("3. EVENT_NOT_FOUND retryCount increments atomically across cycles and escalates to NEEDS_REVIEW exactly once at MAX_AUTO_RETRY_ATTEMPTS", async () => {
+  const bet = fakeSingleBet({ id: "single-1", providerEventId: "evt-1" });
+  const fake = createFakeDb({ bets: [bet] });
+  const fetchFn = fakeFetchScores({ soccer_epl: successResult([]) }); // never resolves — chunk always succeeds, event always absent
+
+  const r1 = await pollConfirmedBetResults(db(fake), input({ fetchScoresFn: fetchFn }));
+  assert.equal(fake._debug.getBet("single-1")?.settlementRetryCount, 1);
+  assert.equal(fake._debug.getBet("single-1")?.settlementReviewStatus, null);
+  assert.equal(r1.escalatedToManualReview, 0);
+
+  const r2 = await pollConfirmedBetResults(db(fake), input({ fetchScoresFn: fetchFn }));
+  assert.equal(fake._debug.getBet("single-1")?.settlementRetryCount, 2);
+  assert.equal(fake._debug.getBet("single-1")?.settlementReviewStatus, null);
+  assert.equal(r2.escalatedToManualReview, 0);
+
+  const r3 = await pollConfirmedBetResults(db(fake), input({ fetchScoresFn: fetchFn }));
+  assert.equal(fake._debug.getBet("single-1")?.settlementRetryCount, 3);
+  assert.equal(fake._debug.getBet("single-1")?.settlementReviewStatus, SettlementReviewStatus.NEEDS_REVIEW);
+  assert.equal(fake._debug.getBet("single-1")?.settlementReviewReason, SettlementReviewReason.EVENT_NOT_FOUND_MAX_RETRIES);
+  assert.equal(r3.escalatedToManualReview, 1);
+
+  // A 4th cycle no longer even scans this bet — it's excluded from the
+  // eligibility query now that settlementReviewStatus is NEEDS_REVIEW.
+  const r4 = await pollConfirmedBetResults(db(fake), input({ fetchScoresFn: fetchFn }));
+  assert.equal(r4.scannedBets, 0);
+  assert.equal(fake._debug.getBet("single-1")?.settlementRetryCount, 3); // unchanged
+});
+
+test("4. MISSING_SCORE is a bet-level transient retry, never settles as LOSS/VOID", async () => {
+  const bet = fakeSingleBet({ id: "single-1", providerEventId: "evt-1" });
+  const fake = createFakeDb({ bets: [bet] });
+  const fetchFn = fakeFetchScores({
+    soccer_epl: successResult([{ providerEventId: "evt-1", eventResult: eventResult({ homeScore: null, awayScore: null }) }]), // COMPLETED, no scores
+  });
+
+  const report = await pollConfirmedBetResults(db(fake), input({ fetchScoresFn: fetchFn }));
+
+  assert.equal(report.noAction, 1);
+  assert.equal(report.transientFailures, 1);
+  const row = fake._debug.getBet("single-1");
+  assert.equal(row?.status, "CONFIRMED"); // never LOSS/VOID
+  assert.equal(row?.settlementRetryCount, 1);
+  assert.equal(row?.lastSettlementErrorCode, "MISSING_SCORE");
+  assert.equal(row?.settlementReviewStatus, null);
+});
+
+test("5. WAITING (event not yet completed / postponed / abandoned) never increments retryCount and never sets NEEDS_REVIEW", async () => {
+  for (const status of ["NOT_STARTED", "IN_PROGRESS", "POSTPONED"] as const) {
+    const bet = fakeSingleBet({ id: `single-${status}`, providerEventId: `evt-${status}` });
+    const fake = createFakeDb({ bets: [bet] });
+    const fetchFn = fakeFetchScores({
+      soccer_epl: successResult([{ providerEventId: `evt-${status}`, eventResult: eventResult({ status, homeScore: null, awayScore: null }) }]),
+    });
+
+    const report = await pollConfirmedBetResults(db(fake), input({ fetchScoresFn: fetchFn }));
+
+    assert.equal(report.transientFailures, 0, `status ${status}`);
+    const row = fake._debug.getBet(`single-${status}`);
+    assert.equal(row?.settlementRetryCount, 0, `status ${status}`);
+    assert.equal(row?.settlementReviewStatus, null, `status ${status}`);
+    // Informational only — lastSettlementAttemptAt/errorCode ARE written
+    // for WAITING (diagnostic "last checked at" value), but never a
+    // technical errorMessage (would be misleading for a legitimate wait).
+    assert.equal(row?.lastSettlementAttemptAt?.getTime(), NOW.getTime(), `status ${status}`);
+    assert.equal(row?.lastSettlementErrorMessage, null, `status ${status}`);
+  }
+});
+
+test("6. PARTICIPANT_MISMATCH (a permanent reason) escalates to NEEDS_REVIEW immediately, retryCount stays 0", async () => {
+  const bet = fakeSingleBet({
+    id: "single-1",
+    providerEventId: "evt-1",
+    canonicalSelectionType: "PARTICIPANT",
+    canonicalParticipant: "Some Totally Unrelated Team",
+  });
+  const fake = createFakeDb({ bets: [bet] });
+  const fetchFn = fakeFetchScores({
+    soccer_epl: successResult([{ providerEventId: "evt-1", eventResult: eventResult({ homeScore: 2, awayScore: 0 }) }]),
+  });
+
+  const report = await pollConfirmedBetResults(db(fake), input({ fetchScoresFn: fetchFn }));
+
+  assert.equal(report.permanentReviewFailures, 1);
+  assert.equal(report.escalatedToManualReview, 1);
+  const row = fake._debug.getBet("single-1");
+  assert.equal(row?.status, "CONFIRMED");
+  assert.equal(row?.settlementRetryCount, 0);
+  assert.equal(row?.settlementReviewStatus, SettlementReviewStatus.NEEDS_REVIEW);
+  assert.equal(row?.settlementReviewReason, SettlementReviewReason.PARTICIPANT_MISMATCH);
+});
+
+test("7. UNSUPPORTED_BET_STATUS (status changed during the race window) is CONFLICT_NO_ACTION — no retry, no review", async () => {
+  const bet = fakeSingleBet({ id: "single-1", providerEventId: "evt-1" });
+  const fake = createFakeDb({ bets: [bet] });
+
+  // Same deterministic race-simulation technique as the existing CONFLICT
+  // test above: mutate the fake DB's bet status as a side effect inside the
+  // injected fetchScoresFn, landing on PENDING (outside
+  // ELIGIBLE_BET_STATUSES) rather than a settled status.
+  const fetchFn = async () => {
+    const row = fake._debug.getBet("single-1");
+    if (row) row.status = "PENDING";
+    return successResult([{ providerEventId: "evt-1", eventResult: eventResult({ homeScore: 2, awayScore: 0 }) }]);
+  };
+
+  const report = await pollConfirmedBetResults(db(fake), input({ fetchScoresFn: fetchFn }));
+
+  assert.equal(report.rejected, 1); // unchanged existing bucket
+  assert.equal(report.transientFailures, 0);
+  assert.equal(report.permanentReviewFailures, 0);
+  assert.equal(report.escalatedToManualReview, 0);
+  const row = fake._debug.getBet("single-1");
+  assert.equal(row?.settlementRetryCount, 0);
+  assert.equal(row?.settlementReviewStatus, null);
+});
+
+test("8. a NEEDS_REVIEW bet no longer appears in active polling eligibility", async () => {
+  const bet = fakeSingleBet({
+    id: "single-1",
+    providerEventId: "evt-1",
+    settlementReviewStatus: SettlementReviewStatus.NEEDS_REVIEW,
+    settlementReviewReason: SettlementReviewReason.PARTICIPANT_MISMATCH,
+  });
+  const fake = createFakeDb({ bets: [bet] });
+  const fetchFn = fakeFetchScores({});
+
+  const report = await pollConfirmedBetResults(db(fake), input({ fetchScoresFn: fetchFn }));
+
+  assert.equal(report.scannedBets, 0);
+  assert.equal(fake._debug.getBet("single-1")?.settlementReviewStatus, SettlementReviewStatus.NEEDS_REVIEW); // untouched
+});
+
+test("9. legacy CONFIRMED bet without provider metadata is never scanned and never gets a settlement-field write", async () => {
+  const legacyBet = fakeSingleBet({
+    id: "legacy-1",
+    providerName: null,
+    providerSportKey: null,
+    providerEventId: null,
+    eventStartTime: null,
+    canonicalMarketType: null,
+    canonicalSelectionType: null,
+    canonicalPeriod: null,
+  });
+  const fake = createFakeDb({ bets: [legacyBet] });
+  const fetchFn = fakeFetchScores({});
+
+  const report = await pollConfirmedBetResults(db(fake), input({ fetchScoresFn: fetchFn }));
+
+  assert.equal(report.scannedBets, 0);
+  const row = fake._debug.getBet("legacy-1");
+  assert.equal(row?.settlementRetryCount, 0);
+  assert.equal(row?.lastSettlementAttemptAt, null);
+  assert.equal(row?.settlementReviewStatus, null);
 });

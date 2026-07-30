@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { isCronAuthorized } from "@/lib/auth/cronAuth";
 import { pollConfirmedBetResults, type PollingReport } from "@/lib/bets/settlement/pollConfirmedBetResults";
+import { escalateExpiredPolling, type EscalateExpiredPollingReport } from "@/lib/bets/settlement/escalateExpiredPolling";
 
 // Stage 3.5B1 — the thin, protected trigger for one polling cycle. Same
 // "authorize -> validate -> call exactly one existing service -> map its
@@ -26,9 +27,22 @@ export const dynamic = "force-dynamic";
 // param: nothing about this cycle's scope is caller-controlled.
 const POLL_OPTIONS = { limit: 25, concurrency: 2 } as const;
 
+// Stage 4.3.4 — the route's own merged response shape: active-polling's
+// PollingReport plus the expiry sweep's three outcome counters, additive
+// only. Deliberately NOT folded into PollingReport itself
+// (pollConfirmedBetResults.ts's own return type) — that function never
+// calls escalateExpiredPolling() and has no way to honestly produce these
+// three counters on its own; merging happens here, at the one orchestration
+// point that actually calls both.
+interface CombinedPollingReport extends PollingReport {
+  readonly expiredPollingEscalations: number;
+  readonly structuralReviewEscalations: number;
+  readonly legacySkipped: number;
+}
+
 interface SuccessBody {
   readonly success: true;
-  readonly report: PollingReport;
+  readonly report: CombinedPollingReport;
 }
 
 interface ErrorBody {
@@ -52,6 +66,7 @@ function internalErrorResponse(): NextResponse<ErrorBody> {
 
 export interface HandlePollResultsOptions {
   poll?: typeof pollConfirmedBetResults;
+  escalate?: typeof escalateExpiredPolling;
 }
 
 export async function handlePollResults(
@@ -74,9 +89,27 @@ export async function handlePollResults(
   }
 
   const poll = options.poll ?? pollConfirmedBetResults;
+  const escalate = options.escalate ?? escalateExpiredPolling;
 
   try {
-    const report = await poll(prisma, POLL_OPTIONS);
+    // Stage 4.3.4 — one shared `now` for this entire cycle, passed
+    // explicitly to both steps (neither is left to compute its own) so
+    // active polling's "in window" and the sweep's "expired" are always
+    // exact, non-overlapping complements for the same instant — never a
+    // bet momentarily eligible for (or missed by) both, or neither.
+    // Sequential, not Promise.all: active polling runs to completion
+    // first, the expiry/structural sweep second — the order this stage's
+    // own design explicitly calls for.
+    const now = new Date();
+    const pollReport: PollingReport = await poll(prisma, { ...POLL_OPTIONS, now });
+    const sweepReport: EscalateExpiredPollingReport = await escalate(prisma, { now });
+
+    const report: CombinedPollingReport = {
+      ...pollReport,
+      expiredPollingEscalations: sweepReport.escalatedSingles + sweepReport.escalatedExpresses,
+      structuralReviewEscalations: sweepReport.structurallyInvalid,
+      legacySkipped: sweepReport.skippedLegacy,
+    };
     return jsonResponse({ success: true, report }, 200);
   } catch {
     // Deliberately a single static string, never the caught error itself

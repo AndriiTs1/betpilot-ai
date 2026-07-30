@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { NextRequest } from "next/server";
 import { handlePollResults, GET } from "./route";
 import type { PollingReport } from "@/lib/bets/settlement/pollConfirmedBetResults";
+import type { EscalateExpiredPollingReport } from "@/lib/bets/settlement/escalateExpiredPolling";
 
 const CRON_SECRET = "test-cron-secret-value";
 const originalSecret = process.env.CRON_SECRET;
@@ -55,12 +56,45 @@ const SAMPLE_REPORT: PollingReport = {
   rejected: 1,
   conflicts: 0,
   failed: 0,
+  transientFailures: 0,
+  permanentReviewFailures: 0,
+  escalatedToManualReview: 0,
 };
 
 function fakePoll(callLog: Array<{ db: unknown; options: unknown }>, report: PollingReport = SAMPLE_REPORT, shouldThrow = false) {
   return async (db: unknown, options: unknown) => {
     callLog.push({ db, options });
     if (shouldThrow) throw new Error("simulated polling failure with a sensitive-looking detail: apiKey=super-secret-key");
+    return report;
+  };
+}
+
+// Stage 4.3.4 — the route now also calls escalateExpiredPolling(); every
+// test that exercises the authorized path must inject a fake for it too
+// (never the real implementation, which would attempt a real database
+// call). Defaults to an all-zero report — tests that care about its exact
+// content pass their own.
+const SAMPLE_SWEEP_REPORT: EscalateExpiredPollingReport = {
+  scanned: 0,
+  escalatedSingles: 0,
+  escalatedExpresses: 0,
+  structurallyInvalid: 0,
+  skippedLegacy: 0,
+};
+
+const MERGED_SAMPLE_REPORT = {
+  ...SAMPLE_REPORT,
+  expiredPollingEscalations: 0,
+  structuralReviewEscalations: 0,
+  legacySkipped: 0,
+};
+
+function fakeEscalate(
+  callLog: Array<{ db: unknown; options: unknown }> = [],
+  report: EscalateExpiredPollingReport = SAMPLE_SWEEP_REPORT,
+) {
+  return async (db: unknown, options: unknown) => {
+    callLog.push({ db, options });
     return report;
   };
 }
@@ -72,7 +106,7 @@ function fakePoll(callLog: Array<{ db: unknown; options: unknown }>, report: Pol
 test("missing CRON_SECRET -> 500, poll never called", async () => {
   delete process.env.CRON_SECRET;
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never });
+  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
 
   assert.equal(res.status, 500);
   assert.deepEqual(await json(res), { success: false, error: { code: "INTERNAL_ERROR", message: "Internal server error" } });
@@ -82,7 +116,7 @@ test("missing CRON_SECRET -> 500, poll never called", async () => {
 test("empty CRON_SECRET -> 500, poll never called", async () => {
   process.env.CRON_SECRET = "";
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never });
+  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
 
   assert.equal(res.status, 500);
   assert.equal(callLog.length, 0);
@@ -94,7 +128,7 @@ test("empty CRON_SECRET -> 500, poll never called", async () => {
 
 test("missing Authorization -> 401, poll never called", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(null), { poll: fakePoll(callLog) as never });
+  const res = await handlePollResults(pollRequest(null), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
 
   assert.equal(res.status, 401);
   assert.deepEqual(await json(res), { success: false, error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
@@ -103,7 +137,7 @@ test("missing Authorization -> 401, poll never called", async () => {
 
 test("empty Authorization -> 401, poll never called", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(""), { poll: fakePoll(callLog) as never });
+  const res = await handlePollResults(pollRequest(""), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
 
   assert.equal(res.status, 401);
   assert.equal(callLog.length, 0);
@@ -111,7 +145,7 @@ test("empty Authorization -> 401, poll never called", async () => {
 
 test("wrong scheme -> 401, poll never called", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(`Basic ${CRON_SECRET}`), { poll: fakePoll(callLog) as never });
+  const res = await handlePollResults(pollRequest(`Basic ${CRON_SECRET}`), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
 
   assert.equal(res.status, 401);
   assert.equal(callLog.length, 0);
@@ -119,7 +153,7 @@ test("wrong scheme -> 401, poll never called", async () => {
 
 test("wrong token -> 401, poll never called", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest("Bearer wrong-token"), { poll: fakePoll(callLog) as never });
+  const res = await handlePollResults(pollRequest("Bearer wrong-token"), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
 
   assert.equal(res.status, 401);
   assert.equal(callLog.length, 0);
@@ -131,23 +165,27 @@ test("wrong token -> 401, poll never called", async () => {
 
 test("correct token -> 200", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never });
+  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
 
   assert.equal(res.status, 200);
 });
 
 test("authorized request calls poll exactly once", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never });
+  await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
 
   assert.equal(callLog.length, 1);
 });
 
-test("poll is called with exactly { limit: 25, concurrency: 2 } — no more, no less", async () => {
+test("poll is called with exactly { limit: 25, concurrency: 2, now } — no more, no less", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never });
+  await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
 
-  assert.deepEqual(callLog[0].options, { limit: 25, concurrency: 2 });
+  const options = callLog[0].options as { limit: number; concurrency: number; now: Date };
+  assert.deepEqual(Object.keys(options).sort(), ["concurrency", "limit", "now"]);
+  assert.equal(options.limit, 25);
+  assert.equal(options.concurrency, 2);
+  assert.ok(options.now instanceof Date);
 });
 
 /* -------------------------------------------------------------------------- */
@@ -158,18 +196,38 @@ test("a limit query param does not change the options passed to poll", async () 
   const callLog: Array<{ db: unknown; options: unknown }> = [];
   await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`, "http://localhost/api/internal/poll-results?limit=99999"), {
     poll: fakePoll(callLog) as never,
+    escalate: fakeEscalate() as never,
   });
 
-  assert.deepEqual(callLog[0].options, { limit: 25, concurrency: 2 });
+  const options = callLog[0].options as { limit: number; concurrency: number };
+  assert.equal(options.limit, 25);
+  assert.equal(options.concurrency, 2);
 });
 
 test("a concurrency query param does not change the options passed to poll", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
   await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`, "http://localhost/api/internal/poll-results?concurrency=50"), {
     poll: fakePoll(callLog) as never,
+    escalate: fakeEscalate() as never,
   });
 
-  assert.deepEqual(callLog[0].options, { limit: 25, concurrency: 2 });
+  const options = callLog[0].options as { limit: number; concurrency: number };
+  assert.equal(options.limit, 25);
+  assert.equal(options.concurrency, 2);
+});
+
+test("escalateExpiredPolling is called exactly once, with the same `now` instance passed to poll", async () => {
+  const pollCallLog: Array<{ db: unknown; options: unknown }> = [];
+  const escalateCallLog: Array<{ db: unknown; options: unknown }> = [];
+  await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), {
+    poll: fakePoll(pollCallLog) as never,
+    escalate: fakeEscalate(escalateCallLog) as never,
+  });
+
+  assert.equal(escalateCallLog.length, 1);
+  const pollNow = (pollCallLog[0].options as { now: Date }).now;
+  const escalateNow = (escalateCallLog[0].options as { now: Date }).now;
+  assert.equal(pollNow.getTime(), escalateNow.getTime());
 });
 
 /* -------------------------------------------------------------------------- */
@@ -178,15 +236,15 @@ test("a concurrency query param does not change the options passed to poll", asy
 
 test("success returns the exact PollingReport from poll", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never });
+  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
   const body = await json(res);
 
-  assert.deepEqual(body, { success: true, report: SAMPLE_REPORT });
+  assert.deepEqual(body, { success: true, report: MERGED_SAMPLE_REPORT });
 });
 
 test("success body contains no secret", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never });
+  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
   const bodyText = JSON.stringify(await json(res));
 
   assert.equal(bodyText.includes(CRON_SECRET), false);
@@ -194,7 +252,7 @@ test("success body contains no secret", async () => {
 
 test("success body contains no Authorization value", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never });
+  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
   const bodyText = JSON.stringify(await json(res));
 
   assert.equal(bodyText.includes("Bearer"), false);
@@ -202,11 +260,11 @@ test("success body contains no Authorization value", async () => {
 
 test("success body contains nothing beyond { success, report } — no raw provider payload", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never });
+  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
   const body = await json(res);
 
   assert.deepEqual(Object.keys(body).sort(), ["report", "success"]);
-  assert.deepEqual(Object.keys(body.report as object).sort(), Object.keys(SAMPLE_REPORT).sort());
+  assert.deepEqual(Object.keys(body.report as object).sort(), Object.keys(MERGED_SAMPLE_REPORT).sort());
 });
 
 /* -------------------------------------------------------------------------- */
@@ -215,14 +273,14 @@ test("success body contains nothing beyond { success, report } — no raw provid
 
 test("poll throws -> 500", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog, SAMPLE_REPORT, true) as never });
+  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog, SAMPLE_REPORT, true) as never, escalate: fakeEscalate() as never });
 
   assert.equal(res.status, 500);
 });
 
 test("raw error message from a thrown poll() error never appears in the response body", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog, SAMPLE_REPORT, true) as never });
+  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog, SAMPLE_REPORT, true) as never, escalate: fakeEscalate() as never });
   const bodyText = JSON.stringify(await json(res));
 
   assert.equal(bodyText.includes("apiKey=super-secret-key"), false);
@@ -231,7 +289,7 @@ test("raw error message from a thrown poll() error never appears in the response
 
 test("no stack trace appears in the response body", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog, SAMPLE_REPORT, true) as never });
+  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog, SAMPLE_REPORT, true) as never, escalate: fakeEscalate() as never });
   const body = await json(res);
 
   assert.equal(JSON.stringify(body).includes("at "), false); // no stack-trace-shaped content
@@ -252,7 +310,7 @@ function fakePollThrowingSecretError(callLog: Array<{ db: unknown; options: unkn
 
 test("a poll() error containing an embedded secret never appears in the response body, message, or stack", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePollThrowingSecretError(callLog) as never });
+  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePollThrowingSecretError(callLog) as never, escalate: fakeEscalate() as never });
   const bodyText = JSON.stringify(await json(res));
 
   assert.equal(bodyText.includes("super-secret-value"), false);
@@ -263,7 +321,7 @@ test("a poll() error containing an embedded secret never appears in the response
 
 test("console.error never receives the caught Error object, its message, or its stack for a polling failure", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePollThrowingSecretError(callLog) as never });
+  await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePollThrowingSecretError(callLog) as never, escalate: fakeEscalate() as never });
 
   const loggedText = JSON.stringify(consoleErrorCalls);
   assert.equal(loggedText.includes("super-secret-value"), false);
@@ -279,7 +337,7 @@ test("console.error never receives the caught Error object, its message, or its 
 
 test("console.error is called with exactly one static string argument for a polling failure — no error object, no interpolated detail", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePollThrowingSecretError(callLog) as never });
+  await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePollThrowingSecretError(callLog) as never, escalate: fakeEscalate() as never });
 
   assert.equal(consoleErrorCalls.length, 1);
   assert.deepEqual(consoleErrorCalls[0], ["Internal polling route failed"]);
@@ -287,7 +345,7 @@ test("console.error is called with exactly one static string argument for a poll
 
 test("console.error for a polling failure never receives the Authorization header value or CRON_SECRET", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePollThrowingSecretError(callLog) as never });
+  await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePollThrowingSecretError(callLog) as never, escalate: fakeEscalate() as never });
 
   const loggedText = JSON.stringify(consoleErrorCalls);
   assert.equal(loggedText.includes(CRON_SECRET), false);
@@ -297,7 +355,7 @@ test("console.error for a polling failure never receives the Authorization heade
 test("missing CRON_SECRET produces a single static log line that does not contain any secret value", async () => {
   delete process.env.CRON_SECRET;
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never });
+  await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
 
   assert.equal(consoleErrorCalls.length, 1);
   assert.equal(consoleErrorCalls[0].length, 1);
@@ -312,19 +370,19 @@ test("missing CRON_SECRET produces a single static log line that does not contai
 
 test("Cache-Control: no-store on 200", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never });
+  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
   assert.equal(res.headers.get("Cache-Control"), "no-store");
 });
 
 test("Cache-Control: no-store on 401", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(null), { poll: fakePoll(callLog) as never });
+  const res = await handlePollResults(pollRequest(null), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
   assert.equal(res.headers.get("Cache-Control"), "no-store");
 });
 
 test("Cache-Control: no-store on 500", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog, SAMPLE_REPORT, true) as never });
+  const res = await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog, SAMPLE_REPORT, true) as never, escalate: fakeEscalate() as never });
   assert.equal(res.headers.get("Cache-Control"), "no-store");
 });
 
@@ -335,14 +393,14 @@ test("Cache-Control: no-store on 500", async () => {
 
 test("unauthorized request does not call poll (restated)", async () => {
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  await handlePollResults(pollRequest("Bearer wrong"), { poll: fakePoll(callLog) as never });
+  await handlePollResults(pollRequest("Bearer wrong"), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
   assert.equal(callLog.length, 0);
 });
 
 test("missing configuration does not call poll (restated)", async () => {
   delete process.env.CRON_SECRET;
   const callLog: Array<{ db: unknown; options: unknown }> = [];
-  await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never });
+  await handlePollResults(pollRequest(`Bearer ${CRON_SECRET}`), { poll: fakePoll(callLog) as never, escalate: fakeEscalate() as never });
   assert.equal(callLog.length, 0);
 });
 
