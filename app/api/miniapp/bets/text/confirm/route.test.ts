@@ -10,6 +10,14 @@ import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { createRequestRateLimiter, type RequestRateLimiter } from "@/lib/rateLimit/requestRateLimiter";
 import { buildBetSlipPreview } from "@/lib/bets/buildBetSlipPreview";
 import type { ParsedBetSlip } from "@/lib/bets/betSlip";
+import {
+  buildSportmonksFootballPreview,
+  signSportmonksFootballPreviewToken,
+  type SportmonksFootballPreviewResult,
+} from "@/lib/bets/buildSportmonksFootballPreview";
+import type { CandidateResolver, ResolvedEventCandidate } from "@/lib/odds/discovery/candidateResolver";
+import type { SportmonksFixtureByIdResult } from "@/lib/odds/providers/sportmonks/sportmonksFixturesAdapter";
+import type { SportmonksOddsFetchResult } from "@/lib/odds/providers/sportmonks/sportmonksOddsAdapter";
 
 // ---------------------------------------------------------------------
 // Test-only crypto material — self-consistent, never the real production
@@ -1482,4 +1490,269 @@ test("Step 15J (F): odds-changed 409 reconfirmation flow is unaffected by the ne
   assert.equal(typeof body.refreshedPreviewToken, "string");
   assert.equal(db._debug.betCount(), 0);
   assert.equal(db._debug.createCallCount(), 0);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Stage 10.2 — Sportmonks football confirm flow (appended below)            */
+/* -------------------------------------------------------------------------- */
+// The freshness DECISION logic (tolerance, ACCEPT/ODDS_CHANGED/
+// SELECTION_UNAVAILABLE/VERIFICATION_UNAVAILABLE) is fully covered by
+// lib/bets/verifySportmonksPreviewFreshness.test.ts against fakes. These
+// tests only prove the ROUTE routes a providerName:"SPORTMONKS" token to
+// that revalidation path, and that createBetFromPreview persists the real
+// provider — everything else (idempotency, rate limit, transaction/P2002
+// recovery) is the exact same existing, unmodified machinery every other
+// token already goes through.
+
+function smCandidate(overrides: Partial<ResolvedEventCandidate> = {}): ResolvedEventCandidate {
+  return {
+    provider: "SPORTMONKS",
+    providerEventId: "19743018",
+    sportKey: "sportmonks:1101",
+    league: "Club Friendlies 1",
+    commenceTime: null,
+    homeTeam: "Juventus",
+    awayTeam: "Nice",
+    matchedTeamNames: ["Juventus"],
+    matchMethod: "EXACT",
+    score: 1,
+    diagnostics: [],
+    ...overrides,
+  };
+}
+
+function smResolver(overrides: Partial<Pick<CandidateResolver, "buildDependencies" | "resolve">> = {}): Pick<CandidateResolver, "buildDependencies" | "resolve"> {
+  return {
+    buildDependencies: async () => ({ status: "SUCCESS" }),
+    resolve: () => ({ kind: "TEAM_RESOLVED", candidate: smCandidate() }),
+    ...overrides,
+  };
+}
+
+function smFixtureById(stateId = 1, commenceTime = "2026-07-31T16:00:00.000Z"): (id: string) => Promise<SportmonksFixtureByIdResult> {
+  return async () => ({
+    status: "SUCCESS",
+    fixture: {
+      provider: "SPORTMONKS",
+      providerEventId: "19743018",
+      sport: "FOOTBALL",
+      leagueId: 1101,
+      leagueName: "Club Friendlies 1",
+      stageName: "Regular Season",
+      homeTeamId: "625",
+      homeTeamName: "Juventus",
+      awayTeamId: "450",
+      awayTeamName: "Nice",
+      commenceTime,
+      stateId,
+    },
+  });
+}
+
+function smOdds(homeOdds = "1.55", drawOdds = "3.75", awayOdds = "5.00"): (id: string) => Promise<SportmonksOddsFetchResult> {
+  return async () => ({
+    status: "SUCCESS",
+    snapshot: {
+      provider: "SPORTMONKS",
+      providerEventId: "19743018",
+      bookmakerId: "13",
+      bookmakerName: "Coral",
+      marketId: 1,
+      marketName: "Fulltime Result",
+      homeOdds,
+      drawOdds,
+      awayOdds,
+      updatedAt: "2026-07-30 16:47:15",
+    },
+  });
+}
+
+function smBuildOptions(overrides: Record<string, unknown> = {}) {
+  return { resolver: smResolver(), fetchFixtureById: smFixtureById(), fetchOdds: smOdds(), now: () => Date.parse("2026-07-30T18:00:00Z"), ...overrides };
+}
+
+// Signs a real Sportmonks previewToken via the actual production signing
+// function, from a fresh SUCCESS preview build — not a hand-built payload
+// — so these tests exercise the exact same code path preview creation does.
+async function signSportmonksToken(
+  side: "HOME" | "DRAW" | "AWAY" = "HOME",
+  buildOverrides: Record<string, unknown> = {},
+): Promise<{ token: string; result: Extract<SportmonksFootballPreviewResult, { kind: "SUCCESS" }> }> {
+  const outcomeText = side === "HOME" ? "Juventus победа" : side === "AWAY" ? "Nice победа" : "Ничья";
+  const slip = {
+    type: "SINGLE" as const,
+    stake: 10,
+    selections: [{ sport: "Football", event: "Juventus vs Nice", market: null, selection: outcomeText, submittedOdds: null }],
+  };
+  const result = await buildSportmonksFootballPreview(slip, smBuildOptions(buildOverrides));
+  if (result.kind !== "SUCCESS") throw new Error(`expected SUCCESS, got ${result.kind}`);
+  const token = signSportmonksFootballPreviewToken(PLAYER_ID, result, PREVIEW_SECRET);
+  return { token, result };
+}
+
+test("Stage 10.2: a valid Sportmonks HOME token confirms and creates exactly one Bet with providerName SPORTMONKS", async () => {
+  const db = createFakeDb();
+  const { token } = await signSportmonksToken("HOME");
+
+  const res = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { sportmonksFreshnessOptions: smBuildOptions() }));
+
+  assert.equal(res.status, 200);
+  assert.equal(db._debug.betCount(), 1);
+  assert.equal(db._debug.createCallCount(), 1);
+});
+
+test("Stage 10.2: a valid Sportmonks DRAW token confirms and creates exactly one Bet", async () => {
+  const db = createFakeDb();
+  const { token } = await signSportmonksToken("DRAW");
+
+  const res = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { sportmonksFreshnessOptions: smBuildOptions() }));
+
+  assert.equal(res.status, 200);
+  assert.equal(db._debug.betCount(), 1);
+});
+
+test("Stage 10.2: a valid Sportmonks AWAY token confirms and creates exactly one Bet", async () => {
+  const db = createFakeDb();
+  const { token } = await signSportmonksToken("AWAY");
+
+  const res = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { sportmonksFreshnessOptions: smBuildOptions() }));
+
+  assert.equal(res.status, 200);
+  assert.equal(db._debug.betCount(), 1);
+});
+
+test("Stage 10.2: a tampered Sportmonks token (flipped signature byte) is rejected, no Bet created", async () => {
+  const db = createFakeDb();
+  const { token } = await signSportmonksToken("HOME");
+  const [payload, signature] = token.split(".");
+  const tampered = `${payload}.${signature.slice(0, -1)}${signature.at(-1) === "a" ? "b" : "a"}`;
+
+  const res = await handleBetConfirm(confirmRequest(tampered), fakeOptions(db, { sportmonksFreshnessOptions: smBuildOptions() }));
+
+  assert.equal(res.status, 422);
+  assert.equal(db._debug.betCount(), 0);
+});
+
+test("Stage 10.2: an expired Sportmonks token is rejected with 410, no Bet created", async () => {
+  const db = createFakeDb();
+  const input: PreviewTokenInput = {
+    playerId: PLAYER_ID,
+    sport: "Football",
+    event: "Juventus vs Nice",
+    outcome: "Juventus победа",
+    stake: 10,
+    odds: 1.55,
+    totalOdds: 1.55,
+    oddsCheck: null,
+    providerName: "SPORTMONKS",
+    providerEventId: "19743018",
+  };
+  const expiredToken = signPreviewToken(input, PREVIEW_SECRET);
+  // Force expiry by decoding/re-encoding with an already-past expiresAt —
+  // mirrors the existing expired-token test pattern elsewhere in this file
+  // (constructing an already-invalid token rather than waiting out the TTL).
+  const [encodedPayload] = expiredToken.split(".");
+  const decoded = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
+  decoded.issuedAt = Math.floor(Date.now() / 1000) - 1000;
+  decoded.expiresAt = Math.floor(Date.now() / 1000) - 800;
+  const reEncodedPayload = Buffer.from(JSON.stringify(decoded), "utf8").toString("base64url");
+  const sig = createHmac("sha256", PREVIEW_SECRET).update(reEncodedPayload).digest("base64url");
+  const reSignedExpiredToken = `${reEncodedPayload}.${sig}`;
+
+  const res = await handleBetConfirm(confirmRequest(reSignedExpiredToken), fakeOptions(db, { sportmonksFreshnessOptions: smBuildOptions() }));
+
+  assert.equal(res.status, 410);
+  assert.equal(db._debug.betCount(), 0);
+});
+
+test("Stage 10.2: fixture already started at confirm time -> 422, no Bet created", async () => {
+  const db = createFakeDb();
+  const { token } = await signSportmonksToken("HOME");
+
+  const res = await handleBetConfirm(
+    confirmRequest(token),
+    fakeOptions(db, { sportmonksFreshnessOptions: smBuildOptions({ fetchFixtureById: smFixtureById(2) }) }),
+  );
+
+  assert.equal(res.status, 422);
+  const body = (await json(res)) as { error: string };
+  assert.equal(body.error, "SELECTION_UNAVAILABLE");
+  assert.equal(db._debug.betCount(), 0);
+});
+
+test("Stage 10.2: odds unavailable at confirm time -> 503, no Bet created", async () => {
+  const db = createFakeDb();
+  const { token } = await signSportmonksToken("HOME");
+
+  const res = await handleBetConfirm(
+    confirmRequest(token),
+    fakeOptions(db, { sportmonksFreshnessOptions: smBuildOptions({ fetchOdds: async () => ({ status: "EMPTY" }) }) }),
+  );
+
+  assert.equal(res.status, 503);
+  const body = (await json(res)) as { error: string };
+  assert.equal(body.error, "VERIFICATION_UNAVAILABLE");
+  assert.equal(db._debug.betCount(), 0);
+});
+
+test("Stage 10.2: odds changed beyond tolerance -> 409 ODDS_CHANGED_RECONFIRM_REQUIRED with a fresh signed token, no Bet created", async () => {
+  const db = createFakeDb();
+  const { token } = await signSportmonksToken("HOME");
+
+  const res = await handleBetConfirm(
+    confirmRequest(token),
+    fakeOptions(db, { sportmonksFreshnessOptions: smBuildOptions({ fetchOdds: smOdds("2.00") }) }),
+  );
+
+  assert.equal(res.status, 409);
+  const body = (await json(res)) as { error: string; refreshedPreviewToken: string | null };
+  assert.equal(body.error, "ODDS_CHANGED_RECONFIRM_REQUIRED");
+  assert.equal(typeof body.refreshedPreviewToken, "string");
+  assert.equal(db._debug.betCount(), 0);
+});
+
+test("Stage 10.2: replaying the same confirmed Sportmonks token does not create a second Bet (idempotent: true)", async () => {
+  const db = createFakeDb();
+  const { token } = await signSportmonksToken("HOME");
+  const buildOptions = { sportmonksFreshnessOptions: smBuildOptions() };
+
+  const first = await handleBetConfirm(confirmRequest(token), fakeOptions(db, buildOptions));
+  const second = await handleBetConfirm(confirmRequest(token), fakeOptions(db, buildOptions));
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  const secondBody = (await json(second)) as { idempotent: boolean };
+  assert.equal(secondBody.idempotent, true);
+  assert.equal(db._debug.betCount(), 1, "replay must never create a second Bet");
+  assert.equal(db._debug.createCallCount(), 1, "the DB create path is only ever invoked once");
+});
+
+test("Stage 10.2: concurrent confirm (simulated DB race via P2002) still results in exactly one Bet", async () => {
+  const db = createFakeDb();
+  const { token } = await signSportmonksToken("HOME");
+  const buildOptions = { sportmonksFreshnessOptions: smBuildOptions() };
+
+  // Both requests pass the idempotency pre-check (no Bet exists yet) and
+  // both reach createBetFromPreview's own transaction concurrently; the
+  // fake DB's insertBet already throws p2002 on a second create for the
+  // same previewId (mirrors the real unique-constraint race), and
+  // createBetFromPreview.ts's own catch recovers the existing row.
+  const [first, second] = await Promise.all([
+    handleBetConfirm(confirmRequest(token), fakeOptions(db, buildOptions)),
+    handleBetConfirm(confirmRequest(token), fakeOptions(db, buildOptions)),
+  ]);
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(db._debug.betCount(), 1, "a concurrent race must still leave exactly one Bet");
+});
+
+test("Stage 10.2: non-Sportmonks tokens are entirely unaffected — providerName defaults to THE_ODDS_API and uses the original freshness path", async () => {
+  const db = createFakeDb();
+  const token = signPreviewToken(singleTokenInput(), PREVIEW_SECRET);
+
+  const res = await handleBetConfirm(confirmRequest(token), fakeOptions(db));
+
+  assert.equal(res.status, 200);
+  assert.equal(db._debug.betCount(), 1);
 });

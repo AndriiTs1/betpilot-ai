@@ -11,6 +11,7 @@ import { createRequestRateLimiter, type RequestRateLimiter } from "@/lib/rateLim
 import type { CandidateResolver, ResolvedEventCandidate } from "@/lib/odds/discovery/candidateResolver";
 import type { SportmonksFixtureByIdResult } from "@/lib/odds/providers/sportmonks/sportmonksFixturesAdapter";
 import type { SportmonksOddsFetchResult } from "@/lib/odds/providers/sportmonks/sportmonksOddsAdapter";
+import { verifyPreviewToken } from "@/lib/betPreview/previewToken";
 
 // Step 13B — this route previously had no test file and no DI seam at all
 // (a bare `export async function POST`, unlike its screenshot/preview and
@@ -573,7 +574,7 @@ test("Stage 10: flag OFF (unset) — a football message uses the existing The Od
   assert.equal(sportmonksResolverCalled, false, "Sportmonks path must never be touched when the flag is off");
 });
 
-test("Stage 10: flag ON — a football SINGLE bet resolves through Sportmonks and returns a null previewToken", async () => {
+test("Stage 10.2: flag ON — a football SINGLE bet resolves through Sportmonks and returns a real, signed, provider-tagged previewToken", async () => {
   process.env.SPORTMONKS_FOOTBALL_PREVIEW_ENABLED = "true";
   let oddsApiVerifyCalled = false;
 
@@ -599,7 +600,17 @@ test("Stage 10: flag ON — a football SINGLE bet resolves through Sportmonks an
   assert.equal(body.preview.type, "SINGLE");
   assert.equal(body.preview.selections[0].event, "Juventus vs Nice");
   assert.equal(body.preview.selections[0].currentOdds, 1.55);
-  assert.equal(body.previewToken, null, "Sportmonks path must never sign a previewToken");
+  assert.equal(typeof body.previewToken, "string", "Stage 10.2: Sportmonks preview now signs a real token");
+  assert.ok(body.previewToken.length > 0);
+
+  const verified = verifyPreviewToken(body.previewToken, PREVIEW_TOKEN_SECRET);
+  assert.equal(verified.ok, true);
+  if (verified.ok) {
+    assert.equal(verified.payload.providerName, "SPORTMONKS");
+    assert.equal(verified.payload.providerEventId, "19743018");
+    assert.equal(verified.payload.playerId, PLAYER_ID);
+  }
+
   assert.equal(oddsApiVerifyCalled, false, "The Odds API must never be called for a flag-on football SINGLE");
 });
 

@@ -49,6 +49,18 @@ export interface PreviewTokenProviderMetadata {
 // (this is the DECODED/verified shape; verifyPreviewToken's own
 // normalizeProviderMetadata is what actually guarantees `string | null`,
 // never `undefined`, for every real token this module itself produces).
+// Stage 10.2 — which provider resolved this event. Optional/nullable-by-
+// omission on purpose, mirroring PreviewTokenProviderMetadata's own
+// backward-compatibility rule immediately above: an older token (signed
+// before this field existed) simply has it absent, normalized to
+// "THE_ODDS_API" below (normalizeProviderMetadata) — the same value
+// createBetFromPreview.ts already hardcoded unconditionally before this
+// stage, so every existing token's real-world meaning is unchanged. A
+// plain `string` (not an import of lib/odds/oddsProvider.ts's ProviderName)
+// deliberately keeps this module dependency-light, matching its existing
+// "no domain/provider imports" shape — validated only as "is this a
+// non-empty string" by hasValidPreviewTokenShape below, same rigor as
+// every other metadata field here.
 export interface PreviewTokenPayload extends Partial<PreviewTokenProviderMetadata> {
   v: typeof TOKEN_VERSION;
   previewId: string;
@@ -61,6 +73,7 @@ export interface PreviewTokenPayload extends Partial<PreviewTokenProviderMetadat
   odds: number | null;
   totalOdds: number | null;
   oddsCheck: PreviewTokenOddsCheck | null;
+  providerName?: string;
   issuedAt: number;
   expiresAt: number;
 }
@@ -74,6 +87,7 @@ export interface PreviewTokenInput extends Partial<PreviewTokenProviderMetadata>
   odds: number | null;
   totalOdds: number | null;
   oddsCheck: PreviewTokenOddsCheck | null;
+  providerName?: string;
 }
 
 export type VerifyPreviewTokenFailureReason =
@@ -152,6 +166,10 @@ function normalizeProviderMetadata(p: PreviewTokenPayload): PreviewTokenPayload 
     canonicalSelectionType: p.canonicalSelectionType ?? null,
     canonicalParticipant: p.canonicalParticipant ?? null,
     canonicalPeriod: p.canonicalPeriod ?? null,
+    // Stage 10.2 — an absent providerName (every token signed before this
+    // field existed) means exactly what createBetFromPreview.ts already
+    // hardcoded unconditionally: "THE_ODDS_API". Never left undefined.
+    providerName: p.providerName ?? "THE_ODDS_API",
   };
 }
 
@@ -176,6 +194,7 @@ function hasValidPreviewTokenShape(
     (p.odds === null || typeof p.odds === "number") &&
     (p.totalOdds === null || typeof p.totalOdds === "number") &&
     isPreviewTokenOddsCheckShape(p.oddsCheck) &&
+    (p.providerName === undefined || (typeof p.providerName === "string" && p.providerName.length > 0)) &&
     typeof p.issuedAt === "number" &&
     typeof p.expiresAt === "number" &&
     hasValidProviderMetadataShape(p)
@@ -201,6 +220,7 @@ export function signPreviewToken(input: PreviewTokenInput, secret: string): stri
     odds: input.odds,
     totalOdds: input.totalOdds,
     oddsCheck: input.oddsCheck,
+    providerName: input.providerName ?? "THE_ODDS_API",
     providerEventId: input.providerEventId ?? null,
     providerSportKey: input.providerSportKey ?? null,
     eventStartTime: input.eventStartTime ?? null,

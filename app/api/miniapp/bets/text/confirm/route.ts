@@ -10,6 +10,10 @@ import {
 import { createBetFromPreview } from "@/lib/bets/createBetFromPreview";
 import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
 import { verifyPreviewFreshness, type VerifyPreviewFreshnessOptions } from "@/lib/bets/verifyPreviewFreshness";
+import {
+  verifySportmonksPreviewFreshness,
+  type VerifySportmonksPreviewFreshnessOptions,
+} from "@/lib/bets/verifySportmonksPreviewFreshness";
 import { createRequestRateLimiter, safeCheckAndRecord, type RequestRateLimiter } from "@/lib/rateLimit/requestRateLimiter";
 import { rateLimitedResponse } from "@/lib/rateLimit/rateLimitResponse";
 
@@ -188,6 +192,10 @@ export interface HandleBetConfirmOptions {
   verifyOddsFn?: VerifyPreviewFreshnessOptions["verifyOddsFn"];
   oddsVerificationService?: VerifyPreviewFreshnessOptions["oddsVerificationService"];
   rateLimiter?: RequestRateLimiter;
+  // Stage 10.2 — DI seam for revalidating a Sportmonks-sourced SINGLE
+  // token, same shape convention as verifyOddsFn/oddsVerificationService
+  // above. Production never overrides this.
+  sportmonksFreshnessOptions?: VerifySportmonksPreviewFreshnessOptions["buildOptions"];
 }
 
 export async function handleBetConfirm(
@@ -405,10 +413,27 @@ export async function handleBetConfirm(
     // pure domain service (lib/bets/verifyPreviewFreshness.ts) that reuses
     // buildBetSlipPreview() exactly once, never a direct provider call, and
     // never a second comparison implementation.
-    const freshness = await verifyPreviewFreshness(payload, previewTokenSecret, {
-      verifyOddsFn: options.verifyOddsFn,
-      oddsVerificationService: options.oddsVerificationService,
-    });
+    //
+    // Stage 10.2 — a token whose payload.providerName is "SPORTMONKS"
+    // (normalizeProviderMetadata guarantees this field is always a concrete
+    // string on any verified token, old or new) is routed to the Sportmonks
+    // equivalent instead: same contract (VerifyPreviewFreshnessDecision),
+    // same reused decideFreshnessOutcome policy, but re-resolves via
+    // Sportmonks (fixture-still-upcoming check + live 1X2 re-fetch) rather
+    // than calling buildBetSlipPreview()/The Odds API. Every branch below
+    // this point (ODDS_CHANGED / SELECTION_UNAVAILABLE /
+    // VERIFICATION_UNAVAILABLE / createBetFromPreview) is completely
+    // unaffected — it already operates generically on whichever
+    // VerifyPreviewFreshnessDecision it receives.
+    const freshness =
+      payload.providerName === "SPORTMONKS"
+        ? await verifySportmonksPreviewFreshness(payload, previewTokenSecret, {
+            buildOptions: options.sportmonksFreshnessOptions,
+          })
+        : await verifyPreviewFreshness(payload, previewTokenSecret, {
+            verifyOddsFn: options.verifyOddsFn,
+            oddsVerificationService: options.oddsVerificationService,
+          });
 
     if (freshness.kind === "ODDS_CHANGED") {
       return NextResponse.json(

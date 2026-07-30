@@ -94,14 +94,16 @@ function isValidDecimalString(value: unknown): value is string {
   return typeof value === "string" && DECIMAL_STRING_PATTERN.test(value);
 }
 
-// Stage 3.1 — only one provider exists today (lib/odds/oddsProvider.ts's
-// ProviderName is a single-member union, "THE_ODDS_API"), so this is a
-// literal constant, not a value threaded through the preview token — adding
-// a redundant providerName field to the already-large token payload for a
-// value with zero actual variability would be pure overhead. Honest because
-// it's only ever attached when providerEventId is genuinely present (an
-// event this exact provider actually resolved) — never on a Bet/BetSelection
-// that has no provider event metadata at all.
+// Stage 10.2 — a second real provider (Sportmonks) now exists, so this is
+// only the DEFAULT for a token that never set its own providerName
+// (previewToken.ts's normalizeProviderMetadata already guarantees every
+// verified token — old or new — has a concrete providerName string, never
+// undefined; this constant exists here purely as
+// providerReferenceColumnsFromToken's own fallback for a caller that omits
+// the field entirely, e.g. a hand-built test fixture). Still only ever
+// attached when providerEventId is genuinely present (an event some
+// provider actually resolved) — never on a Bet/BetSelection that has no
+// provider event metadata at all.
 const PROVIDER_NAME = "THE_ODDS_API";
 
 // Stage 3.1 — defense-in-depth: by the time a value reaches here it should
@@ -138,6 +140,7 @@ interface ProviderReferenceColumns {
 }
 
 function providerReferenceColumnsFromToken(source: {
+  providerName?: string | null;
   providerEventId?: string | null;
   providerSportKey?: string | null;
   eventStartTime?: string | null;
@@ -149,7 +152,7 @@ function providerReferenceColumnsFromToken(source: {
   const providerEventId = source.providerEventId ?? null;
 
   return {
-    providerName: providerEventId !== null ? PROVIDER_NAME : null,
+    providerName: providerEventId !== null ? (source.providerName ?? PROVIDER_NAME) : null,
     providerEventId,
     providerSportKey: source.providerSportKey ?? null,
     eventStartTime: parseValidEventStartTime(source.eventStartTime),

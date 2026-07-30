@@ -4,16 +4,20 @@
 // code, Sportmonks-backed instance) -> odds (Sportmonks pre-match 1X2) ->
 // the EXISTING BetSlipPreview/BetSlipPreviewSelection shape
 // (lib/bets/buildBetSlipPreview.ts, unmodified) -> the EXISTING Mini App
-// preview UI. Never signs a previewToken (always null) — this is a
-// deliberate extra safety margin beyond what Stage 10 strictly asks for:
-// it makes it structurally impossible for the existing Confirm route to
-// redeem a Sportmonks-sourced preview into a Bet, since Confirm requires a
-// valid signed token. Never creates a Bet, never touches balance.
+// preview UI. This function itself never creates a Bet and never touches
+// balance — it only builds a preview and (Stage 10.2) exposes the raw
+// fields needed to sign a real previewToken via
+// signSportmonksFootballPreviewToken below, using the EXISTING signing
+// mechanism (lib/betPreview/previewToken.ts). Actual Bet creation still
+// only ever happens through the existing, unmodified confirm pipeline
+// (app/api/miniapp/bets/text/confirm/route.ts -> createBetFromPreview.ts),
+// after that route's own fresh revalidation.
 
 import { Prisma } from "@/lib/generated/prisma/client";
 import type { ParsedBetSlip } from "@/lib/bets/betSlip";
 import type { BetSlipPreview, BetSlipPreviewSelection } from "@/lib/bets/buildBetSlipPreview";
 import { computeTotalOdds, computePotentialWin } from "@/lib/bets/expressMath";
+import { signPreviewToken } from "@/lib/betPreview/previewToken";
 import type { CandidateResolver, ResolvedEventCandidate } from "@/lib/odds/discovery/candidateResolver";
 import { sportmonksFootballCandidateResolver } from "@/lib/odds/discovery/sportmonksFootballDiscovery";
 import {
@@ -83,8 +87,31 @@ export function inferSelectionSide(selectionText: string, candidate: ResolvedEve
   return null;
 }
 
+// Stage 10.2 — everything the confirm-time signed token / eventual Bet
+// persistence needs beyond what the display-only BetSlipPreview shape
+// already carries. Read only from data this module itself just verified
+// live (the fixture re-check + odds fetch below) — never from anything a
+// client could supply.
+export interface SportmonksFootballPreviewRawFields {
+  readonly providerEventId: string;
+  readonly leagueId: number;
+  readonly leagueName: string | null;
+  readonly stageName: string | null;
+  readonly homeTeamId: string | null;
+  readonly homeTeamName: string;
+  readonly awayTeamId: string | null;
+  readonly awayTeamName: string;
+  readonly commenceTime: string;
+  readonly stateId: number;
+  readonly bookmakerId: string;
+  readonly bookmakerName: string | null;
+  readonly marketId: number;
+  readonly marketName: string;
+  readonly selectionSide: SelectionSide;
+}
+
 export type SportmonksFootballPreviewResult =
-  | { readonly kind: "SUCCESS"; readonly preview: BetSlipPreview }
+  | { readonly kind: "SUCCESS"; readonly preview: BetSlipPreview; readonly raw: SportmonksFootballPreviewRawFields }
   // Not a SINGLE football selection at all — caller falls back to the
   // existing buildBetSlipPreview() pipeline unchanged.
   | { readonly kind: "NOT_APPLICABLE" }
@@ -205,5 +232,59 @@ export async function buildSportmonksFootballPreview(
       potentialWin: potentialWin.toNumber(),
       selections: [previewSelection],
     },
+    raw: {
+      providerEventId: candidate.providerEventId,
+      leagueId: fixtureCheck.fixture.leagueId,
+      leagueName: fixtureCheck.fixture.leagueName,
+      stageName: fixtureCheck.fixture.stageName,
+      homeTeamId: fixtureCheck.fixture.homeTeamId,
+      homeTeamName: fixtureCheck.fixture.homeTeamName,
+      awayTeamId: fixtureCheck.fixture.awayTeamId,
+      awayTeamName: fixtureCheck.fixture.awayTeamName,
+      commenceTime: fixtureCheck.fixture.commenceTime,
+      stateId: fixtureCheck.fixture.stateId,
+      bookmakerId: oddsResult.snapshot.bookmakerId,
+      bookmakerName: oddsResult.snapshot.bookmakerName,
+      marketId: oddsResult.snapshot.marketId,
+      marketName: oddsResult.snapshot.marketName,
+      selectionSide: side,
+    },
   };
+}
+
+// Stage 10.2 — signs a real, short-lived HMAC-signed previewToken for a
+// SUCCESS result, using the EXISTING signPreviewToken mechanism
+// (lib/betPreview/previewToken.ts) — same secret, same 180s TTL, same
+// signature/expiry semantics every other SINGLE bet already gets. No new
+// token format, no new crypto. providerName: "SPORTMONKS" is the one new
+// field that lets the confirm route route revalidation correctly and lets
+// createBetFromPreview.ts persist the real provider instead of the
+// previous hardcoded "THE_ODDS_API" default.
+export function signSportmonksFootballPreviewToken(
+  playerId: string,
+  result: Extract<SportmonksFootballPreviewResult, { kind: "SUCCESS" }>,
+  previewTokenSecret: string,
+): string {
+  const selection = result.preview.selections[0];
+  return signPreviewToken(
+    {
+      playerId,
+      sport: selection.sport,
+      event: selection.event,
+      outcome: selection.selection,
+      stake: result.preview.stake,
+      odds: selection.currentOdds,
+      totalOdds: result.preview.totalOdds,
+      oddsCheck: null,
+      providerName: "SPORTMONKS",
+      providerEventId: result.raw.providerEventId,
+      providerSportKey: `sportmonks:${result.raw.leagueId}`,
+      eventStartTime: result.raw.commenceTime,
+      canonicalMarketType: "MONEYLINE_3WAY",
+      canonicalSelectionType: result.raw.selectionSide,
+      canonicalParticipant: result.raw.selectionSide === "HOME" ? result.raw.homeTeamName : result.raw.selectionSide === "AWAY" ? result.raw.awayTeamName : null,
+      canonicalPeriod: "FULL_GAME",
+    },
+    previewTokenSecret,
+  );
 }

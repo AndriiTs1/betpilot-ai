@@ -7,6 +7,7 @@ import { buildBetSlipPreview, BetSlipValidationError, type BuildBetSlipPreviewOp
 import {
   buildSportmonksFootballPreview,
   isSportmonksFootballPreviewEnabled,
+  signSportmonksFootballPreviewToken,
   type BuildSportmonksFootballPreviewOptions,
   type SportmonksFootballPreviewResult,
 } from "@/lib/bets/buildSportmonksFootballPreview";
@@ -223,7 +224,14 @@ export async function handleTextPreview(
     if (isSportmonksFootballPreviewEnabled()) {
       const sportmonksResult = await buildSportmonksFootballPreview(parsed, options.sportmonksPreviewOptions);
       if (sportmonksResult.kind === "SUCCESS") {
-        return NextResponse.json({ preview: sportmonksResult.preview, previewToken: null });
+        // Stage 10.2 — a real, short-lived signed token (same mechanism,
+        // same secret, same TTL as every other SINGLE preview), so Confirm
+        // is no longer structurally disabled for a Sportmonks-sourced
+        // preview. providerName:"SPORTMONKS" is what lets the confirm
+        // route later route revalidation correctly (see
+        // app/api/miniapp/bets/text/confirm/route.ts).
+        const sportmonksPreviewToken = signSportmonksFootballPreviewToken(player.id, sportmonksResult, previewTokenSecret);
+        return NextResponse.json({ preview: sportmonksResult.preview, previewToken: sportmonksPreviewToken });
       }
       if (sportmonksResult.kind !== "NOT_APPLICABLE") {
         return sportmonksFootballErrorResponse(sportmonksResult);
