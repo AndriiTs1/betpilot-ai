@@ -1,16 +1,23 @@
+"use client";
+
+import { useState } from "react";
 import { SportIcon } from "@/components/miniapp/sportIcons";
 import { formatAmount } from "@/lib/bets/formatAmount";
-import type { ManualReviewDisplayBet } from "./manualReviewDisplay";
+import { describeManualRetryOutcome, type ManualReviewDisplayBet } from "./manualReviewDisplay";
 
-// Stage 4.3.5 — read-only. No action button of any kind lives in this
-// component (not even a disabled one — Stage 4.3 v3's own instruction: a
-// disabled button that isn't an established pattern elsewhere in this
-// Dashboard would mislead an operator into expecting it to eventually
-// work). Retry Automatically / Resolve / Force WIN-LOSS-VOID are Stage
-// 4.3.6+'s job, not this file's.
+// Stage 4.3.6 — adds exactly one action: Retry Automatically. It re-runs
+// the same automatic settlement pipeline the cron already uses, for this
+// one bet (POST /api/dashboard/bets/:id/settlement-retry) — never a manual
+// Force WIN/LOSS/VOID/Resolve path, and none of those are added here
+// either (Stage 4.3.6's own explicit "do not add" list).
 
 interface ManualReviewItemProps {
   bet: ManualReviewDisplayBet;
+  // Called once per retry response, after the request settles (success or
+  // handled error) — the parent (ManualReviewQueue) decides what to do:
+  // remove the item (status === SETTLED) or refetch the list so this row
+  // reflects the server's fresh state, never guessed at client-side.
+  onRetried: (betId: string, status: string) => void;
 }
 
 function toNumber(value: string | null): number | null {
@@ -19,10 +26,53 @@ function toNumber(value: string | null): number | null {
   return Number.isFinite(num) ? num : null;
 }
 
-export default function ManualReviewItem({ bet }: ManualReviewItemProps) {
+const FEEDBACK_TONE_CLASS: Record<string, string> = {
+  success: "bg-green-950 text-green-400",
+  info: "bg-slate-800 text-slate-300",
+  warning: "bg-amber-950 text-amber-400",
+  error: "bg-red-950 text-red-400",
+};
+
+export default function ManualReviewItem({ bet, onRetried }: ManualReviewItemProps) {
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [feedback, setFeedback] = useState<{ tone: string; text: string } | null>(null);
+
   const stake = toNumber(bet.stake);
   const effectiveOdds = toNumber(bet.effectiveOdds);
   const potentialPayout = toNumber(bet.potentialPayout);
+
+  async function handleRetry() {
+    // Double-click / double-tap guard — a second click while a request is
+    // already in flight is simply ignored, not queued.
+    if (isRetrying) return;
+
+    setIsRetrying(true);
+    setFeedback(null);
+
+    try {
+      const response = await fetch(`/api/dashboard/bets/${bet.id}/settlement-retry`, { method: "POST" });
+      const body = await response.json().catch(() => null);
+
+      if (response.ok && body?.success) {
+        const status = body.result?.status as string;
+        setFeedback(describeManualRetryOutcome(status));
+        onRetried(bet.id, status);
+        return;
+      }
+
+      if (response.status === 409) {
+        setFeedback({ tone: "info", text: body?.error?.message ?? "Состояние ставки изменилось — список будет обновлён." });
+        onRetried(bet.id, "CONFLICT");
+        return;
+      }
+
+      setFeedback({ tone: "error", text: "Не удалось выполнить повтор. Попробуйте ещё раз." });
+    } catch {
+      setFeedback({ tone: "error", text: "Не удалось связаться с сервером. Проверьте соединение." });
+    } finally {
+      setIsRetrying(false);
+    }
+  }
 
   return (
     <div className="rounded-2xl border border-amber-500/30 bg-[#0b1220] p-6 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.04)]">
@@ -106,6 +156,24 @@ export default function ManualReviewItem({ bet }: ManualReviewItemProps) {
           {bet.lastErrorMessage ? ` — ${bet.lastErrorMessage}` : ""}
         </p>
       )}
+
+      {feedback && (
+        <p className={`mt-4 rounded-lg px-3 py-2 text-sm ${FEEDBACK_TONE_CLASS[feedback.tone] ?? FEEDBACK_TONE_CLASS.error}`}>
+          {feedback.text}
+        </p>
+      )}
+
+      <div className="mt-5">
+        <button
+          type="button"
+          onClick={handleRetry}
+          disabled={isRetrying}
+          aria-label={`Retry automatic settlement for ${bet.playerName}`}
+          className="min-h-11 rounded-xl bg-blue-500 px-5 py-2 font-semibold text-white transition-colors hover:bg-blue-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-400 disabled:opacity-50 disabled:hover:bg-blue-500"
+        >
+          {isRetrying ? "Retrying..." : "Retry Automatically"}
+        </button>
+      </div>
     </div>
   );
 }

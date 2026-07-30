@@ -115,3 +115,44 @@ export function determineManualReviewViewState(input: {
   if (input.bets !== null && input.bets.length === 0) return "empty";
   return "list";
 }
+
+/* -------------------------------------------------------------------------- */
+/* Retry Automatically — result feedback                                     */
+/* -------------------------------------------------------------------------- */
+
+// Stage 4.3.6 — every status POST /api/bets/:id/settlement-retry's
+// `result.status` can hold, mapped to the same tone vocabulary
+// EmptyState/StatusBadge already use elsewhere in this Dashboard, plus a
+// short, operator-safe sentence (never a raw provider payload or internal
+// error string). Pure and directly testable — ManualReviewItem.tsx only
+// renders whatever this function returns, no branching logic of its own.
+export type ManualRetryFeedbackTone = "success" | "info" | "warning" | "error";
+
+export interface ManualRetryFeedback {
+  readonly tone: ManualRetryFeedbackTone;
+  readonly text: string;
+}
+
+const RETRY_STATUS_FEEDBACK: Record<string, ManualRetryFeedback> = {
+  SETTLED: { tone: "success", text: "Settled automatically." },
+  WAITING: { tone: "info", text: "Event is not finished yet — still waiting for a result." },
+  TRANSIENT_FAILURE: { tone: "warning", text: "Still no result from the provider. It will need another look." },
+  PERMANENT_REVIEW: { tone: "warning", text: "Automatic settlement is not possible for this bet." },
+  CONFLICT: { tone: "info", text: "This bet was already resolved elsewhere." },
+  PROVIDER_UNAVAILABLE: { tone: "error", text: "The result provider is temporarily unavailable. Try again later." },
+};
+
+const UNKNOWN_RETRY_FEEDBACK: ManualRetryFeedback = { tone: "error", text: "Unexpected result. Try refreshing the page." };
+
+export function describeManualRetryOutcome(status: string): ManualRetryFeedback {
+  return RETRY_STATUS_FEEDBACK[status] ?? UNKNOWN_RETRY_FEEDBACK;
+}
+
+// A retry is only ever "resolved" (should leave the Manual Review queue)
+// when it actually settled — every other outcome leaves the bet exactly
+// where it was (still NEEDS_REVIEW), just with fresher diagnostic fields
+// the caller should re-fetch from the server rather than guess at
+// client-side.
+export function manualRetryResolvesTheReview(status: string): boolean {
+  return status === "SETTLED";
+}

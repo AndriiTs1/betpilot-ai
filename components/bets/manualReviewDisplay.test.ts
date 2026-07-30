@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  describeManualRetryOutcome,
   determineManualReviewViewState,
+  manualRetryResolvesTheReview,
   mapNeedsReviewBetForDisplay,
   type NeedsReviewBetApi,
   type NeedsReviewSelectionApi,
@@ -131,4 +133,39 @@ test("list state: load finished, at least one bet, no error", () => {
 
 test("a background refresh error (isInitialLoad already false) never re-shows loading", () => {
   assert.notEqual(determineManualReviewViewState({ bets: [{}], error: null, isInitialLoad: false }), "loading");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Retry Automatically — result feedback                                     */
+/* -------------------------------------------------------------------------- */
+
+test("5. WAITING gives clear, non-alarming feedback and does not resolve the review", () => {
+  const feedback = describeManualRetryOutcome("WAITING");
+  assert.equal(feedback.tone, "info");
+  assert.match(feedback.text, /not finished yet/i);
+  assert.equal(manualRetryResolvesTheReview("WAITING"), false);
+});
+
+test("6. TRANSIENT_FAILURE feedback is a warning, does not resolve the review", () => {
+  const feedback = describeManualRetryOutcome("TRANSIENT_FAILURE");
+  assert.equal(feedback.tone, "warning");
+  assert.equal(manualRetryResolvesTheReview("TRANSIENT_FAILURE"), false);
+});
+
+test("7. PERMANENT_REVIEW feedback is a warning, does not resolve the review", () => {
+  const feedback = describeManualRetryOutcome("PERMANENT_REVIEW");
+  assert.equal(feedback.tone, "warning");
+  assert.equal(manualRetryResolvesTheReview("PERMANENT_REVIEW"), false);
+});
+
+test("SETTLED is the only status that resolves the review (removes the item from the queue)", () => {
+  assert.equal(manualRetryResolvesTheReview("SETTLED"), true);
+  for (const status of ["WAITING", "TRANSIENT_FAILURE", "PERMANENT_REVIEW", "CONFLICT", "PROVIDER_UNAVAILABLE"]) {
+    assert.equal(manualRetryResolvesTheReview(status), false, `status ${status} must not resolve the review`);
+  }
+});
+
+test("an unrecognized status degrades to a safe error-toned message, never throws", () => {
+  const feedback = describeManualRetryOutcome("SOME_FUTURE_STATUS");
+  assert.equal(feedback.tone, "error");
 });
