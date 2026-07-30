@@ -51,7 +51,22 @@ export type BetPreviewErrorCode =
   // remain separate types, never merged into one shared union.
   | "AI_TIMEOUT"
   | "INVALID_BET_SLIP"
-  | "INTERNAL_ERROR";
+  | "INTERNAL_ERROR"
+  // Stage 10.2 bugfix — the 5 error codes
+  // app/api/miniapp/bets/text/preview/route.ts's sportmonksFootballErrorResponse
+  // already sent from the server since Stage 10, but this client type/the
+  // getBetPreviewErrorMessage switch below were never updated to recognize
+  // them. Every one of these previously fell through to the generic
+  // "Something went wrong" default — even though the server had already
+  // computed an honest, specific reason — because TypeScript scope forces a
+  // literal `as` cast at fetchBetPreview's parse site (there is no runtime
+  // check against this union), so an unrecognized string was silently
+  // accepted as valid but never matched any switch case.
+  | "EVENT_NOT_FOUND"
+  | "AMBIGUOUS_EVENT"
+  | "UNSUPPORTED_SELECTION"
+  | "EVENT_ALREADY_STARTED"
+  | "ODDS_UNAVAILABLE";
 
 export type BetPreviewFailure =
   | { kind: "http"; code: BetPreviewErrorCode | "UNKNOWN" }
@@ -212,6 +227,20 @@ export function getBetPreviewErrorMessage(failure: BetPreviewFailure): string {
       return "Your bet was not rejected. The analysis took too long. Please try again.";
     case "INVALID_BET_SLIP":
       return "This bet doesn't have a valid number of selections. Please try again.";
+    // Stage 10.2 bugfix — see this union's own comment: these 5 codes were
+    // already being sent by the server (Stage 10) but had no case here,
+    // so they always fell through to the generic default below instead of
+    // the specific, already-computed reason.
+    case "EVENT_NOT_FOUND":
+      return "We couldn't find that team or match. Please check the spelling and try again.";
+    case "AMBIGUOUS_EVENT":
+      return "We found more than one matching event. Please be more specific, e.g. include both team names.";
+    case "UNSUPPORTED_SELECTION":
+      return "Only Home win, Draw, or Away win are supported for this event right now.";
+    case "EVENT_ALREADY_STARTED":
+      return "This match has already started. Please choose a different event.";
+    case "ODDS_UNAVAILABLE":
+      return "Odds for this selection aren't available right now. Please try again shortly.";
     case "INVALID_JSON":
     case "INTERNAL_ERROR":
     default:

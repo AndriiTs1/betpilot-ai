@@ -59,6 +59,62 @@ test("isAiTimeoutFailure: true only for kind:http code:AI_TIMEOUT", () => {
   assert.equal(isAiTimeoutFailure({ kind: "http", code: "AI_TIMEOUT" }), true);
 });
 
+/* -------------------------------------------------------------------------- */
+/* Production bug regression — "Benfica vs St. Gallen победа Benfica 10"     */
+/* -------------------------------------------------------------------------- */
+// Root cause: this was never a server-side exception. The server (Stage 10)
+// already returned a correctly typed, graceful 422 with a specific reason
+// (in this reported case: ODDS_UNAVAILABLE — confirmed by reproducing the
+// exact resolution live, which succeeds and reaches a clean odds-unavailable
+// result, never a throw). The bug was entirely client-side: none of the 5
+// Stage 10 preview error codes were ever added to BetPreviewErrorCode or to
+// getBetPreviewErrorMessage's switch, so every one of them silently fell
+// through to the generic "Something went wrong" default — masking the
+// server's own, already-correct, specific message. These tests prove each
+// of the 5 codes now has its own distinct, non-generic message.
+
+const GENERIC_FALLBACK = "Something went wrong. Please try again.";
+
+test("Regression (Benfica vs St. Gallen bug): ODDS_UNAVAILABLE no longer falls through to the generic fallback", () => {
+  const message = getBetPreviewErrorMessage({ kind: "http", code: "ODDS_UNAVAILABLE" });
+  assert.notEqual(message, GENERIC_FALLBACK);
+  assert.equal(message, "Odds for this selection aren't available right now. Please try again shortly.");
+});
+
+test("getBetPreviewErrorMessage: EVENT_NOT_FOUND has its own distinct message", () => {
+  const message = getBetPreviewErrorMessage({ kind: "http", code: "EVENT_NOT_FOUND" });
+  assert.notEqual(message, GENERIC_FALLBACK);
+  assert.equal(message, "We couldn't find that team or match. Please check the spelling and try again.");
+});
+
+test("getBetPreviewErrorMessage: AMBIGUOUS_EVENT has its own distinct message", () => {
+  const message = getBetPreviewErrorMessage({ kind: "http", code: "AMBIGUOUS_EVENT" });
+  assert.notEqual(message, GENERIC_FALLBACK);
+  assert.equal(message, "We found more than one matching event. Please be more specific, e.g. include both team names.");
+});
+
+test("getBetPreviewErrorMessage: UNSUPPORTED_SELECTION has its own distinct message", () => {
+  const message = getBetPreviewErrorMessage({ kind: "http", code: "UNSUPPORTED_SELECTION" });
+  assert.notEqual(message, GENERIC_FALLBACK);
+  assert.equal(message, "Only Home win, Draw, or Away win are supported for this event right now.");
+});
+
+test("getBetPreviewErrorMessage: EVENT_ALREADY_STARTED has its own distinct message", () => {
+  const message = getBetPreviewErrorMessage({ kind: "http", code: "EVENT_ALREADY_STARTED" });
+  assert.notEqual(message, GENERIC_FALLBACK);
+  assert.equal(message, "This match has already started. Please choose a different event.");
+});
+
+test("Regression: all 5 Stage 10 preview error codes produce mutually distinct, non-generic messages", () => {
+  const codes = ["EVENT_NOT_FOUND", "AMBIGUOUS_EVENT", "UNSUPPORTED_SELECTION", "EVENT_ALREADY_STARTED", "ODDS_UNAVAILABLE"] as const;
+  const messages = codes.map((code) => getBetPreviewErrorMessage({ kind: "http", code }));
+
+  for (const message of messages) {
+    assert.notEqual(message, GENERIC_FALLBACK, `code produced the generic fallback instead of a specific message`);
+  }
+  assert.equal(new Set(messages).size, messages.length, "every code must have its own distinct message");
+});
+
 test("isAiTimeoutFailure: false for PARSE_FAILED and every other http code", () => {
   assert.equal(isAiTimeoutFailure({ kind: "http", code: "PARSE_FAILED" }), false);
   assert.equal(isAiTimeoutFailure({ kind: "http", code: "PLAYER_NOT_FOUND" }), false);
