@@ -6,6 +6,8 @@ import { handleTelegramWebhook } from "./route";
 import type { OcrProvider, OcrResult } from "@/lib/ocr/ocrTypes";
 import type { HandleOddsCommandOptions } from "@/lib/telegram/oddsCommand";
 import type { ParseBetSlipResult } from "@/lib/ai/betParser";
+import type { HandleDiscoveryCommandOptions } from "@/lib/telegram/discoveryCommand";
+import type { CandidateResolver, ResolvedEventCandidate } from "@/lib/odds/discovery/candidateResolver";
 
 // Route-level tests — everything screenshot-intake-specific is already
 // covered in depth by lib/telegram/handleScreenshotMessage.test.ts and
@@ -627,4 +629,426 @@ test("webhook: a bot-authored bare /odds gets no reply at all, not even HELP_TEX
   assert.equal(response.status, 200);
   assert.equal(sentMessages.length, 0, "no HELP_TEXT or any other reply may be sent for a bot-authored bare /odds");
   assert.equal(parseCallCount, 0);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Stage 9.1 — /find (Event Discovery Engine, read-only) route wiring        */
+/* -------------------------------------------------------------------------- */
+// handleDiscoveryCommand's own authorization/payload/formatting behavior is
+// fully covered by lib/telegram/discoveryCommand.test.ts and
+// lib/telegram/formatDiscoveryReply.test.ts against fakes — these tests only
+// prove the ROUTE respects the feature flag, dispatches to the handler
+// correctly, and never disturbs the /odds or natural-language branches.
+
+let nextFindTelegramId = 950000001;
+function uniqueFindTelegramId(): string {
+  nextFindTelegramId += 1;
+  return String(nextFindTelegramId);
+}
+
+function makeCandidate(overrides: Partial<ResolvedEventCandidate> = {}): ResolvedEventCandidate {
+  return {
+    providerEventId: "evt-route-1",
+    sportKey: "soccer_epl",
+    league: "English Premier League",
+    commenceTime: null,
+    homeTeam: "Arsenal",
+    awayTeam: "Coventry City",
+    matchedTeamNames: ["Arsenal"],
+    matchMethod: "EXACT",
+    score: 1,
+    diagnostics: [],
+    ...overrides,
+  };
+}
+
+function fakeDiscoveryResolver(
+  overrides: Partial<Pick<CandidateResolver, "buildDependencies" | "resolve">> = {},
+): Pick<CandidateResolver, "buildDependencies" | "resolve"> {
+  return {
+    buildDependencies: async () => ({ status: "SUCCESS" }),
+    resolve: () => ({ kind: "TEAM_RESOLVED", candidate: makeCandidate() }),
+    ...overrides,
+  };
+}
+
+// Bypasses the shared postUpdate() helper (which has no discoveryCommandOptions
+// parameter) rather than widening its signature, so none of the ~40 existing
+// call sites above need to change.
+function postFindUpdate(
+  body: unknown,
+  db: PrismaClient,
+  discoveryCommandOptions: Omit<HandleDiscoveryCommandOptions, "db">,
+  oddsCommandOptions?: Omit<HandleOddsCommandOptions, "db">,
+): Promise<Response> {
+  const request = new NextRequest("https://example.com/api/webhooks/telegram", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-telegram-bot-api-secret-token": WEBHOOK_SECRET,
+    },
+    body: JSON.stringify(body),
+  });
+  return handleTelegramWebhook(request, { db, discoveryCommandOptions, oddsCommandOptions });
+}
+
+test("webhook: /find is a no-op fallback (existing REDIRECT_TEXT) when the feature flag is off", async () => {
+  delete process.env.TELEGRAM_DISCOVERY_READ_ONLY_ENABLED;
+  let resolverCalled = false;
+  const telegramId = uniqueFindTelegramId();
+
+  const response = await postFindUpdate(
+    {
+      update_id: 500,
+      message: { message_id: 30, date: 1700000000, text: "/find Arsenal", chat: { id: 1000 }, from: { id: Number(telegramId) } },
+    },
+    fakeDb([{ id: "player-find-flag-off", telegramId }]),
+    {
+      resolver: {
+        buildDependencies: async () => {
+          resolverCalled = true;
+          return { status: "SUCCESS" };
+        },
+        resolve: () => {
+          resolverCalled = true;
+          return { kind: "TEAM_RESOLVED", candidate: makeCandidate() };
+        },
+      },
+    },
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(sentMessages.length, 1);
+  assert.equal(sentMessages[0].text, "Для работы откройте приложение BetPilot AI.");
+  assert.equal(resolverCalled, false, "the Discovery Engine must not be touched when the flag is off");
+});
+
+test("webhook: /find Arsenal invokes the discovery handler when the flag is on", async () => {
+  process.env.TELEGRAM_DISCOVERY_READ_ONLY_ENABLED = "true";
+  const telegramId = uniqueFindTelegramId();
+
+  const response = await postFindUpdate(
+    {
+      update_id: 501,
+      message: { message_id: 31, date: 1700000000, text: "/find Arsenal", chat: { id: 1001 }, from: { id: Number(telegramId) } },
+    },
+    fakeDb([{ id: "player-find-1", telegramId }]),
+    { resolver: fakeDiscoveryResolver() },
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(sentMessages.length, 1);
+  assert.match(sentMessages[0].text, /Найден матч/);
+  assert.notEqual(sentMessages[0].text, "Для работы откройте приложение BetPilot AI.");
+});
+
+test("webhook: /find@BotName Arsenal also invokes the discovery handler", async () => {
+  process.env.TELEGRAM_DISCOVERY_READ_ONLY_ENABLED = "true";
+  const telegramId = uniqueFindTelegramId();
+
+  const response = await postFindUpdate(
+    {
+      update_id: 502,
+      message: {
+        message_id: 32,
+        date: 1700000000,
+        text: "/find@BetPilotAI_bot Arsenal",
+        chat: { id: 1002 },
+        from: { id: Number(telegramId) },
+      },
+    },
+    fakeDb([{ id: "player-find-2", telegramId }]),
+    { resolver: fakeDiscoveryResolver() },
+  );
+
+  assert.equal(response.status, 200);
+  assert.match(sentMessages[0].text, /Найден матч/);
+});
+
+test("webhook: /find MU (short curated-alias-length query) is accepted", async () => {
+  process.env.TELEGRAM_DISCOVERY_READ_ONLY_ENABLED = "true";
+  const telegramId = uniqueFindTelegramId();
+  let receivedQuery: string | undefined;
+
+  const response = await postFindUpdate(
+    {
+      update_id: 503,
+      message: { message_id: 33, date: 1700000000, text: "/find MU", chat: { id: 1003 }, from: { id: Number(telegramId) } },
+    },
+    fakeDb([{ id: "player-find-3", telegramId }]),
+    {
+      resolver: fakeDiscoveryResolver({
+        resolve: (query: string) => {
+          receivedQuery = query;
+          return { kind: "TEAM_RESOLVED", candidate: makeCandidate({ homeTeam: "Manchester United" }) };
+        },
+      }),
+    },
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(receivedQuery, "MU");
+  assert.match(sentMessages[0].text, /Manchester United/);
+});
+
+test("webhook: an empty /find gets the usage message, never reaches the resolver", async () => {
+  process.env.TELEGRAM_DISCOVERY_READ_ONLY_ENABLED = "true";
+  const telegramId = uniqueFindTelegramId();
+  let resolverCalled = false;
+
+  const response = await postFindUpdate(
+    {
+      update_id: 504,
+      message: { message_id: 34, date: 1700000000, text: "/find", chat: { id: 1004 }, from: { id: Number(telegramId) } },
+    },
+    fakeDb([{ id: "player-find-4", telegramId }]),
+    {
+      resolver: {
+        buildDependencies: async () => {
+          resolverCalled = true;
+          return { status: "SUCCESS" };
+        },
+        resolve: () => {
+          resolverCalled = true;
+          return { kind: "NOT_FOUND", reason: "x" };
+        },
+      },
+    },
+  );
+
+  assert.equal(response.status, 200);
+  assert.match(sentMessages[0].text, /Использование/);
+  assert.equal(resolverCalled, false);
+});
+
+test("webhook: /find TEAM_RESOLVED result is formatted and sent", async () => {
+  process.env.TELEGRAM_DISCOVERY_READ_ONLY_ENABLED = "true";
+  const telegramId = uniqueFindTelegramId();
+  const response = await postFindUpdate(
+    {
+      update_id: 505,
+      message: { message_id: 35, date: 1700000000, text: "/find Arsenal", chat: { id: 1005 }, from: { id: Number(telegramId) } },
+    },
+    fakeDb([{ id: "player-find-5", telegramId }]),
+    { resolver: fakeDiscoveryResolver({ resolve: () => ({ kind: "TEAM_RESOLVED", candidate: makeCandidate() }) }) },
+  );
+  assert.equal(response.status, 200);
+  assert.match(sentMessages[0].text, /Найден матч/);
+});
+
+test("webhook: /find MATCH_RESOLVED result is formatted and sent", async () => {
+  process.env.TELEGRAM_DISCOVERY_READ_ONLY_ENABLED = "true";
+  const telegramId = uniqueFindTelegramId();
+  const response = await postFindUpdate(
+    {
+      update_id: 506,
+      message: {
+        message_id: 36,
+        date: 1700000000,
+        text: "/find Real Madrid vs Barcelona",
+        chat: { id: 1006 },
+        from: { id: Number(telegramId) },
+      },
+    },
+    fakeDb([{ id: "player-find-6", telegramId }]),
+    {
+      resolver: fakeDiscoveryResolver({
+        resolve: () => ({
+          kind: "MATCH_RESOLVED",
+          candidate: makeCandidate({ homeTeam: "Real Madrid", awayTeam: "Barcelona", league: "La Liga" }),
+        }),
+      }),
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.match(sentMessages[0].text, /Real Madrid/);
+  assert.match(sentMessages[0].text, /Barcelona/);
+});
+
+test("webhook: /find AMBIGUOUS result is formatted and sent, no candidate auto-picked", async () => {
+  process.env.TELEGRAM_DISCOVERY_READ_ONLY_ENABLED = "true";
+  const telegramId = uniqueFindTelegramId();
+  const response = await postFindUpdate(
+    {
+      update_id: 507,
+      message: { message_id: 37, date: 1700000000, text: "/find Inter", chat: { id: 1007 }, from: { id: Number(telegramId) } },
+    },
+    fakeDb([{ id: "player-find-7", telegramId }]),
+    {
+      resolver: fakeDiscoveryResolver({
+        resolve: () => ({
+          kind: "AMBIGUOUS",
+          candidates: [makeCandidate({ providerEventId: "e1" }), makeCandidate({ providerEventId: "e2", homeTeam: "Inter Miami" })],
+          reason: "x",
+        }),
+      }),
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.match(sentMessages[0].text, /несколько матчей/);
+});
+
+test("webhook: /find NOT_FOUND result is formatted and sent", async () => {
+  process.env.TELEGRAM_DISCOVERY_READ_ONLY_ENABLED = "true";
+  const telegramId = uniqueFindTelegramId();
+  const response = await postFindUpdate(
+    {
+      update_id: 508,
+      message: { message_id: 38, date: 1700000000, text: "/find Nonexistent", chat: { id: 1008 }, from: { id: Number(telegramId) } },
+    },
+    fakeDb([{ id: "player-find-8", telegramId }]),
+    { resolver: fakeDiscoveryResolver({ resolve: () => ({ kind: "NOT_FOUND", reason: "x" }) }) },
+  );
+  assert.equal(response.status, 200);
+  assert.match(sentMessages[0].text, /не найдены/);
+});
+
+test("webhook: /find INVALID_QUERY result is formatted and sent", async () => {
+  process.env.TELEGRAM_DISCOVERY_READ_ONLY_ENABLED = "true";
+  const telegramId = uniqueFindTelegramId();
+  const response = await postFindUpdate(
+    {
+      update_id: 509,
+      message: { message_id: 39, date: 1700000000, text: "/find A vs B vs C", chat: { id: 1009 }, from: { id: Number(telegramId) } },
+    },
+    fakeDb([{ id: "player-find-9", telegramId }]),
+    { resolver: fakeDiscoveryResolver({ resolve: () => ({ kind: "INVALID_QUERY", reason: "x" }) }) },
+  );
+  assert.equal(response.status, 200);
+  assert.match(sentMessages[0].text, /Использование/);
+});
+
+test("webhook: /find FAILED (Discovery Engine unavailable) gets a generic reply, never an internal reason", async () => {
+  process.env.TELEGRAM_DISCOVERY_READ_ONLY_ENABLED = "true";
+  const telegramId = uniqueFindTelegramId();
+  const response = await postFindUpdate(
+    {
+      update_id: 510,
+      message: { message_id: 40, date: 1700000000, text: "/find Arsenal", chat: { id: 1010 }, from: { id: Number(telegramId) } },
+    },
+    fakeDb([{ id: "player-find-10", telegramId }]),
+    {
+      resolver: {
+        buildDependencies: async () => ({ status: "FAILED", source: "TEAM_INDEX", reason: "ALL_LEAGUES_UNAVAILABLE" }),
+        resolve: () => ({ kind: "NOT_FOUND", reason: "x" }),
+      },
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.match(sentMessages[0].text, /временно недоступен/);
+  assert.doesNotMatch(sentMessages[0].text, /ALL_LEAGUES_UNAVAILABLE/);
+});
+
+test("webhook: a repeated update_id for /find invokes the resolver at most once", async () => {
+  process.env.TELEGRAM_DISCOVERY_READ_ONLY_ENABLED = "true";
+  const telegramId = uniqueFindTelegramId();
+  const db = fakeDb([{ id: "player-find-11", telegramId }]);
+  let resolveCallCount = 0;
+  const discoveryCommandOptions = {
+    resolver: fakeDiscoveryResolver({
+      resolve: () => {
+        resolveCallCount += 1;
+        return { kind: "TEAM_RESOLVED" as const, candidate: makeCandidate() };
+      },
+    }),
+  };
+  const update = {
+    update_id: 511,
+    message: { message_id: 41, date: 1700000000, text: "/find Arsenal", chat: { id: 1011 }, from: { id: Number(telegramId) } },
+  };
+
+  const first = await postFindUpdate(update, db, discoveryCommandOptions);
+  const second = await postFindUpdate(update, db, discoveryCommandOptions);
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(resolveCallCount, 1, "the resolver must only be invoked once, for the first delivery");
+  assert.equal(sentMessages.length, 1);
+});
+
+test("webhook: /odds continues on its own pipeline unaffected by the /find branch", async () => {
+  const telegramId = uniqueOddsTelegramId();
+  const db = fakeDb([{ id: "player-find-vs-odds-1", telegramId }]);
+
+  const response = await postUpdate(
+    {
+      update_id: 512,
+      message: { message_id: 42, date: 1700000000, text: "/odds Real Madrid vs Barcelona, odds 2.05", chat: { id: 1012 }, from: { id: Number(telegramId) } },
+    },
+    db,
+    undefined,
+    fakeOddsOptions(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.match(sentMessages[0].text, /Odds confirmed/);
+});
+
+test("webhook: natural-language betting text continues on its own pipeline unaffected by the /find branch", async () => {
+  process.env.TELEGRAM_DISCOVERY_READ_ONLY_ENABLED = "true";
+  const telegramId = uniqueOddsTelegramId();
+  const db = fakeDb([{ id: "player-find-vs-nl-1", telegramId }]);
+
+  const response = await postUpdate(
+    {
+      update_id: 513,
+      message: { message_id: 43, date: 1700000000, text: BETTING_TEXT, chat: { id: 1013 }, from: { id: Number(telegramId) } },
+    },
+    db,
+    undefined,
+    fakeOddsOptions(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.match(sentMessages[0].text, /Odds confirmed/);
+});
+
+test("webhook: /find never invokes parseBetSlip/buildBetSlipPreview (the paid odds pipeline)", async () => {
+  process.env.TELEGRAM_DISCOVERY_READ_ONLY_ENABLED = "true";
+  const telegramId = uniqueFindTelegramId();
+  let oddsParseCalled = false;
+
+  const response = await postFindUpdate(
+    {
+      update_id: 514,
+      message: { message_id: 44, date: 1700000000, text: "/find Arsenal", chat: { id: 1014 }, from: { id: Number(telegramId) } },
+    },
+    fakeDb([{ id: "player-find-12", telegramId }]),
+    { resolver: fakeDiscoveryResolver() },
+    fakeOddsOptions({
+      parseBetSlip: async () => {
+        oddsParseCalled = true;
+        throw new Error("must not be called for /find");
+      },
+    }),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(oddsParseCalled, false);
+  assert.match(sentMessages[0].text, /Найден матч/);
+});
+
+test("webhook: /find never mutates Player (only findUnique is available on the fake db)", async () => {
+  process.env.TELEGRAM_DISCOVERY_READ_ONLY_ENABLED = "true";
+  const telegramId = uniqueFindTelegramId();
+  const readOnlyDb = {
+    player: {
+      findUnique: async ({ where }: { where: { telegramId: string } }) =>
+        where.telegramId === telegramId ? { id: "player-find-readonly" } : null,
+      // Deliberately no update/updateMany/create — a call to any of them
+      // throws "not a function", which would fail this test loudly.
+    },
+  } as unknown as PrismaClient;
+
+  const response = await postFindUpdate(
+    {
+      update_id: 515,
+      message: { message_id: 45, date: 1700000000, text: "/find Arsenal", chat: { id: 1015 }, from: { id: Number(telegramId) } },
+    },
+    readOnlyDb,
+    { resolver: fakeDiscoveryResolver() },
+  );
+
+  assert.equal(response.status, 200);
+  assert.match(sentMessages[0].text, /Найден матч/);
 });

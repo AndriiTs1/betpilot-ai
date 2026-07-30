@@ -8,6 +8,11 @@ import { bindInvitedPlayerByTelegramUsername } from "@/lib/telegram/bindInvitedP
 import { handleScreenshotMessage } from "@/lib/telegram/handleScreenshotMessage";
 import { handleOddsCommand, handleNaturalLanguageOdds, type HandleOddsCommandOptions } from "@/lib/telegram/oddsCommand";
 import { looksLikeBettingText } from "@/lib/telegram/looksLikeBettingText";
+import {
+  handleDiscoveryCommand,
+  isTelegramDiscoveryReadOnlyEnabled,
+  type HandleDiscoveryCommandOptions,
+} from "@/lib/telegram/discoveryCommand";
 import type { TelegramUpdate } from "@/lib/telegram/telegramTypes";
 import type { OcrProvider } from "@/lib/ocr/ocrTypes";
 
@@ -119,6 +124,8 @@ export interface HandleTelegramWebhookOptions {
   // screenshot handling, so it's passed through separately rather than
   // duplicated in this sub-options object.
   oddsCommandOptions?: Omit<HandleOddsCommandOptions, "db">;
+  // Stage 9.1 (/find command) — same DI shape as oddsCommandOptions above.
+  discoveryCommandOptions?: Omit<HandleDiscoveryCommandOptions, "db">;
 }
 
 export async function handleTelegramWebhook(
@@ -201,6 +208,18 @@ export async function handleTelegramWebhook(
     // cooldown, and error-handling behavior — this route only wires it in.
     if (command === "odds") {
       await handleOddsCommand(tgMessage, { db, ...options.oddsCommandOptions });
+      return NextResponse.json({ ok: true });
+    }
+
+    // Stage 9.1 — /find (Event Discovery Engine, read-only). Feature-flag
+    // gated: the flag is checked BEFORE the Discovery Engine is touched at
+    // all, so when disabled the Candidate Resolver's buildDependencies() is
+    // never called and command === "find" falls straight through to the
+    // existing REDIRECT_TEXT fallback below, exactly like today (an
+    // unrecognized command). Never reaches handleOddsCommand,
+    // handleNaturalLanguageOdds, parseBetSlipMessage, or buildBetSlipPreview.
+    if (command === "find" && isTelegramDiscoveryReadOnlyEnabled()) {
+      await handleDiscoveryCommand(tgMessage, { db, ...options.discoveryCommandOptions });
       return NextResponse.json({ ok: true });
     }
 
