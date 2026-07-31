@@ -10,6 +10,7 @@ import {
   isPeriod,
   isSelectionType,
   isDecimalString,
+  normalizeLineString,
   validateCanonicalSelection,
   type CanonicalEvent,
   type CanonicalSelection,
@@ -105,6 +106,46 @@ test("isDecimalString accepts plain decimals and rejects garbage", () => {
   assert.equal(isDecimalString("1.95x"), false);
   assert.equal(isDecimalString(""), false);
   assert.equal(isDecimalString("NaN"), false);
+  // isDecimalString defines the CANONICAL shape — a leading "+" is never
+  // canonical, even though normalizeLineString (below) accepts it as INPUT
+  // and strips it. These are deliberately different contracts.
+  assert.equal(isDecimalString("+1.5"), false);
+});
+
+/* -------------------------------------------------------------------------- */
+/* normalizeLineString — Betting Markets V1 Phase 2 review fix                */
+/* -------------------------------------------------------------------------- */
+
+test("normalizeLineString: '+1.5' is accepted and canonicalized to '1.5' (redundant leading '+' stripped)", () => {
+  assert.equal(normalizeLineString("+1.5"), "1.5");
+  assert.equal(normalizeLineString("+2"), "2");
+  assert.equal(normalizeLineString("+0"), "0");
+});
+
+test("normalizeLineString: '-1.5' passes through unchanged", () => {
+  assert.equal(normalizeLineString("-1.5"), "-1.5");
+});
+
+test("normalizeLineString: '2.5' (unsigned, already canonical) passes through unchanged", () => {
+  assert.equal(normalizeLineString("2.5"), "2.5");
+  assert.equal(normalizeLineString("0"), "0");
+  assert.equal(normalizeLineString("0.0"), "0.0");
+});
+
+test("normalizeLineString: malformed values are rejected (null), never coerced", () => {
+  assert.equal(normalizeLineString("two-point-five"), null);
+  assert.equal(normalizeLineString("1.5.5"), null);
+  assert.equal(normalizeLineString(""), null);
+  assert.equal(normalizeLineString("NaN"), null);
+  assert.equal(normalizeLineString("++1.5"), null);
+});
+
+test("normalizeLineString: every output it produces is itself a valid isDecimalString (the canonical shape)", () => {
+  for (const input of ["+1.5", "-1.5", "2.5", "0", "+0"]) {
+    const normalized = normalizeLineString(input);
+    assert.notEqual(normalized, null);
+    assert.ok(isDecimalString(normalized as string), `normalizeLineString("${input}") = "${normalized}" must itself be canonical`);
+  }
 });
 
 /* -------------------------------------------------------------------------- */
@@ -174,6 +215,14 @@ test("validateCanonicalSelection: SPREAD requires participant and line", () => {
 test("validateCanonicalSelection: BOTH_TEAMS_TO_SCORE requires YES/NO", () => {
   assert.equal(validateCanonicalSelection(moneyline2Way({ marketType: "BOTH_TEAMS_TO_SCORE", selectionType: "YES" })).ok, true);
   assert.equal(validateCanonicalSelection(moneyline2Way({ marketType: "BOTH_TEAMS_TO_SCORE", selectionType: "HOME" })).ok, false);
+});
+
+test("Betting Markets V1 Phase 2 review fix: MONEYLINE_2WAY/3WAY with no line at all (undefined) remains valid — line is irrelevant to these markets", () => {
+  assert.equal(validateCanonicalSelection(moneyline2Way({ selectionType: "HOME", line: undefined })).ok, true);
+  assert.equal(
+    validateCanonicalSelection(moneyline2Way({ marketType: "MONEYLINE_3WAY", selectionType: "DRAW", line: undefined })).ok,
+    true,
+  );
 });
 
 test("validateCanonicalSelection: rejects a malformed line/submittedOdds decimal string", () => {

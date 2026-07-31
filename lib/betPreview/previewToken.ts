@@ -41,6 +41,13 @@ export interface PreviewTokenProviderMetadata {
   canonicalSelectionType: string | null;
   canonicalParticipant: string | null;
   canonicalPeriod: string | null;
+  // Betting Markets V1, Phase 2 — the numeric line for a TOTALS/SPREAD
+  // selection (e.g. "2.5", "-1.5"), signed alongside the other canonical
+  // fields above. Security-relevant: this is the value confirmation must
+  // trust — never re-read from raw client input at confirm time. Same
+  // null-means-"no line" / undefined-means-"older token" backward-
+  // compatibility rule as every other field in this interface.
+  canonicalLine: string | null;
   // Full event display metadata — the provider's own team names and a
   // human-readable competition name (see lib/odds/oddsVerifier.ts's
   // extractProviderEventMetadata), carried through the token so
@@ -153,6 +160,7 @@ const PROVIDER_METADATA_KEYS = [
   "canonicalSelectionType",
   "canonicalParticipant",
   "canonicalPeriod",
+  "canonicalLine",
   "homeTeamName",
   "awayTeamName",
   "competitionName",
@@ -178,6 +186,7 @@ function normalizeProviderMetadata(p: PreviewTokenPayload): PreviewTokenPayload 
     canonicalSelectionType: p.canonicalSelectionType ?? null,
     canonicalParticipant: p.canonicalParticipant ?? null,
     canonicalPeriod: p.canonicalPeriod ?? null,
+    canonicalLine: p.canonicalLine ?? null,
     homeTeamName: p.homeTeamName ?? null,
     awayTeamName: p.awayTeamName ?? null,
     competitionName: p.competitionName ?? null,
@@ -243,6 +252,7 @@ export function signPreviewToken(input: PreviewTokenInput, secret: string): stri
     canonicalSelectionType: input.canonicalSelectionType ?? null,
     canonicalParticipant: input.canonicalParticipant ?? null,
     canonicalPeriod: input.canonicalPeriod ?? null,
+    canonicalLine: input.canonicalLine ?? null,
     homeTeamName: input.homeTeamName ?? null,
     awayTeamName: input.awayTeamName ?? null,
     competitionName: input.competitionName ?? null,
@@ -465,6 +475,7 @@ function normalizeExpressSelection(selection: ExpressPreviewTokenSelection): Exp
     canonicalSelectionType: selection.canonicalSelectionType ?? null,
     canonicalParticipant: selection.canonicalParticipant ?? null,
     canonicalPeriod: selection.canonicalPeriod ?? null,
+    canonicalLine: selection.canonicalLine ?? null,
     homeTeamName: selection.homeTeamName ?? null,
     awayTeamName: selection.awayTeamName ?? null,
     competitionName: selection.competitionName ?? null,

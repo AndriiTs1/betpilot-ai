@@ -32,6 +32,17 @@ export interface BetSlipSelectionInput {
   // Nullable because a player can omit odds for a leg — the same case
   // that's always been representable for a SINGLE bet.
   submittedOdds: number | null;
+  // Betting Markets V1, Phase 2 — the numeric line for a TOTALS/SPREAD
+  // selection (e.g. "2.5", "-1.5"), when the player's text stated one.
+  // Optional (matching `league` above), not required-nullable: every
+  // existing caller/fixture that builds this shape without a line keeps
+  // compiling and behaving exactly as before. A decimal string (never a
+  // JS number — see lib/odds/domain.ts's isDecimalString/Decimal-safety
+  // convention), or null/undefined when no line was stated. Purely
+  // additive data — nothing in this phase classifies a selection as
+  // TOTALS/SPREAD or matches on this value; it only survives the pipeline
+  // so a later phase can.
+  line?: string | null;
 }
 
 export interface ParsedBetSlip {

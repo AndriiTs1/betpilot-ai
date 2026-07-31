@@ -6,6 +6,7 @@ import type {
   AnyPreviewTokenPayload,
 } from "@/lib/betPreview/previewToken";
 import { MIN_EXPRESS_SELECTIONS, MAX_EXPRESS_SELECTIONS } from "@/lib/bets/betSlipRules";
+import { normalizeLineString } from "@/lib/odds/domain";
 
 export interface CreateBetFromPreviewResult {
   bet: Bet;
@@ -122,6 +123,26 @@ function parseValidEventStartTime(iso: string | null | undefined): Date | null {
   return new Date(parsedMs);
 }
 
+// Betting Markets V1, Phase 2 — same defense-in-depth discipline as
+// parseValidEventStartTime above. By the time a value reaches here it
+// should already be canonical (lib/odds/legacyOddsBridge.ts normalizes a
+// "+1.5"-style input to "1.5" at request-construction time, well before a
+// token is ever signed) — but this stays a defense-in-depth layer in its
+// own right, not merely a passthrough: it reuses the same canonical rule
+// (normalizeLineString, lib/odds/domain.ts) so a "+"-prefixed value reaching
+// here is still recognized as a valid positive line and canonicalized, not
+// silently discarded. A genuinely malformed value must still never crash
+// bet creation or be passed to Prisma.Decimal's own constructor (which
+// throws on an invalid string) — it degrades to null, exactly like every
+// other "nothing honest to persist" case in this file.
+function parseValidLine(line: string | null | undefined): Prisma.Decimal | null {
+  if (line === null || line === undefined) return null;
+  const normalized = normalizeLineString(line);
+  if (normalized === null) return null;
+
+  return new Prisma.Decimal(normalized);
+}
+
 // Stage 3.1 — the eight provider/canonical columns shared identically by
 // Bet (SINGLE) and BetSelection (EXPRESS legs) — see prisma/schema.prisma's
 // own comment on both models for the full Variant-B rationale. Reads only
@@ -137,6 +158,10 @@ interface ProviderReferenceColumns {
   canonicalSelectionType: string | null;
   canonicalParticipant: string | null;
   canonicalPeriod: string | null;
+  // Betting Markets V1, Phase 2 — Bet.line / BetSelection.line (Phase 1's
+  // additive migration). Read only from the signed token's canonicalLine —
+  // never a second computation, never raw client input.
+  line: Prisma.Decimal | null;
   homeTeamName: string | null;
   awayTeamName: string | null;
   competitionName: string | null;
@@ -151,6 +176,7 @@ function providerReferenceColumnsFromToken(source: {
   canonicalSelectionType?: string | null;
   canonicalParticipant?: string | null;
   canonicalPeriod?: string | null;
+  canonicalLine?: string | null;
   homeTeamName?: string | null;
   awayTeamName?: string | null;
   competitionName?: string | null;
@@ -166,6 +192,7 @@ function providerReferenceColumnsFromToken(source: {
     canonicalSelectionType: source.canonicalSelectionType ?? null,
     canonicalParticipant: source.canonicalParticipant ?? null,
     canonicalPeriod: source.canonicalPeriod ?? null,
+    line: parseValidLine(source.canonicalLine),
     homeTeamName: source.homeTeamName ?? null,
     awayTeamName: source.awayTeamName ?? null,
     competitionName: source.competitionName ?? null,

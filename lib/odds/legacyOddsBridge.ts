@@ -15,7 +15,7 @@
 // Chance, Team Totals, or player props (docs/ODDS_SUPPORT_MATRIX.md
 // Section 5 — those remain deferred until a later step).
 
-import type { CanonicalEvent, CanonicalLeague, CanonicalParticipant, Sport } from "./domain";
+import { normalizeLineString, type CanonicalEvent, type CanonicalLeague, type CanonicalParticipant, type Sport } from "./domain";
 import type { VerifySelectionRequest } from "./oddsProvider";
 import type { VerificationResult } from "./verification";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
@@ -229,6 +229,11 @@ export interface LegacyVerifiableSelection {
   readonly event: string;
   readonly selection: string;
   readonly submittedOdds: number | null;
+  // Betting Markets V1, Phase 2 — the numeric line for a TOTALS/SPREAD
+  // selection, when stated (e.g. "2.5", "-1.5", "+1.5"). Absent/null both
+  // mean "no line stated". Purely additive: no market classification below
+  // reads this field yet.
+  readonly line?: string | null;
 }
 
 // league/provider IDs/acceptedOdds/currentOdds are never set here — league
@@ -266,6 +271,17 @@ export function legacySelectionToCanonicalRequest(selection: LegacyVerifiableSel
       // assertion: a plain, real null check, matching
       // CanonicalSelection.submittedOdds's own already-optional shape.
       submittedOdds: selection.submittedOdds !== null ? String(selection.submittedOdds) : undefined,
+      // Betting Markets V1, Phase 2 review fix — canonicalized through the
+      // one shared rule (normalizeLineString), so a "+1.5"-style input is
+      // recognized as a valid positive line and stored/signed in canonical
+      // unsigned form ("1.5"), not silently dropped. A genuinely malformed
+      // string (normalizeLineString -> null) is passed through UNCHANGED
+      // rather than coerced to undefined, so it still reaches
+      // validateCanonicalSelection's own "not a valid decimal string" check
+      // (called first thing inside TheOddsApiProvider.verifySelection) and
+      // is rejected there — one validation point, not two. Same
+      // undefined-not-"null"-string convention as submittedOdds above.
+      line: selection.line != null ? (normalizeLineString(selection.line) ?? selection.line) : undefined,
     },
   };
 }

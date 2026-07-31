@@ -825,3 +825,88 @@ test("Betting Markets V1 Phase 1: EXPRESS BetSelection schema can persist line =
   assert.equal(created.selections.length, 1);
   assert.equal(created.selections[0].line?.toString(), "-1.5");
 });
+
+// ---------------------------------------------------------------------
+// Betting Markets V1, Phase 2 — line plumbing through createBetFromPreview()
+// itself. Unlike the Phase 1 tests above (which wrote directly to the fake
+// DB because the token payload had no line field yet), these go through
+// the real createBetFromPreview() with a payload carrying canonicalLine —
+// the same field the signed preview token now carries end to end.
+// ---------------------------------------------------------------------
+
+test("Betting Markets V1 Phase 2 SINGLE: createBetFromPreview persists line = 2.5 from the token's canonicalLine", async () => {
+  const db = createFakeDb();
+  const payload = singlePayload({ canonicalLine: "2.5" });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  assert.equal(result.bet.line?.toString(), "2.5");
+});
+
+test("Betting Markets V1 Phase 2 EXPRESS: createBetFromPreview persists line = -1.5 per selection from each leg's canonicalLine", async () => {
+  const db = createFakeDb();
+  const payload = expressPayload({
+    selections: [
+      expressSelection({ event: "Real Madrid vs Barcelona", canonicalLine: "-1.5" }),
+      expressSelection({ event: "Inter Milan vs Juventus", canonicalLine: "3.5" }),
+    ],
+  });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  const [leg1, leg2] = result.bet.selections;
+  assert.equal(leg1.line?.toString(), "-1.5");
+  assert.equal(leg2.line?.toString(), "3.5");
+});
+
+test("Betting Markets V1 Phase 2 EXPRESS: an existing MONEYLINE leg with no canonicalLine still persists line = null", async () => {
+  const db = createFakeDb();
+  const payload = expressPayload();
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  for (const selection of result.bet.selections) {
+    assert.equal(selection.line, null);
+  }
+});
+
+test("Betting Markets V1 Phase 2: an invalid (non-decimal-string) canonicalLine does not crash bet creation — degrades to null", async () => {
+  const db = createFakeDb();
+  const payload = singlePayload({ providerEventId: "evt-bad-line", canonicalLine: "not-a-number" });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  assert.equal(result.idempotent, false, "bet creation must still succeed");
+  assert.equal(result.bet.providerEventId, "evt-bad-line", "unrelated fields are unaffected — only the unparsable line degrades");
+  assert.equal(result.bet.line, null, "an invalid decimal string must never be written to the Decimal column");
+});
+
+test("Betting Markets V1 Phase 2 review fix: a leading '+' canonicalLine (defense-in-depth — the real pipeline already canonicalizes this before signing) is accepted and canonicalized, not nulled", async () => {
+  const db = createFakeDb();
+  const payload = singlePayload({ canonicalLine: "+2.5" });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  assert.equal(result.bet.line?.toString(), "2.5", "a leading '+' means positive, same as no sign at all — it must persist as the canonical unsigned value, never be discarded as invalid");
+});
+
+test("Betting Markets V1 Phase 2 review fix SINGLE: a positive spread persists with its sign preserved via the participant, and the line unsigned", async () => {
+  const db = createFakeDb();
+  // Arsenal -1.5 vs. Coventry +1.5 — participant and line are always
+  // separate structured fields end to end (never one combined string), so
+  // the signed meaning is preserved by construction: the negative leg keeps
+  // its "-", the positive leg's canonical line is the bare unsigned value.
+  const negative = await createBetFromPreview(
+    singlePayload({ providerEventId: "evt-arsenal", canonicalParticipant: "Arsenal", canonicalLine: "-1.5" }),
+    fakeOptions(db),
+  );
+  const positive = await createBetFromPreview(
+    singlePayload({ providerEventId: "evt-coventry", previewId: "preview-coventry", canonicalParticipant: "Coventry", canonicalLine: "+1.5" }),
+    fakeOptions(db),
+  );
+
+  assert.equal(negative.bet.canonicalParticipant, "Arsenal");
+  assert.equal(negative.bet.line?.toString(), "-1.5");
+  assert.equal(positive.bet.canonicalParticipant, "Coventry");
+  assert.equal(positive.bet.line?.toString(), "1.5");
+});

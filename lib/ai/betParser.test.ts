@@ -340,9 +340,11 @@ test("parseBetSlipMessage: extract_bet with league/market/period/line supplied p
   assert.equal(result.valid, true);
   if (!result.valid) return;
   assert.deepEqual(Object.keys(result).sort(), ["selections", "stake", "type", "valid"]);
-  // Step 16A — league now also threads through (period/line still do not).
-  assert.deepEqual(Object.keys(result.selections[0]).sort(), ["event", "league", "market", "selection", "sport", "submittedOdds"]);
+  // Step 16A — league now also threads through; Betting Markets V1 Phase 2
+  // — line now also threads through (period still does not).
+  assert.deepEqual(Object.keys(result.selections[0]).sort(), ["event", "league", "line", "market", "selection", "sport", "submittedOdds"]);
   assert.equal(result.selections[0].market, "Match Winner");
+  assert.equal(result.selections[0].line, null);
   assert.equal(result.selections[0].league, "Premier League");
   assert.equal(result.selections[0].sport, "Football");
   assert.equal(result.selections[0].event, "Arsenal vs Chelsea");
@@ -372,7 +374,7 @@ test("parseBetSlipMessage: extract_bet with the four new fields explicitly null 
     valid: true,
     type: "SINGLE",
     stake: 50,
-    selections: [{ sport: "Football", league: null, event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: 1.9 }],
+    selections: [{ sport: "Football", league: null, event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: 1.9, line: null }],
   });
 });
 

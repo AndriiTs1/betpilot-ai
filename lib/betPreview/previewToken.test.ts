@@ -467,6 +467,7 @@ function providerMetadataOverrides() {
     canonicalSelectionType: "HOME",
     canonicalParticipant: null,
     canonicalPeriod: "FULL_GAME",
+    canonicalLine: "2.5",
   };
 }
 
@@ -483,6 +484,7 @@ test("Stage 3.1 SINGLE: sign -> verify roundtrip carries every new provider/cano
   assert.equal(result.payload.canonicalSelectionType, "HOME");
   assert.equal(result.payload.canonicalParticipant, null);
   assert.equal(result.payload.canonicalPeriod, "FULL_GAME");
+  assert.equal(result.payload.canonicalLine, "2.5");
 });
 
 test("Stage 3.1 SINGLE: a token signed with no provider metadata (all null) still round-trips correctly", () => {
@@ -498,6 +500,7 @@ test("Stage 3.1 SINGLE: a token signed with no provider metadata (all null) stil
   assert.equal(result.payload.canonicalSelectionType, null);
   assert.equal(result.payload.canonicalParticipant, null);
   assert.equal(result.payload.canonicalPeriod, null);
+  assert.equal(result.payload.canonicalLine, null);
 });
 
 test("Stage 3.1 EXPRESS: sign -> verify roundtrip carries every new field through unchanged, per leg", () => {
@@ -514,6 +517,7 @@ test("Stage 3.1 EXPRESS: sign -> verify roundtrip carries every new field throug
           canonicalSelectionType: "AWAY",
           canonicalParticipant: null,
           canonicalPeriod: "FULL_GAME",
+          canonicalLine: "-1.5",
         }),
       ],
     }),
@@ -525,8 +529,10 @@ test("Stage 3.1 EXPRESS: sign -> verify roundtrip carries every new field throug
   if (!result.ok) return;
   assert.equal(result.payload.selections[0].providerEventId, "evt-provider-abc123");
   assert.equal(result.payload.selections[0].providerSportKey, "soccer_epl");
+  assert.equal(result.payload.selections[0].canonicalLine, "2.5");
   assert.equal(result.payload.selections[1].providerEventId, "evt-provider-xyz789");
   assert.equal(result.payload.selections[1].providerSportKey, "soccer_italy_serie_a");
+  assert.equal(result.payload.selections[1].canonicalLine, "-1.5");
   // Different legs' provider IDs must never bleed into each other.
   assert.notEqual(result.payload.selections[0].providerEventId, result.payload.selections[1].providerEventId);
 });
@@ -566,6 +572,7 @@ test("Stage 3.1 backward compatibility: an old SINGLE token (signed before these
   assert.equal(result.payload.canonicalSelectionType, null);
   assert.equal(result.payload.canonicalParticipant, null);
   assert.equal(result.payload.canonicalPeriod, null);
+  assert.equal(result.payload.canonicalLine, null);
 });
 
 test("Stage 3.1 backward compatibility: an old EXPRESS token (selections missing these fields) is still valid, normalizes to null per leg", () => {
@@ -594,6 +601,7 @@ test("Stage 3.1 backward compatibility: an old EXPRESS token (selections missing
     assert.equal(selection.canonicalSelectionType, null);
     assert.equal(selection.canonicalParticipant, null);
     assert.equal(selection.canonicalPeriod, null);
+    assert.equal(selection.canonicalLine, null);
   }
 });
 
@@ -628,6 +636,19 @@ test("Stage 3.1 tampering: changing eventStartTime in the encoded payload invali
   const [encodedPayload, signature] = token.split(".");
   const decoded = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
   const tamperedPayload = Buffer.from(JSON.stringify({ ...decoded, eventStartTime: "2099-01-01T00:00:00.000Z" }), "utf8").toString("base64url");
+
+  const result = verifyPreviewToken(`${tamperedPayload}.${signature}`, SECRET);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.reason, "invalid_signature");
+});
+
+test("Betting Markets V1 Phase 2 tampering: changing canonicalLine in the encoded payload invalidates the signature", () => {
+  const token = signPreviewToken(singleInput(providerMetadataOverrides()), SECRET);
+  const [encodedPayload, signature] = token.split(".");
+  const decoded = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
+  const tamperedPayload = Buffer.from(JSON.stringify({ ...decoded, canonicalLine: "999.5" }), "utf8").toString("base64url");
 
   const result = verifyPreviewToken(`${tamperedPayload}.${signature}`, SECRET);
 

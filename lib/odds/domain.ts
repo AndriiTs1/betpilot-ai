@@ -189,6 +189,26 @@ export function isDecimalString(value: string): boolean {
   return DECIMAL_STRING_PATTERN.test(value);
 }
 
+// Betting Markets V1, Phase 2 review fix — the one canonical rule for
+// turning a betting-LINE input into its canonical decimal string. A leading
+// "+" is a valid, common way a positive spread is typed/extracted (e.g.
+// "Coventry +1.5"), so it must be ACCEPTED here — but it is never retained
+// in the canonical form: an unsigned decimal string already means positive
+// (matching isDecimalString's own convention, and the draft layer's own
+// magnitude+direction split), so "+1.5" canonicalizes to "1.5", identical
+// to a bare "1.5" input. "-1.5" and "2.5" pass through unchanged. Anything
+// not decimal-shaped at all (garbage, multiple dots, letters) returns null
+// — a real "malformed", never silently coerced. Distinct from
+// isDecimalString: that function asks "is this ALREADY canonical"; this one
+// produces the canonical string from any validly-shaped input, "+" included.
+const LINE_INPUT_PATTERN = /^[+-]?\d+(\.\d+)?$/;
+
+export function normalizeLineString(value: string): string | null {
+  const trimmed = value.trim();
+  if (!LINE_INPUT_PATTERN.test(trimmed)) return null;
+  return trimmed.startsWith("+") ? trimmed.slice(1) : trimmed;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Structural selection validation                                            */
 /* -------------------------------------------------------------------------- */

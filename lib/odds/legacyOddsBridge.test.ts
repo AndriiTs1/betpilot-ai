@@ -294,6 +294,61 @@ test("request mapping: only MONEYLINE_2WAY/MONEYLINE_3WAY are ever produced — 
 });
 
 /* -------------------------------------------------------------------------- */
+/* request mapping: line — Betting Markets V1 Phase 2 (+ review fix)          */
+/* -------------------------------------------------------------------------- */
+
+test("request mapping: a '+1.5' line is canonicalized to '1.5' (redundant leading '+' stripped, never rejected)", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal vs Coventry City",
+    selection: "Coventry",
+    submittedOdds: 1.9,
+    line: "+1.5",
+  });
+  assert.equal(request.selection.line, "1.5");
+});
+
+test("request mapping: a '-1.5' line passes through unchanged", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal vs Coventry City",
+    selection: "Arsenal",
+    submittedOdds: 1.9,
+    line: "-1.5",
+  });
+  assert.equal(request.selection.line, "-1.5");
+});
+
+test("request mapping: a '2.5' line (already canonical, unsigned) passes through unchanged", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal vs Coventry City",
+    selection: "Over",
+    submittedOdds: 1.9,
+    line: "2.5",
+  });
+  assert.equal(request.selection.line, "2.5");
+});
+
+test("request mapping: null/undefined line is omitted (undefined), never fabricated", () => {
+  const withNull = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "1", submittedOdds: 2.0, line: null });
+  const withoutField = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "1", submittedOdds: 2.0 });
+  assert.equal(withNull.selection.line, undefined);
+  assert.equal(withoutField.selection.line, undefined);
+});
+
+test("request mapping: a genuinely malformed line is passed through unchanged (not silently dropped), so validateCanonicalSelection's own decimal-string check still rejects it downstream", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "A vs B",
+    selection: "1",
+    submittedOdds: 2.0,
+    line: "not-a-number",
+  });
+  assert.equal(request.selection.line, "not-a-number");
+});
+
+/* -------------------------------------------------------------------------- */
 /* verificationResultToLegacyOddsCheck                                        */
 /* -------------------------------------------------------------------------- */
 

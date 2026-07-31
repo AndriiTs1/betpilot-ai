@@ -2,12 +2,14 @@
 //
 // Produces the EXACT existing ParsedBetSlip shape (lib/bets/betSlip.ts) so
 // every current consumer — buildBetSlipPreview, both previewToken shapes,
-// Prisma writes — keeps working completely unchanged. period/line/
-// warnings/confidence/participants are still deliberately NOT threaded
-// through here: ParsedBetSlip has no slot for them, and adding one remains
-// out of scope. league IS threaded through as of Step 16A (see
+// Prisma writes — keeps working completely unchanged. period/warnings/
+// confidence/participants are still deliberately NOT threaded through
+// here: ParsedBetSlip has no slot for them, and adding one remains out of
+// scope. league IS threaded through as of Step 16A (see
 // optionalLegacyLeagueText below) — BetSlipSelectionInput.league now exists
-// specifically to carry it.
+// specifically to carry it. line IS threaded through as of Betting Markets
+// V1 Phase 2 (see optionalLegacyLineText below) — purely additive data,
+// no market classification changes here.
 //
 // This file makes no business decisions: it never touches confirmation
 // eligibility, provider support, acceptedOdds, currentOdds, combined odds,
@@ -16,7 +18,7 @@
 // unchanged.
 
 import type { ParsedBetSlip, BetSlipSelectionInput } from "@/lib/bets/betSlip";
-import type { BetDraftField, BetDraftLeague, UniversalBetDraft } from "./domain";
+import type { BetDraftField, BetDraftLeague, BetDraftLine, UniversalBetDraft } from "./domain";
 
 export type LegacyAdapterErrorCode = "INVALID_STAKE" | "INVALID_SUBMITTED_ODDS" | "INVALID_SPORT";
 
@@ -87,6 +89,21 @@ function optionalLegacyLeagueText(field: BetDraftField<BetDraftLeague>): string 
   return field.rawText ?? null;
 }
 
+// Betting Markets V1, Phase 2 — line is optional in legacy, only ever
+// populated when EXTRACTED (a genuinely-parsed numeric line — UNKNOWN/
+// MISSING/AMBIGUOUS all adapt to null, same discipline as
+// optionalLegacyDisplayText above). Reconstructs the domain-layer decimal-
+// string convention (lib/odds/domain.ts's isDecimalString: optional
+// leading "-", never "+") from BetDraftLine's magnitude/direction split —
+// magnitude is always unsigned by construction (normalizeDraftLine's own
+// invariant), so only MINUS needs the sign restored; OVER/UNDER/PLUS/NONE
+// all represent a non-negative line and pass the magnitude through as-is,
+// exactly matching this task's required examples ("2.5", "-1.5", "0.0").
+function optionalLegacyLineText(field: BetDraftField<BetDraftLine>): string | null {
+  if (field.state !== "EXTRACTED") return null;
+  return field.value.direction === "MINUS" ? `-${field.value.magnitude}` : field.value.magnitude;
+}
+
 export function universalBetDraftToParsedBetSlip(draft: UniversalBetDraft): ParsedBetSlip {
   const stake = toRequiredNumber(draft.stake, "INVALID_STAKE", "stake");
 
@@ -97,6 +114,7 @@ export function universalBetDraftToParsedBetSlip(draft: UniversalBetDraft): Pars
     market: optionalLegacyDisplayText(selection.marketType),
     selection: selection.selectionRawText,
     submittedOdds: toOptionalNumber(selection.submittedOdds, "INVALID_SUBMITTED_ODDS", `selections[${index}].submittedOdds`),
+    line: optionalLegacyLineText(selection.line),
   }));
 
   return { type: draft.slipType, stake, selections };

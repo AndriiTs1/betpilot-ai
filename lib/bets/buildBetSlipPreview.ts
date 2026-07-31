@@ -163,6 +163,15 @@ interface ProviderTokenFields {
   canonicalSelectionType: string | null;
   canonicalParticipant: string | null;
   canonicalPeriod: string | null;
+  // Betting Markets V1, Phase 2 — sourced from canonicalSelection.line (the
+  // pre-verification REQUEST), exactly like canonicalMarketType/
+  // canonicalSelectionType/canonicalParticipant/canonicalPeriod above —
+  // never from oddsCheck (the response): a line is part of what the player
+  // asked for, not something the provider resolves, so it belongs with the
+  // other canonical-request fields, not the provider-event-metadata ones
+  // (homeTeamName/awayTeamName/competitionName below, which genuinely only
+  // become known once the provider matches an event).
+  canonicalLine: string | null;
   homeTeamName: string | null;
   awayTeamName: string | null;
   competitionName: string | null;
@@ -176,6 +185,7 @@ const NULL_PROVIDER_TOKEN_FIELDS: ProviderTokenFields = {
   canonicalSelectionType: null,
   canonicalParticipant: null,
   canonicalPeriod: null,
+  canonicalLine: null,
   homeTeamName: null,
   awayTeamName: null,
   competitionName: null,
@@ -197,6 +207,7 @@ function buildProviderTokenFields(
     canonicalSelectionType: canonicalSelection.selectionType,
     canonicalParticipant: canonicalSelection.participant?.name ?? null,
     canonicalPeriod: canonicalSelection.period,
+    canonicalLine: canonicalSelection.line ?? null,
     homeTeamName: oddsCheck.homeTeamName ?? null,
     awayTeamName: oddsCheck.awayTeamName ?? null,
     competitionName: oddsCheck.competitionName ?? null,
@@ -265,6 +276,11 @@ export async function buildBetSlipPreview(
         event: selection.event,
         selection: selection.selection,
         submittedOdds: selection.submittedOdds,
+        // Betting Markets V1, Phase 2 — threaded through to
+        // CanonicalSelection.line so it survives into the signed preview
+        // token (canonicalLine) and, eventually, persistence. Not read by
+        // any matching/verification logic yet.
+        line: selection.line ?? null,
       }),
     );
   });

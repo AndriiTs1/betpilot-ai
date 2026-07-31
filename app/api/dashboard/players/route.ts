@@ -51,6 +51,13 @@ export async function GET(request: NextRequest) {
             awayTeamName: true,
             competitionName: true,
             eventStartTime: true,
+            // Betting Markets V1, Phase 2 — same "this route hand-picks
+            // columns" gap as eventStartTime's own comment above. Nothing
+            // populates this yet (no market classification changes in this
+            // phase), but the column must not be silently excluded once
+            // something eventually does. selections below has no explicit
+            // select, so BetSelection.line already rides along automatically.
+            line: true,
             // Stage 12.2 — deterministic leg order, oldest first
             // (submission order), same as GET /api/miniapp/me.
             selections: { orderBy: { createdAt: "asc" } },
@@ -131,6 +138,7 @@ export async function GET(request: NextRequest) {
         awayTeamName: bet.awayTeamName,
         competitionName: bet.competitionName,
         eventStartTime: bet.eventStartTime ? bet.eventStartTime.toISOString() : null,
+        line: bet.line ? bet.line.toString() : null,
         selections: bet.selections,
       });
 

@@ -28,6 +28,9 @@ test("adapter: football SINGLE with odds adapts to the exact ParsedBetSlip shape
         market: null,
         selection: "Arsenal",
         submittedOdds: 1.95,
+        // Betting Markets V1, Phase 2 — line now threads through too (null
+        // here: the fixture's default line field is MISSING).
+        line: null,
       },
     ],
   });
@@ -218,7 +221,7 @@ test("adapter: an Infinity-like submittedOdds throws LegacyAdapterError rather t
 /* 12. No league/period/line leakage into output                             */
 /* -------------------------------------------------------------------------- */
 
-test("adapter: period/line/warnings/confidence/participants never leak into the adapted output shape — league now intentionally does (Step 16A)", () => {
+test("adapter: period/warnings/confidence/participants never leak into the adapted output shape — league (Step 16A) and line (Betting Markets V1 Phase 2) now intentionally do", () => {
   const input = draft({
     selections: [
       draftSelection({
@@ -232,10 +235,28 @@ test("adapter: period/line/warnings/confidence/participants never leak into the 
   const slip = universalBetDraftToParsedBetSlip(input);
 
   assert.deepEqual(Object.keys(slip).sort(), ["selections", "stake", "type"]);
-  assert.deepEqual(Object.keys(slip.selections[0]).sort(), ["event", "league", "market", "selection", "sport", "submittedOdds"]);
+  assert.deepEqual(Object.keys(slip.selections[0]).sort(), ["event", "league", "line", "market", "selection", "sport", "submittedOdds"]);
   // The actual point of Step 16A: an extracted league's resolvedName
   // reaches ParsedBetSlip, where it used to be silently dropped.
   assert.equal(slip.selections[0].league, "La Liga");
+  // The actual point of Betting Markets V1 Phase 2: an OVER/UNDER/PLUS/NONE
+  // line's magnitude reaches ParsedBetSlip unsigned (no leading "+"),
+  // matching lib/odds/domain.ts's isDecimalString convention.
+  assert.equal(slip.selections[0].line, "2.5");
+});
+
+test("adapter: a MINUS-direction line adapts to a leading '-', matching the decimal-string convention", () => {
+  const input = draft({
+    selections: [
+      draftSelection({
+        line: extractedField({ rawText: "-1.5", magnitude: "1.5", direction: "MINUS" as const }, "-1.5"),
+      }),
+    ],
+  });
+
+  const slip = universalBetDraftToParsedBetSlip(input);
+
+  assert.equal(slip.selections[0].line, "-1.5");
 });
 
 /* -------------------------------------------------------------------------- */

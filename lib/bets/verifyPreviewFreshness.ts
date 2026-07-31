@@ -81,6 +81,13 @@ export interface VerifyPreviewFreshnessOptions {
 // payload's absent market field is not a gap: null here means exactly what
 // it always has meant for a SINGLE bet elsewhere in this codebase
 // (lib/bets/betSlip.ts's normalizeParsedBet does the same).
+//
+// Betting Markets V1, Phase 2 — line is reconstructed from the token's own
+// canonicalLine, unlike market/event/selection above: there is no raw
+// "line text" stored anywhere on the token to re-derive it from (line was
+// extracted once, at parse time, before a token ever existed), so
+// canonicalLine — the exact value originally signed — is the only honest
+// source for a fresh re-verification pass to use.
 function reconstructParsedBetSlip(payload: AnyPreviewTokenPayload): ParsedBetSlip {
   if (payload.type === "SINGLE") {
     return {
@@ -93,6 +100,7 @@ function reconstructParsedBetSlip(payload: AnyPreviewTokenPayload): ParsedBetSli
           market: null,
           selection: payload.outcome,
           submittedOdds: payload.odds,
+          line: payload.canonicalLine ?? null,
         },
       ],
     };
@@ -112,6 +120,7 @@ function reconstructParsedBetSlip(payload: AnyPreviewTokenPayload): ParsedBetSli
       market: selection.market,
       selection: selection.outcome,
       submittedOdds: selection.submittedOdds !== null ? Number(selection.submittedOdds) : null,
+      line: selection.canonicalLine ?? null,
     })),
   };
 }
