@@ -69,6 +69,20 @@ test("mapOddsStatus: not matched + reasonCode PROVIDER_RATE_LIMITED -> UNAVAILAB
   assert.equal(mapOddsCheckToSelectionStatus(r), "UNAVAILABLE");
 });
 
+// Root cause of the production "single works, express doesn't" investigation
+// (The Odds API quota exhausted, HTTP 401 OUT_OF_USAGE_CREDITS) — must map
+// to UNAVAILABLE (a provider outage), never NOT_FOUND (which would wrongly
+// imply the team/event genuinely doesn't exist).
+test("mapOddsStatus: not matched + reasonCode PROVIDER_QUOTA_EXCEEDED -> UNAVAILABLE", () => {
+  const r = result({ reasonCode: "PROVIDER_QUOTA_EXCEEDED" });
+  assert.equal(mapOddsCheckToSelectionStatus(r), "UNAVAILABLE");
+});
+
+test("mapOddsStatus: not matched + reasonCode PROVIDER_AUTH_FAILED -> UNAVAILABLE", () => {
+  const r = result({ reasonCode: "PROVIDER_AUTH_FAILED" });
+  assert.equal(mapOddsCheckToSelectionStatus(r), "UNAVAILABLE");
+});
+
 test("mapOddsStatus: not matched + reasonCode EVENT_NOT_FOUND -> still NOT_FOUND (real absence, not a provider failure)", () => {
   const r = result({ reasonCode: "EVENT_NOT_FOUND" });
   assert.equal(mapOddsCheckToSelectionStatus(r), "NOT_FOUND");

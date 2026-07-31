@@ -33,6 +33,8 @@ test("VerificationReasonCode: exact serialized values, stable order", () => {
     "PROVIDER_TIMEOUT",
     "PROVIDER_RATE_LIMITED",
     "PROVIDER_INVALID_RESPONSE",
+    "PROVIDER_QUOTA_EXCEEDED",
+    "PROVIDER_AUTH_FAILED",
     "AMBIGUOUS_EVENT",
     "INVALID_INPUT",
     "ODDS_OUTSIDE_TOLERANCE",
@@ -48,12 +50,23 @@ test("every reason code has a classification with no gaps", () => {
   }
 });
 
-test("retryable reason codes are exactly the provider-failure family", () => {
+// PROVIDER_AUTH_FAILED is the one deliberate exception: a member of the
+// PROVIDER_FAILURE category that is NOT retryable (a bad/missing key won't
+// fix itself on a later attempt) — see REASON_CODE_CLASSIFICATION's own
+// comment in verification.ts.
+test("retryable reason codes are the provider-failure family minus PROVIDER_AUTH_FAILED", () => {
   const retryable = VERIFICATION_REASON_CODES.filter(isRetryableReason);
   assert.deepEqual(
     retryable.slice().sort(),
-    ["PROVIDER_INVALID_RESPONSE", "PROVIDER_RATE_LIMITED", "PROVIDER_TIMEOUT", "PROVIDER_UNAVAILABLE"].sort(),
+    [
+      "PROVIDER_INVALID_RESPONSE",
+      "PROVIDER_RATE_LIMITED",
+      "PROVIDER_TIMEOUT",
+      "PROVIDER_UNAVAILABLE",
+      "PROVIDER_QUOTA_EXCEEDED",
+    ].sort(),
   );
+  assert.equal(isRetryableReason("PROVIDER_AUTH_FAILED"), false);
 });
 
 test("coverage-failure and matching-failure reason codes are never retryable", () => {

@@ -1,6 +1,6 @@
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { normalizeTeamName, overlapScore } from "./teamNameMatcher";
-import { oddsDebugLog as debugLog } from "./oddsDebugLogging";
+import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
 
 const ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4";
 const ODDS_API_TIMEOUT_MS = 8000;
@@ -540,6 +540,22 @@ interface CacheEntry {
 
 const oddsCache = new Map<string, CacheEntry>();
 
+// Structural failure carrier — status and the provider's own short
+// error_code (never the raw body) — so both the safe note text below AND
+// the safe operational log in verifyOdds() can read them directly, instead
+// of each re-parsing a formatted message string independently.
+class OddsApiHttpError extends Error {
+  readonly status: number;
+  readonly providerErrorCode: string | null;
+
+  constructor(status: number, providerErrorCode: string | null) {
+    super(`The Odds API request failed with status ${status}${providerErrorCode ? ` (${providerErrorCode})` : ""}`);
+    this.name = "OddsApiHttpError";
+    this.status = status;
+    this.providerErrorCode = providerErrorCode;
+  }
+}
+
 async function fetchOddsForSport(sportKey: string): Promise<OddsApiEvent[]> {
   const cached = oddsCache.get(sportKey);
   if (cached && cached.expiresAt > Date.now()) {
@@ -559,10 +575,28 @@ async function fetchOddsForSport(sportKey: string): Promise<OddsApiEvent[]> {
     const response = await fetch(url, { signal: controller.signal });
 
     if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new Error(
-        `The Odds API request failed with status ${response.status}${body ? `: ${body}` : ""}`,
-      );
+      // Safe by construction: the raw response body is parsed transiently,
+      // in memory, only to pull out the provider's own short, enum-like
+      // `error_code` field (e.g. "OUT_OF_USAGE_CREDITS") — never kept or
+      // embedded whole. A non-JSON or differently-shaped body degrades to
+      // providerErrorCode: null rather than throwing or falling back to
+      // including any raw text. This is what lets classifyLegacyFailureNote
+      // (theOddsApiProvider.ts) distinguish quota-exhausted / auth-failed /
+      // rate-limited / generic-unavailable instead of collapsing every
+      // non-2xx status into one undifferentiated failure.
+      const bodyText = await response.text().catch(() => "");
+      let providerErrorCode: string | null = null;
+      try {
+        const parsedBody = JSON.parse(bodyText) as { error_code?: unknown };
+        if (typeof parsedBody.error_code === "string") {
+          providerErrorCode = parsedBody.error_code;
+        }
+      } catch {
+        // Non-JSON body — providerErrorCode stays null; no raw text is ever
+        // read into the thrown error below.
+      }
+
+      throw new OddsApiHttpError(response.status, providerErrorCode);
     }
 
     const events = (await response.json()) as unknown;
@@ -654,31 +688,10 @@ function extractProviderEventMetadata(event: OddsApiEvent): ProviderEventMetadat
 }
 
 /* -------------------------------------------------------------------------- */
-/* TEMPORARY DEBUG LOGGING — investigating an EXPRESS-bet-specific report    */
-/* (single-team selections resolve for SINGLE bets but stay unresolved/      */
-/* "Unavailable" for EXPRESS legs). debugLog (imported above, from           */
-/* ./oddsDebugLogging) is a no-op unless ODDS_DEBUG_LOGGING=true — off by    */
-/* default, so this never fires during tests or in production until         */
-/* explicitly enabled. Only sport/event/selection text, team names,         */
-/* sport_keys, counts, and timings are logged — never playerId, stake, or   */
-/* anything else PII-adjacent. Remove every debugLog(...) call site below   */
-/* (and the import) once the root cause is confirmed and any fix ships.     */
-/* -------------------------------------------------------------------------- */
-/* -------------------------------------------------------------------------- */
 /* Public entry point                                                          */
 /* -------------------------------------------------------------------------- */
 
 export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckResult> {
-  const debugStartedAt = Date.now();
-  const debugCallId = `${bet.event}::${debugStartedAt}::${Math.random().toString(36).slice(2, 8)}`;
-  debugLog("verifyOdds:start", {
-    debugCallId,
-    sport: bet.sport,
-    betEvent: bet.event,
-    selection: bet.selection,
-    hasSubmittedOdds: bet.odds !== null,
-  });
-
   const baseResult: OddsCheckResult = {
     matched: false,
     withinTolerance: null,
@@ -692,16 +705,8 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
   const sportKeys = getSportKeys(bet.sport);
 
   if (!sportKeys) {
-    debugLog("verifyOdds:end", {
-      debugCallId,
-      betEvent: bet.event,
-      outcome: "SPORT_NOT_MAPPED",
-      totalMs: Date.now() - debugStartedAt,
-    });
     return { ...baseResult, note: `Sport/league "${bet.sport}" is not mapped to a The Odds API sport_key` };
   }
-
-  debugLog("verifyOdds:sportKeysResolved", { debugCallId, betEvent: bet.event, sportKeys: sportKeys.join(",") });
 
   // Single-key sports (football/basketball/etc.) make exactly the one
   // request they always did. Multi-key sports (currently only tennis) query
@@ -722,47 +727,35 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
       // event came from (see OddsApiEvent.providerSportKey's own comment).
       events = events.concat(fetched.map((event) => ({ ...event, providerSportKey: sportKey })));
       successCount += 1;
-      debugLog("verifyOdds:fetchOddsForSport:success", {
-        debugCallId,
-        betEvent: bet.event,
-        sportKey,
-        elapsedMs: Date.now() - fetchStartedAt,
-        eventCount: fetched.length,
-      });
     } catch (err) {
-      lastFetchError =
-        err instanceof Error && err.name === "AbortError"
-          ? `The Odds API request timed out after ${ODDS_API_TIMEOUT_MS}ms`
-          : err instanceof Error
-            ? err.message
-            : "Unknown error calling The Odds API";
-      debugLog("verifyOdds:fetchOddsForSport:error", {
-        debugCallId,
-        betEvent: bet.event,
+      const isTimeout = err instanceof Error && err.name === "AbortError";
+      lastFetchError = isTimeout
+        ? `The Odds API request timed out after ${ODDS_API_TIMEOUT_MS}ms`
+        : err instanceof Error
+          ? err.message
+          : "Unknown error calling The Odds API";
+
+      // Permanent, safe operational log — one line per failed fetch attempt.
+      // failureCode is always a short, enum-like token (the provider's own
+      // error_code, a synthesized HTTP_<status>, "TIMEOUT", or "UNKNOWN"),
+      // never free text/raw response body/headers/API key. Lets operators
+      // see failure category + HTTP status + timing + which sport_key was
+      // affected without needing the (removed) verbose investigation
+      // logging this replaces.
+      logScreenshotPipelineEvent("odds_provider_fetch_failed", {
         sportKey,
-        elapsedMs: Date.now() - fetchStartedAt,
-        error: lastFetchError,
+        durationMs: Date.now() - fetchStartedAt,
+        failureCode: isTimeout
+          ? "TIMEOUT"
+          : err instanceof OddsApiHttpError
+            ? (err.providerErrorCode ?? `HTTP_${err.status}`)
+            : "UNKNOWN",
+        httpStatus: err instanceof OddsApiHttpError ? err.status : undefined,
       });
     }
   }
 
-  debugLog("verifyOdds:fetchSummary", {
-    debugCallId,
-    betEvent: bet.event,
-    successCount,
-    totalKeys: sportKeys.length,
-    totalEventsFetched: events.length,
-    elapsedMsSoFar: Date.now() - debugStartedAt,
-  });
-
   if (successCount === 0 && lastFetchError) {
-    debugLog("verifyOdds:end", {
-      debugCallId,
-      betEvent: bet.event,
-      outcome: "ALL_FETCHES_FAILED",
-      lastFetchError,
-      totalMs: Date.now() - debugStartedAt,
-    });
     return { ...baseResult, note: lastFetchError };
   }
 
@@ -781,42 +774,13 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
   // never produces a false AMBIGUOUS_EVENT.
   const dedupedEvents = dedupeEventsSemantically(dedupedById);
 
-  debugLog("verifyOdds:dedupedEvents", {
-    debugCallId,
-    betEvent: bet.event,
-    rawCount: events.length,
-    dedupedByIdCount: dedupedById.length,
-    dedupedSemanticCount: dedupedEvents.length,
-  });
-
   const matchResult = findMatchingEvent(dedupedEvents, bet.event);
 
-  debugLog("verifyOdds:matchResult", {
-    debugCallId,
-    betEvent: bet.event,
-    kind: matchResult.kind,
-    matchedEventId: matchResult.kind === "FOUND" ? matchResult.event.id : null,
-    matchedTeams:
-      matchResult.kind === "FOUND" ? `${matchResult.event.home_team} vs ${matchResult.event.away_team}` : null,
-  });
-
   if (matchResult.kind === "NOT_FOUND") {
-    debugLog("verifyOdds:end", {
-      debugCallId,
-      betEvent: bet.event,
-      outcome: "EVENT_NOT_FOUND",
-      totalMs: Date.now() - debugStartedAt,
-    });
     return { ...baseResult, note: `No matching event found for "${bet.event}" in ${sportKeys.join(", ")}` };
   }
 
   if (matchResult.kind === "AMBIGUOUS") {
-    debugLog("verifyOdds:end", {
-      debugCallId,
-      betEvent: bet.event,
-      outcome: "AMBIGUOUS_EVENT",
-      totalMs: Date.now() - debugStartedAt,
-    });
     return { ...baseResult, note: `Ambiguous event match for "${bet.event}" across multiple leagues` };
   }
 
@@ -835,27 +799,12 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
   const bookmakerPick = pickBookmaker(event);
 
   if (!bookmakerPick) {
-    debugLog("verifyOdds:end", {
-      debugCallId,
-      betEvent: bet.event,
-      outcome: "NO_BOOKMAKER_ODDS",
-      matchedEventId: event.id,
-      totalMs: Date.now() - debugStartedAt,
-    });
     return { ...baseResult, ...providerMetadata, note: `No bookmaker odds available for "${bet.event}"` };
   }
 
   const price = extractOutcomePrice(bookmakerPick.bookmaker, bet.selection, event, bet.event);
 
   if (price === null) {
-    debugLog("verifyOdds:end", {
-      debugCallId,
-      betEvent: bet.event,
-      outcome: "SELECTION_NOT_MATCHED",
-      matchedEventId: event.id,
-      bookmaker: bookmakerPick.bookmaker.title,
-      totalMs: Date.now() - debugStartedAt,
-    });
     return {
       ...baseResult,
       ...providerMetadata,
@@ -863,16 +812,6 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
       note: `Could not match selection "${bet.selection}" to a bookmaker outcome`,
     };
   }
-
-  debugLog("verifyOdds:end", {
-    debugCallId,
-    betEvent: bet.event,
-    outcome: "MATCHED",
-    matchedEventId: event.id,
-    bookmaker: bookmakerPick.bookmaker.title,
-    price,
-    totalMs: Date.now() - debugStartedAt,
-  });
 
   // Step 15G — no odds were submitted to compare price against: every
   // branch above this point already returns before ever reaching here, so

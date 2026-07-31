@@ -27,6 +27,18 @@ export type VerificationReasonCode =
   | "PROVIDER_TIMEOUT"
   | "PROVIDER_RATE_LIMITED"
   | "PROVIDER_INVALID_RESPONSE"
+  // The Odds API-specific, HTTP 401 with error_code "OUT_OF_USAGE_CREDITS"
+  // — the account's request quota is exhausted. Distinct from
+  // PROVIDER_AUTH_FAILED (also HTTP 401, but a bad/missing key): quota
+  // exhaustion resolves itself once the billing period rolls over or the
+  // plan is upgraded, a bad key never will without manual intervention —
+  // operationally different enough to warrant separate codes rather than
+  // collapsing both into PROVIDER_UNAVAILABLE. See
+  // lib/odds/theOddsApiProvider.ts's classifyLegacyFailureNote.
+  | "PROVIDER_QUOTA_EXCEEDED"
+  // HTTP 401 (or equivalent) that is NOT quota exhaustion — a missing,
+  // invalid, or revoked API key.
+  | "PROVIDER_AUTH_FAILED"
   | "AMBIGUOUS_EVENT"
   | "INVALID_INPUT"
   | "ODDS_OUTSIDE_TOLERANCE"
@@ -43,6 +55,8 @@ export const VERIFICATION_REASON_CODES: readonly VerificationReasonCode[] = [
   "PROVIDER_TIMEOUT",
   "PROVIDER_RATE_LIMITED",
   "PROVIDER_INVALID_RESPONSE",
+  "PROVIDER_QUOTA_EXCEEDED",
+  "PROVIDER_AUTH_FAILED",
   "AMBIGUOUS_EVENT",
   "INVALID_INPUT",
   "ODDS_OUTSIDE_TOLERANCE",
@@ -79,6 +93,15 @@ const REASON_CODE_CLASSIFICATION: Readonly<Record<VerificationReasonCode, Reason
   PROVIDER_TIMEOUT: { category: "PROVIDER_FAILURE", retryable: true },
   PROVIDER_RATE_LIMITED: { category: "PROVIDER_FAILURE", retryable: true },
   PROVIDER_INVALID_RESPONSE: { category: "PROVIDER_FAILURE", retryable: true },
+  // Retryable in the same "worth trying again later" sense as the other
+  // PROVIDER_FAILURE codes above — once the quota resets/plan is upgraded,
+  // the identical request will succeed.
+  PROVIDER_QUOTA_EXCEEDED: { category: "PROVIDER_FAILURE", retryable: true },
+  // NOT retryable, unlike every other PROVIDER_FAILURE code: a bad/missing
+  // key will not fix itself on a later attempt without manual intervention
+  // (rotating the key) — the one deliberate exception to this category's
+  // otherwise-uniform retryable:true.
+  PROVIDER_AUTH_FAILED: { category: "PROVIDER_FAILURE", retryable: false },
   AMBIGUOUS_EVENT: { category: "MATCHING_FAILURE", retryable: false },
   INVALID_INPUT: { category: "INPUT_FAILURE", retryable: false },
   ODDS_OUTSIDE_TOLERANCE: { category: "COMPARISON", retryable: false },
@@ -152,6 +175,13 @@ const PUBLIC_MESSAGE_KEYS: Readonly<Record<VerificationStatus | VerificationReas
   PROVIDER_TIMEOUT: "odds.provider_timeout",
   PROVIDER_RATE_LIMITED: "odds.provider_rate_limited",
   PROVIDER_INVALID_RESPONSE: "odds.provider_invalid_response",
+  // Same public message key as PROVIDER_UNAVAILABLE — the player-facing
+  // copy is deliberately identical, neutral wording across every
+  // provider-technical failure sub-type (see
+  // components/miniapp/BetPreviewCard.tsx); only logs/operator tooling
+  // distinguish quota-exceeded from auth-failed from generic-unavailable.
+  PROVIDER_QUOTA_EXCEEDED: "odds.provider_unavailable",
+  PROVIDER_AUTH_FAILED: "odds.provider_unavailable",
   AMBIGUOUS_EVENT: "odds.ambiguous_event",
   INVALID_INPUT: "odds.invalid_input",
   ODDS_OUTSIDE_TOLERANCE: "odds.changed",

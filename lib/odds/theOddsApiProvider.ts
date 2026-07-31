@@ -228,16 +228,19 @@ function selectionToLegacyText(selection: CanonicalSelection): string | null {
 // small, fully-enumerated set of note templates the current file actually
 // produces (verified by reading oddsVerifier.ts in full while writing this
 // adapter — every `return { ...baseResult, note: ... }` site is listed
-// below). It intentionally does NOT try to parse embedded HTTP status
-// codes out of the "request failed with status N" template to distinguish
-// PROVIDER_RATE_LIMITED from a generic failure — that message was written
-// for human logs, not as a structured contract, and parsing it further
-// would be exactly the kind of fabricated reliability
-// docs/ODDS_PROVIDER_DESIGN.md Section 9's "narrowest honest generic
-// reason" instruction warns against. PROVIDER_RATE_LIMITED is therefore
-// unreachable from this adapter today — reserved for a future stage where
-// oddsVerifier.ts (or its eventual replacement) exposes the HTTP status
-// structurally instead of as embedded text.
+// below).
+//
+// The "request failed with status N" template now safely embeds the HTTP
+// status and (when present) the provider's own short `error_code` string —
+// e.g. "...status 401 (OUT_OF_USAGE_CREDITS)" — parsed here to distinguish
+// quota exhaustion / auth failure / rate limiting from a generic failure.
+// oddsVerifier.ts's fetchOddsForSport is the only place this template is
+// constructed; it never embeds the raw provider response body, only that
+// one short field, so parsing it here is not the "fabricated reliability
+// from unstructured text" docs/ODDS_PROVIDER_DESIGN.md Section 9 warns
+// against — the status and error_code are the provider's own structured
+// signal, just relayed through a string boundary. PROVIDER_RATE_LIMITED is
+// reachable via this path (HTTP 429).
 function classifyLegacyFailureNote(
   note: string,
 ): { reasonCode: Exclude<VerificationReasonCode, "NONE">; diagnosticCode: string } {
@@ -253,7 +256,24 @@ function classifyLegacyFailureNote(
   if (note === "Unexpected response shape from The Odds API") {
     return { reasonCode: "PROVIDER_INVALID_RESPONSE", diagnosticCode: "LEGACY_FETCH_INVALID_RESPONSE" };
   }
-  if (/^The Odds API request failed with status \d+/.test(note)) {
+  const statusMatch = note.match(/^The Odds API request failed with status (\d+)(?: \(([A-Z0-9_]+)\))?$/);
+  if (statusMatch) {
+    const status = Number(statusMatch[1]);
+    const providerErrorCode = statusMatch[2] ?? null;
+
+    if (status === 401 && providerErrorCode === "OUT_OF_USAGE_CREDITS") {
+      return { reasonCode: "PROVIDER_QUOTA_EXCEEDED", diagnosticCode: "LEGACY_QUOTA_EXCEEDED" };
+    }
+    // Any other 401 (missing key, invalid key, revoked key, ...) — the
+    // provider's exact error_code for these varies and isn't guaranteed
+    // stable across cases, so every non-quota 401 is classified as an auth
+    // failure rather than pattern-matching individual key-error codes.
+    if (status === 401) {
+      return { reasonCode: "PROVIDER_AUTH_FAILED", diagnosticCode: "LEGACY_AUTH_FAILED" };
+    }
+    if (status === 429) {
+      return { reasonCode: "PROVIDER_RATE_LIMITED", diagnosticCode: "LEGACY_RATE_LIMITED" };
+    }
     return { reasonCode: "PROVIDER_UNAVAILABLE", diagnosticCode: "LEGACY_FETCH_FAILED" };
   }
   if (note === "Unknown error calling The Odds API") {

@@ -578,6 +578,36 @@ test("Step 16A (7): every provider request fails — provider failure is preserv
   assert.doesNotMatch(result.note ?? "", /No matching event found/);
 });
 
+// Root cause of the production "single-team query works for SINGLE, stays
+// Unavailable for EXPRESS" investigation: every fetch failed with a real
+// HTTP 401 + error_code OUT_OF_USAGE_CREDITS (quota exhausted) — not a
+// network-level throw like the "reject" fixture above. This proves the
+// same guarantee (findMatchingEvent is never reached — no candidate event
+// list ever existed to match against) for that exact real-world shape, and
+// that the safe note format (status + short error_code, never a raw body)
+// is what actually gets constructed.
+test("provider HTTP failure (OUT_OF_USAGE_CREDITS) never reaches findMatchingEvent, and the note never embeds the raw response body", async () => {
+  const rawBody = { message: "Usage quota has been reached. See usage plans at https://the-odds-api.com", error_code: "OUT_OF_USAGE_CREDITS" };
+  currentHandler = async () =>
+    new Response(JSON.stringify(rawBody), { status: 401, headers: { "Content-Type": "application/json" } });
+
+  const result = await verifyOdds(bet({ sport: "football", event: "Arsenal", selection: "Arsenal", odds: null }));
+
+  assert.equal(result.matched, false);
+  assert.equal(result.note, "The Odds API request failed with status 401 (OUT_OF_USAGE_CREDITS)");
+  // findMatchingEvent was never reached: neither of its two possible
+  // failure templates appears, and no provider event metadata (which only
+  // extractProviderEventMetadata, reachable only after a match, ever sets)
+  // is present.
+  assert.doesNotMatch(result.note ?? "", /No matching event found/);
+  assert.doesNotMatch(result.note ?? "", /Ambiguous event match/);
+  assert.equal(result.providerEventId, undefined);
+  // The raw provider response body text must never appear anywhere in the
+  // result — only the short, safe error_code.
+  assert.doesNotMatch(result.note ?? "", /Usage quota has been reached/);
+  assert.doesNotMatch(result.note ?? "", /usage plans/);
+});
+
 test("Step 16A (8): every request succeeds but no event matches — EVENT_NOT_FOUND, no fabricated odds", async () => {
   const fixtures = Object.fromEntries(ALL_FOOTBALL_SPORT_KEYS.map((key) => [key, []])) as Record<string, unknown[]>;
   mockEventsBySportKey(fixtures);

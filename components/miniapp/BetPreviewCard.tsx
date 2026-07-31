@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { BetPreview } from "./betPreviewApi";
+import type { BetPreview, BetSelectionOddsStatus } from "./betPreviewApi";
 import SelectionList from "@/components/bets/SelectionList";
 import type { DisplaySelection } from "@/lib/bets/mapBetForDisplay";
 import { formatAmount } from "@/lib/bets/formatAmount";
@@ -10,14 +10,41 @@ import { hasUnverifiedOddsStatus } from "./canConfirmBetSlip";
 
 // Shown whenever the odds provider could not positively confirm a
 // selection's exact event/market (NOT_FOUND) or couldn't verify anything
-// right now (UNAVAILABLE/PENDING) — the same condition canConfirmBetSlip.ts's
-// hasUnverifiedOddsStatus disables the Confirm button for. Deliberately
-// does not invite the player to "submit for operator review" — a bet the
-// provider never confirmed must never reach the operator queue at all, so
-// this message only explains why confirmation is blocked, never implies a
-// submit-anyway path exists.
+// right now (the reserved-but-unreachable PENDING) — the same condition
+// canConfirmBetSlip.ts's hasUnverifiedOddsStatus disables the Confirm
+// button for. Deliberately does not invite the player to "submit for
+// operator review" — a bet the provider never confirmed must never reach
+// the operator queue at all, so this message only explains why
+// confirmation is blocked, never implies a submit-anyway path exists.
+// UNAVAILABLE specifically is handled separately below (see
+// PROVIDER_UNAVAILABLE_TITLE/MESSAGE) — this message must never be shown
+// for a provider-technical failure, since it reads as "we looked and
+// couldn't find this," which is not what happened.
 const ODDS_UNVERIFIED_MESSAGE =
   "We couldn't verify this event or market with the odds provider. Please check the bet details or try again later.";
+
+// Provider-level technical failure (timeout, rate limit, quota exhausted,
+// auth failure, generic outage — see lib/odds/verification.ts's
+// PROVIDER_FAILURE reasonCodes, all of which map to BetSelectionOddsStatus
+// "UNAVAILABLE" via lib/odds/mapOddsStatus.ts). Deliberately neutral: never
+// implies the team/event wasn't found, that the event doesn't exist, or
+// that the player entered the bet incorrectly — those are genuinely
+// different situations (NOT_FOUND), with their own, different message
+// above.
+export const PROVIDER_UNAVAILABLE_TITLE = "Live odds are temporarily unavailable";
+export const PROVIDER_UNAVAILABLE_MESSAGE = "We couldn't verify this bet right now. Please try again later.";
+
+// Exported so this exact decision is unit-testable without this project's
+// deliberately absent DOM-rendering test infra (see e.g.
+// ActiveBetsScreen.test.ts's own comment on why). Answers a narrower
+// question than canConfirmBetSlip.ts's hasUnverifiedOddsStatus (which also
+// blocks Confirm for NOT_FOUND/PENDING): specifically, is this a
+// PROVIDER-technical failure, the one case that must show the neutral
+// "temporarily unavailable" copy instead of the "could not verify"/"odds
+// unavailable" copy.
+export function isProviderUnavailable(oddsStatus: BetSelectionOddsStatus): boolean {
+  return oddsStatus === "UNAVAILABLE";
+}
 
 // Shared preview display — used by both BetTextForm (text flow) and
 // BetScreenshotForm (screenshot flow, Stage 4.5D). Extracted out of
@@ -169,6 +196,16 @@ export function OddsStatus({ preview }: { preview: BetPreview }) {
 
   const selection = preview.selections[0];
 
+  // Checked BEFORE the submittedOdds===null branch below: a provider
+  // outage/timeout/rate-limit/quota-exhaustion also always leaves
+  // submittedOdds null (no price was ever found to promote), so this must
+  // be distinguished first, or every provider-technical failure would fall
+  // into the generic "Odds unavailable... edit your bet" copy below, which
+  // wrongly implies something about the player's own input.
+  if (isProviderUnavailable(selection.oddsStatus)) {
+    return <StatusBox tone="warning" label={PROVIDER_UNAVAILABLE_TITLE} description={PROVIDER_UNAVAILABLE_MESSAGE} />;
+  }
+
   // Step 15J.1 — the backend now blocks confirmation outright whenever this
   // is null (app/api/miniapp/bets/text/confirm/route.ts's
   // ODDS_REQUIRED_BEFORE_CONFIRMATION), so this can no longer say "add odds
@@ -177,8 +214,8 @@ export function OddsStatus({ preview }: { preview: BetPreview }) {
   // submittable — see components/miniapp/canConfirmBetSlip.ts's
   // hasUnresolvedSingleOdds, which gates the Confirm button off this exact
   // same condition. Deliberately not more specific about *why* the lookup
-  // didn't resolve (event not found vs. provider unavailable vs. mapping
-  // failure, etc.) — that distinction is server-side only.
+  // didn't resolve (event not found vs. mapping failure, etc.) — that
+  // distinction is server-side only.
   if (selection.submittedOdds === null) {
     return (
       <StatusBox
@@ -234,12 +271,12 @@ export function OddsStatus({ preview }: { preview: BetPreview }) {
     );
   }
 
-  // NOT_FOUND, UNAVAILABLE, and the reserved-but-unreachable PENDING all
-  // show the same fixed, friendly message and block confirmation outright
-  // (canConfirmBetSlip.ts's hasUnverifiedOddsStatus) — the specific
-  // technical reason is server-side only, and there is deliberately no
-  // "submit anyway" framing: the provider never confirmed this selection,
-  // so it must never reach the operator queue.
+  // NOT_FOUND and the reserved-but-unreachable PENDING share this fixed,
+  // friendly message and block confirmation outright (canConfirmBetSlip.ts's
+  // hasUnverifiedOddsStatus) — UNAVAILABLE is already handled above, before
+  // this point is ever reached. There is deliberately no "submit anyway"
+  // framing here either: the provider never confirmed this selection, so it
+  // must never reach the operator queue.
   return <StatusBox tone="warning" label="Odds could not be verified" description={ODDS_UNVERIFIED_MESSAGE} />;
 }
 
@@ -248,7 +285,15 @@ function ExpressOddsSummary({ preview }: { preview: BetPreview }) {
   // whole slip — mirrors canConfirmBetSlip.ts's hasUnverifiedOddsStatus
   // exactly, and the backend's own verifyPreviewFreshness.ts priority order
   // (a provider outage or an unmatched leg always wins over a merely
-  // "some legs verified" summary).
+  // "some legs verified" summary). UNAVAILABLE is checked first (same
+  // reasoning as the SINGLE branch above): a provider-technical failure on
+  // any leg must show the neutral "temporarily unavailable" copy, never the
+  // generic "could not be verified" wording, which reads as a matching
+  // failure rather than an outage.
+  if (preview.selections.some((selection) => isProviderUnavailable(selection.oddsStatus))) {
+    return <StatusBox tone="warning" label={PROVIDER_UNAVAILABLE_TITLE} description={PROVIDER_UNAVAILABLE_MESSAGE} />;
+  }
+
   if (hasUnverifiedOddsStatus(preview.selections)) {
     return <StatusBox tone="warning" label="Odds could not be verified" description={ODDS_UNVERIFIED_MESSAGE} />;
   }

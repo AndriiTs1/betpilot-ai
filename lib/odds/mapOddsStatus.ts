@@ -39,6 +39,8 @@ const PROVIDER_TECHNICAL_FAILURE_REASONS: ReadonlySet<VerificationReasonCode> = 
   "PROVIDER_TIMEOUT",
   "PROVIDER_INVALID_RESPONSE",
   "PROVIDER_RATE_LIMITED",
+  "PROVIDER_QUOTA_EXCEEDED",
+  "PROVIDER_AUTH_FAILED",
 ]);
 
 export function mapOddsCheckToSelectionStatus(result: OddsCheckResult | null): BetSelectionOddsStatus {

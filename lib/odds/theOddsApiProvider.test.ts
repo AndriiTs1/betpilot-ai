@@ -249,6 +249,78 @@ test("adapter mapping: legacy HTTP-failure note maps to FAILED/PROVIDER_UNAVAILA
   assert.equal(result.reasonCode, "PROVIDER_UNAVAILABLE");
 });
 
+// Root cause of the production "single-team query works, express doesn't"
+// investigation: The Odds API account's usage quota was exhausted, every
+// fetch failing with HTTP 401 and error_code OUT_OF_USAGE_CREDITS
+// (oddsVerifier.ts's fetchOddsForSport parses this short, safe field out
+// of the response body and embeds it in the note text — never the raw
+// body). This must classify distinctly from a generic failure and from a
+// bad API key, both retryable (the quota resets/plan can be upgraded).
+test("adapter mapping: legacy OUT_OF_USAGE_CREDITS (HTTP 401) note maps to FAILED/PROVIDER_QUOTA_EXCEEDED (retryable)", async () => {
+  const { fn } = capturingVerifyOddsFn(
+    baseLegacyResult({ note: "The Odds API request failed with status 401 (OUT_OF_USAGE_CREDITS)" }),
+  );
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way() });
+
+  assert.equal(result.reasonCode, "PROVIDER_QUOTA_EXCEEDED");
+  assert.equal(result.retryable, true);
+  assert.equal(result.diagnosticCode, "LEGACY_QUOTA_EXCEEDED");
+});
+
+// A 401 that is NOT quota exhaustion (missing/invalid/revoked key) — must
+// be distinguished from PROVIDER_QUOTA_EXCEEDED, and is NOT retryable
+// (unlike every other PROVIDER_FAILURE reason): a bad key will not fix
+// itself on a later attempt.
+test("adapter mapping: legacy invalid-API-key (HTTP 401, no OUT_OF_USAGE_CREDITS) note maps to FAILED/PROVIDER_AUTH_FAILED (not retryable)", async () => {
+  const { fn } = capturingVerifyOddsFn(
+    baseLegacyResult({ note: "The Odds API request failed with status 401 (INVALID_KEY)" }),
+  );
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way() });
+
+  assert.equal(result.reasonCode, "PROVIDER_AUTH_FAILED");
+  assert.equal(result.retryable, false);
+});
+
+// A bare 401 with no parsable error_code at all (e.g. a non-JSON body) must
+// still classify as an auth failure, never silently fall back to the
+// generic PROVIDER_UNAVAILABLE default.
+test("adapter mapping: a bare HTTP 401 note with no provider error_code still maps to FAILED/PROVIDER_AUTH_FAILED", async () => {
+  const { fn } = capturingVerifyOddsFn(baseLegacyResult({ note: "The Odds API request failed with status 401" }));
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way() });
+
+  assert.equal(result.reasonCode, "PROVIDER_AUTH_FAILED");
+});
+
+test("adapter mapping: legacy HTTP 429 note maps to FAILED/PROVIDER_RATE_LIMITED (retryable)", async () => {
+  const { fn } = capturingVerifyOddsFn(baseLegacyResult({ note: "The Odds API request failed with status 429" }));
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way() });
+
+  assert.equal(result.reasonCode, "PROVIDER_RATE_LIMITED");
+  assert.equal(result.retryable, true);
+});
+
+// A non-401/429 status with a provider error_code present (e.g. a 500 with
+// some unrelated code) still degrades to the generic PROVIDER_UNAVAILABLE —
+// only 401/429 get specific sub-classification.
+test("adapter mapping: a non-401/429 status with a provider error_code still maps to the generic FAILED/PROVIDER_UNAVAILABLE", async () => {
+  const { fn } = capturingVerifyOddsFn(
+    baseLegacyResult({ note: "The Odds API request failed with status 503 (SERVICE_UNAVAILABLE)" }),
+  );
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way() });
+
+  assert.equal(result.reasonCode, "PROVIDER_UNAVAILABLE");
+});
+
 test("adapter mapping: legacy 'unexpected response shape' note maps to FAILED/PROVIDER_INVALID_RESPONSE", async () => {
   const { fn } = capturingVerifyOddsFn(baseLegacyResult({ note: "Unexpected response shape from The Odds API" }));
   const provider = new TheOddsApiProvider(fn);

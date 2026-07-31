@@ -56,7 +56,15 @@ export type ScreenshotPipelineEvent =
   // shared use — it's still the same small, generic
   // JSON.stringify+console.log mechanism regardless of caller.
   | "odds_check_not_matched"
-  | "odds_check_rejected";
+  | "odds_check_rejected"
+  // lib/odds/oddsVerifier.ts — fires once per failed provider fetch attempt
+  // (a real HTTP error, timeout, or unexpected exception from The Odds
+  // API). Permanent operational logging, not gated behind a debug flag —
+  // safe by construction: failureCode is always a short, enum-like token
+  // (the provider's own error_code, a synthesized HTTP_<status>,
+  // "TIMEOUT", or "UNKNOWN"), never the raw response body, headers, or API
+  // key.
+  | "odds_provider_fetch_failed";
 
 export interface ScreenshotPipelineLogMetadata {
   durationMs?: number;
@@ -68,6 +76,13 @@ export interface ScreenshotPipelineLogMetadata {
   // Purely positional (0, 1, 2, ...) — never the selection's own content
   // (event/selection/market/odds/stake).
   selectionIndex?: number;
+  // The Odds API sport_key that failed (e.g. "soccer_epl") — a fixed,
+  // internal identifier, never player-submitted text. See
+  // odds_provider_fetch_failed above.
+  sportKey?: string;
+  // The raw HTTP status code from a failed provider request (e.g. 401,
+  // 429, 503) — a plain number, paired with failureCode above.
+  httpStatus?: number;
   // Pixel dimensions only — never image bytes, never a data URL, never any
   // decoded content. Used to distinguish the cropped-slip path from the
   // full-screen-screenshot path in logs/metrics.
