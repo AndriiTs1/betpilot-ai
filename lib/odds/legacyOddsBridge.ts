@@ -86,8 +86,8 @@ export function legacyFootballLeagueFromSportString(sport: string): CanonicalLea
 /* -------------------------------------------------------------------------- */
 
 interface ClassifiedSelection {
-  readonly marketType: "MONEYLINE_2WAY" | "MONEYLINE_3WAY";
-  readonly selectionType: "HOME" | "DRAW" | "AWAY" | "PARTICIPANT";
+  readonly marketType: "MONEYLINE_2WAY" | "MONEYLINE_3WAY" | "TOTALS";
+  readonly selectionType: "HOME" | "DRAW" | "AWAY" | "PARTICIPANT" | "OVER" | "UNDER";
   readonly participant?: CanonicalParticipant;
 }
 
@@ -151,6 +151,66 @@ export function legacySelectionTextToCanonical(raw: string): ClassifiedSelection
   }
 
   return { marketType: "MONEYLINE_2WAY", selectionType: "PARTICIPANT", participant: { name: raw } };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Betting Markets V1, Phase 3.2 — Totals (Over/Under) direction              */
+/* classification. This is the one place a selection is ever recognized as   */
+/* TOTALS — legacySelectionTextToCanonical() above is completely unchanged   */
+/* and still only ever produces MONEYLINE_2WAY/MONEYLINE_3WAY.               */
+/* -------------------------------------------------------------------------- */
+
+const TOTAL_LINE_NUMBER = "(\\d+(?:\\.\\d+)?)";
+
+// "Distinctive" direction tokens — safe to recognize even with NO trailing
+// number, because the token itself is already strong, unambiguous evidence
+// of a Totals bet (mirrors HOME_TOKENS/DRAW_TOKENS/AWAY_TOKENS's own
+// closed-token-set philosophy above). This is what supports the AI-shape
+// case where `selection` is bare "Over"/"Under" and the numeric line arrives
+// separately via BetSlipSelectionInput.line — as well as "ТБ"/"тотал
+// больше"/"больше" etc. with no number, for the same reason.
+const OVER_WORD_PATTERN = new RegExp(`^(?:тб|тотал\\s+больше|больше|over)(?:\\s*${TOTAL_LINE_NUMBER})?$`, "i");
+const UNDER_WORD_PATTERN = new RegExp(`^(?:тм|тотал\\s+меньше|меньше|under)(?:\\s*${TOTAL_LINE_NUMBER})?$`, "i");
+
+// Bare single-letter shorthand ("O2.5"/"U2.5") — a real, common bookmaker-
+// slip abbreviation, but a single letter alone is far too ambiguous to
+// recognize without an attached number (unlike "Over"/"ТБ", a bare "O" or
+// "U" selection is not itself evidence of a Totals bet) — the number is
+// mandatory for this pair only.
+const OVER_LETTER_PATTERN = new RegExp(`^o${TOTAL_LINE_NUMBER}$`, "i");
+const UNDER_LETTER_PATTERN = new RegExp(`^u${TOTAL_LINE_NUMBER}$`, "i");
+
+export interface TotalsDirectionMatch {
+  readonly direction: "OVER" | "UNDER";
+  // The numeric line embedded directly in the selection text (e.g. "2.5"
+  // from "ТБ 2.5"), when present — null when the direction token appeared
+  // alone (e.g. bare "Over"/"ТБ"). Always an already dot-decimal, sign-free
+  // string when non-null (the regex captures nothing else), so it is always
+  // isDecimalString-shaped without any further massaging.
+  readonly embeddedLine: string | null;
+}
+
+// Pure text classification only — never decides which of this and
+// BetSlipSelectionInput.line wins (that precedence lives in
+// legacySelectionToCanonicalRequest below, per this phase's explicit "line
+// is authoritative, free text is only a backward-compatible fallback"
+// instruction). OVER/UNDER are mutually exclusive, disjoint token
+// vocabularies checked against the FULL, anchored (^...$) selection string,
+// so a string can never match both directions, and text that merely
+// contains a direction word as a substring (e.g. a team name, "Arsenal Over
+// 1.5", a team-total or handicap phrase) never matches at all — it falls
+// through to null and is classified by the existing MONEYLINE path exactly
+// as it is today.
+export function classifyTotalsDirection(selectionText: string): TotalsDirectionMatch | null {
+  const trimmed = selectionText.trim();
+
+  const overMatch = OVER_WORD_PATTERN.exec(trimmed) ?? OVER_LETTER_PATTERN.exec(trimmed);
+  if (overMatch) return { direction: "OVER", embeddedLine: overMatch[1] ?? null };
+
+  const underMatch = UNDER_WORD_PATTERN.exec(trimmed) ?? UNDER_LETTER_PATTERN.exec(trimmed);
+  if (underMatch) return { direction: "UNDER", embeddedLine: underMatch[1] ?? null };
+
+  return null;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -254,7 +314,31 @@ export function legacySelectionToCanonicalRequest(selection: LegacyVerifiableSel
     ? { name: selection.league.trim() }
     : legacyFootballLeagueFromSportString(selection.sport);
   const event = legacyEventToCanonical(sport, selection.event, league);
-  const classified = legacySelectionTextToCanonical(selection.selection);
+
+  // Betting Markets V1, Phase 3.2 — Totals is tried FIRST; only a selection
+  // whose text is unambiguously an Over/Under direction token is ever
+  // classified as TOTALS. Every other selection (team names, 1X2 shorthand,
+  // winner phrases, team-total/handicap text, anything unrecognized) falls
+  // through to the completely unchanged legacySelectionTextToCanonical()
+  // path exactly as it did before this phase — existing MONEYLINE/DRAW
+  // behavior is byte-for-byte unaffected.
+  const totalsDirection = classifyTotalsDirection(selection.selection);
+  const classified: ClassifiedSelection = totalsDirection
+    ? { marketType: "TOTALS", selectionType: totalsDirection.direction }
+    : legacySelectionTextToCanonical(selection.selection);
+
+  // Line precedence: BetSlipSelectionInput.line (Phase 2's already-threaded
+  // field — the AI's own dedicated "line" tool-schema value) is always
+  // authoritative when present. The Totals classifier's embeddedLine (a
+  // number scraped out of the free-text selection, e.g. "2.5" from "ТБ
+  // 2.5") is used ONLY as a backward-compatible fallback when no separate
+  // line was ever stated at all — it never overwrites a real, separately-
+  // submitted line, per this phase's explicit instruction. For every
+  // non-Totals selection this is byte-for-byte the same value
+  // selection.line already was (totalsDirection is null, so the fallback
+  // branch is never reached) — moneyline/DRAW's own line handling (always
+  // null in practice) is completely unchanged.
+  const rawLine = selection.line ?? totalsDirection?.embeddedLine ?? null;
 
   return {
     context: "PREVIEW",
@@ -279,9 +363,12 @@ export function legacySelectionToCanonicalRequest(selection: LegacyVerifiableSel
       // rather than coerced to undefined, so it still reaches
       // validateCanonicalSelection's own "not a valid decimal string" check
       // (called first thing inside TheOddsApiProvider.verifySelection) and
-      // is rejected there — one validation point, not two. Same
-      // undefined-not-"null"-string convention as submittedOdds above.
-      line: selection.line != null ? (normalizeLineString(selection.line) ?? selection.line) : undefined,
+      // is rejected there — one validation point, not two (Phase 3.2: a
+      // TOTALS selection with no line anywhere — neither stated nor
+      // embedded — reaches that same check as "line: undefined", which
+      // validateCanonicalSelection's existing "TOTALS requires line" rule
+      // already rejects; no new validation code needed here).
+      line: rawLine !== null ? (normalizeLineString(rawLine) ?? rawLine) : undefined,
     },
   };
 }

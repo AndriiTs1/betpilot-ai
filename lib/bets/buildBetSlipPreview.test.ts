@@ -132,7 +132,7 @@ test("buildBetSlipPreview: EXPRESS token is redeemable via verifyExpressPreviewT
     stake: 50,
     selections: [
       { sport: "Football", event: "Real Madrid vs Barcelona", market: "Match Winner", selection: "Real Madrid Win", submittedOdds: 1.8 },
-      { sport: "Tennis", event: "Inter vs Juventus", market: null, selection: "Over 2.5", submittedOdds: 1.7 },
+      { sport: "Tennis", event: "Inter vs Juventus", market: null, selection: "Juventus", submittedOdds: 1.7 },
     ],
   };
 
@@ -304,7 +304,7 @@ test("buildBetSlipPreview: one odds verification rejected -> Preview still succe
     stake: 50,
     selections: [
       { sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: 1.8 },
-      { sport: "Football", event: "Inter vs Juventus", market: null, selection: "Over 2.5", submittedOdds: 1.7 },
+      { sport: "Football", event: "Inter vs Juventus", market: null, selection: "Juventus", submittedOdds: 1.7 },
     ],
   };
 
@@ -1267,7 +1267,7 @@ test("Stage 3.1 EXPRESS: each leg's previewToken selection carries its OWN provi
     stake: 50,
     selections: [
       { sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: 1.8 },
-      { sport: "Football", event: "Inter vs Juventus", market: null, selection: "Over 2.5", submittedOdds: 1.7 },
+      { sport: "Football", event: "Inter vs Juventus", market: null, selection: "Juventus", submittedOdds: 1.7 },
     ],
   };
 

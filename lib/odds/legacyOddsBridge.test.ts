@@ -6,6 +6,7 @@ import {
   legacySelectionTextToCanonical,
   legacySelectionToCanonicalRequest,
   verificationResultToLegacyOddsCheck,
+  classifyTotalsDirection,
 } from "./legacyOddsBridge";
 import { createVerifiedResult, createOddsChangedResult, createFailedResult, createNotCheckedResult } from "./verification";
 
@@ -285,12 +286,21 @@ test("request mapping: an unsplittable event string yields an honestly empty par
   assert.equal(request.selection.event.name, "Manchester United Chelsea");
 });
 
-test("request mapping: only MONEYLINE_2WAY/MONEYLINE_3WAY are ever produced — never Totals/Spread/BTTS/Double Chance", () => {
-  const inputs = ["1", "X", "2", "Real Madrid Win", "Over 2.5", "Both teams to score", "-1.5"];
-  for (const selection of inputs) {
+test("request mapping: only MONEYLINE_2WAY/MONEYLINE_3WAY/TOTALS are ever produced — never Spread/BTTS/Double Chance (Betting Markets V1 Phase 3.2 — Totals now intentionally classifies, everything else still doesn't)", () => {
+  const moneylineInputs = ["1", "X", "2", "Real Madrid Win", "Both teams to score", "-1.5"];
+  for (const selection of moneylineInputs) {
     const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection, submittedOdds: 2.0 });
-    assert.ok(["MONEYLINE_2WAY", "MONEYLINE_3WAY"].includes(request.selection.marketType));
+    assert.ok(
+      ["MONEYLINE_2WAY", "MONEYLINE_3WAY"].includes(request.selection.marketType),
+      `"${selection}" must not classify as TOTALS`,
+    );
   }
+
+  // "Over 2.5" moved out of the moneyline-only set above — this is the
+  // Phase 3.2 change itself, not a regression: it now correctly classifies
+  // as TOTALS instead of falling back to an opaque PARTICIPANT selection.
+  const totalsRequest = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "Over 2.5", submittedOdds: 2.0 });
+  assert.equal(totalsRequest.selection.marketType, "TOTALS");
 });
 
 /* -------------------------------------------------------------------------- */
@@ -625,4 +635,208 @@ test("result mapping: FAILED round-trips matchedEvent too (event found, selectio
   assert.equal(oddsCheck?.matched, false);
   assert.equal(oddsCheck?.providerEventId, "evt-round-trip-2");
   assert.equal(oddsCheck?.providerSportKey, "soccer_epl");
+});
+
+/* ============================================================================
+ * Betting Markets V1, Phase 3.2 — Totals (Over/Under) classification.
+ * classifyTotalsDirection() is wired into legacySelectionToCanonicalRequest()
+ * (see that function's own Phase 3.2 comments), but TheOddsApiProvider's
+ * capabilities/market gate is untouched — a TOTALS selection still cannot
+ * become VERIFIED end-to-end (that gate is exercised in
+ * theOddsApiProvider.test.ts, not here).
+ * ============================================================================ */
+
+/* -------------------------------------------------------------------------- */
+/* classifyTotalsDirection — every required phrase family                    */
+/* -------------------------------------------------------------------------- */
+
+test("classifyTotalsDirection: every required OVER phrase family is recognized, with the embedded line captured", () => {
+  const overInputs = ["ТБ 2.5", "ТБ2.5", "тотал больше 2.5", "больше 2.5", "Over 2.5", "Over2.5", "O2.5"];
+  for (const selection of overInputs) {
+    const result = classifyTotalsDirection(selection);
+    assert.equal(result?.direction, "OVER", `"${selection}" must classify as OVER`);
+    assert.equal(result?.embeddedLine, "2.5", `"${selection}" must capture embedded line "2.5"`);
+  }
+});
+
+test("classifyTotalsDirection: every required UNDER phrase family is recognized, with the embedded line captured", () => {
+  const underInputs = ["ТМ 2.5", "ТМ2.5", "тотал меньше 2.5", "меньше 2.5", "Under 2.5", "Under2.5", "U2.5"];
+  for (const selection of underInputs) {
+    const result = classifyTotalsDirection(selection);
+    assert.equal(result?.direction, "UNDER", `"${selection}" must classify as UNDER`);
+    assert.equal(result?.embeddedLine, "2.5", `"${selection}" must capture embedded line "2.5"`);
+  }
+});
+
+test("classifyTotalsDirection: case-insensitive and tolerant of whitespace", () => {
+  assert.equal(classifyTotalsDirection("  over 2.5  ")?.direction, "OVER");
+  assert.equal(classifyTotalsDirection("OVER 2.5")?.direction, "OVER");
+  assert.equal(classifyTotalsDirection("тб 2.5")?.direction, "OVER");
+  assert.equal(classifyTotalsDirection("ТБ 2.5")?.direction, "OVER");
+});
+
+test("classifyTotalsDirection: AI shape — bare 'Over'/'Under' with no embedded number (line arrives separately)", () => {
+  const over = classifyTotalsDirection("Over");
+  assert.equal(over?.direction, "OVER");
+  assert.equal(over?.embeddedLine, null);
+
+  const under = classifyTotalsDirection("Under");
+  assert.equal(under?.direction, "UNDER");
+  assert.equal(under?.embeddedLine, null);
+
+  const tb = classifyTotalsDirection("ТБ");
+  assert.equal(tb?.direction, "OVER");
+  assert.equal(tb?.embeddedLine, null);
+});
+
+test("classifyTotalsDirection: a bare single letter 'O'/'U' with NO number is never recognized (too ambiguous without the mandatory attached number)", () => {
+  assert.equal(classifyTotalsDirection("O"), null);
+  assert.equal(classifyTotalsDirection("U"), null);
+});
+
+test("classifyTotalsDirection: ordinary team-win text is never classified as Totals", () => {
+  const moneylineInputs = ["1", "X", "2", "Real Madrid Win", "Arsenal", "Home", "Away", "Draw"];
+  for (const selection of moneylineInputs) {
+    assert.equal(classifyTotalsDirection(selection), null, `"${selection}" must not classify as Totals`);
+  }
+});
+
+test("classifyTotalsDirection: ambiguous text containing both Over and Under is rejected (never guesses a direction)", () => {
+  assert.equal(classifyTotalsDirection("Over Under 2.5"), null);
+  assert.equal(classifyTotalsDirection("Over/Under 2.5"), null);
+});
+
+test("classifyTotalsDirection: team totals are not classified yet (a participant name prefix breaks the anchor)", () => {
+  assert.equal(classifyTotalsDirection("Arsenal Over 1.5"), null);
+  assert.equal(classifyTotalsDirection("Arsenal Team Total Over 1.5"), null);
+});
+
+test("classifyTotalsDirection: spreads/handicaps are not classified yet", () => {
+  assert.equal(classifyTotalsDirection("-1.5"), null);
+  assert.equal(classifyTotalsDirection("+1.5"), null);
+  assert.equal(classifyTotalsDirection("Arsenal -1.5"), null);
+});
+
+/* -------------------------------------------------------------------------- */
+/* legacySelectionToCanonicalRequest — full wiring, required canonical output */
+/* -------------------------------------------------------------------------- */
+
+test("request mapping: 'Over 2.5' produces the exact required canonical output (marketType/selectionType/participant/line)", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "Over 2.5", submittedOdds: 1.9 });
+
+  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.selectionType, "OVER");
+  assert.equal(request.selection.participant, undefined);
+  assert.equal(request.selection.line, "2.5");
+});
+
+test("request mapping: 'Under 2.5' produces the exact required canonical output (marketType/selectionType/participant/line)", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "Under 2.5", submittedOdds: 1.9 });
+
+  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.selectionType, "UNDER");
+  assert.equal(request.selection.participant, undefined);
+  assert.equal(request.selection.line, "2.5");
+});
+
+test("request mapping: AI shape — selection is bare 'Over', line arrives separately via LegacyVerifiableSelection.line (the authoritative source)", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "Over", submittedOdds: 1.9, line: "3.5" });
+
+  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.selectionType, "OVER");
+  assert.equal(request.selection.line, "3.5");
+});
+
+test("request mapping: a separately-stated line is authoritative and is NEVER overwritten by a number embedded in the selection text", () => {
+  // Deliberately conflicting: the free text says 2.5, the stated line says
+  // 3.5 — the stated line must win, exactly per this phase's explicit
+  // instruction not to re-extract/overwrite a valid separate line.
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "Over 2.5", submittedOdds: 1.9, line: "3.5" });
+
+  assert.equal(request.selection.line, "3.5");
+});
+
+test("request mapping: the embedded line is used ONLY as a backward-compatible fallback when no separate line was ever stated", () => {
+  const withNullLine = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "ТБ 2.5", submittedOdds: 1.9, line: null });
+  assert.equal(withNullLine.selection.line, "2.5");
+
+  const withNoLineField = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "ТБ 2.5", submittedOdds: 1.9 });
+  assert.equal(withNoLineField.selection.line, "2.5");
+});
+
+test("request mapping: '+2.5' (stated line) canonicalizes to '2.5', matching the domain-wide line convention", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "Over", submittedOdds: 1.9, line: "+2.5" });
+
+  assert.equal(request.selection.line, "2.5");
+});
+
+test("request mapping: a bare 'Over' with NO line anywhere (neither stated nor embedded) produces line: undefined — validateCanonicalSelection's existing 'TOTALS requires line' rule rejects it downstream, no new validation code needed here", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "Over", submittedOdds: 1.9 });
+
+  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.line, undefined);
+});
+
+test("request mapping: a malformed stated line passes through unchanged (never silently dropped), so validateCanonicalSelection's own decimal-string check rejects it downstream — same precedent as Phase 2's malformed-line handling", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "Over 2.5", submittedOdds: 1.9, line: "not-a-number" });
+
+  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.line, "not-a-number");
+});
+
+test("request mapping: ambiguous Over+Under text is rejected — falls back to the existing PARTICIPANT classification, never TOTALS", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "Over Under 2.5", submittedOdds: 1.9 });
+
+  assert.notEqual(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.selectionType, "PARTICIPANT");
+});
+
+test("request mapping: existing MONEYLINE 1X2/team-name selections are completely unaffected by the Totals classifier", () => {
+  const home = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "1", submittedOdds: 1.9 });
+  assert.equal(home.selection.marketType, "MONEYLINE_3WAY");
+  assert.equal(home.selection.selectionType, "HOME");
+
+  const teamName = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "Real Madrid Win", submittedOdds: 1.9 });
+  assert.equal(teamName.selection.marketType, "MONEYLINE_2WAY");
+  assert.equal(teamName.selection.selectionType, "PARTICIPANT");
+  assert.equal(teamName.selection.participant?.name, "Real Madrid");
+});
+
+test("request mapping: DRAW ('X'/'Draw'/'Ничья') is completely unaffected by the Totals classifier", () => {
+  for (const selection of ["X", "х", "Draw", "Ничья"]) {
+    const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection, submittedOdds: 1.9 });
+    assert.equal(request.selection.marketType, "MONEYLINE_3WAY");
+    assert.equal(request.selection.selectionType, "DRAW");
+  }
+});
+
+test("request mapping: team totals ('Arsenal Over 1.5') are not classified as TOTALS yet — falls back to PARTICIPANT", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "Arsenal Over 1.5", submittedOdds: 1.9 });
+
+  assert.notEqual(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.selectionType, "PARTICIPANT");
+});
+
+test("request mapping: spreads/handicaps ('-1.5') are not classified as TOTALS yet — falls back to PARTICIPANT", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "-1.5", submittedOdds: 1.9 });
+
+  assert.notEqual(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.selectionType, "PARTICIPANT");
+});
+
+test("request mapping: SINGLE and EXPRESS selections classify identically — legacySelectionToCanonicalRequest is a pure, per-selection function with no shared state across calls", () => {
+  // Simulates a SINGLE bet (one call) and one leg of an EXPRESS bet (called
+  // as part of a sequence of several) with the identical selection — both
+  // must produce byte-for-byte the same classification, since
+  // buildBetSlipPreview.ts calls this same function once per selection
+  // regardless of BetType.
+  const singleResult = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "Over 2.5", submittedOdds: 1.9 });
+
+  // "As part of EXPRESS": call it multiple times in a row, interleaved with
+  // other selections, to prove no cross-call state leakage.
+  legacySelectionToCanonicalRequest({ sport: "Basketball", event: "C vs D", selection: "1", submittedOdds: 1.5 });
+  const expressLegResult = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "Over 2.5", submittedOdds: 1.9 });
+  legacySelectionToCanonicalRequest({ sport: "Tennis", event: "E vs F", selection: "Under 3.5", submittedOdds: 2.1 });
+
+  assert.deepEqual(singleResult.selection, expressLegResult.selection);
 });
