@@ -189,6 +189,18 @@ model Bet {
   canonicalParticipant   String?
   canonicalPeriod        String?
 
+  // Betting Markets V1, Phase 1 — the numeric line for TOTALS (e.g. 2.5)
+  // and SPREAD (e.g. -1.5) selections. Nullable and unpopulated by any
+  // code path yet: this phase only adds the column, no parsing/provider/
+  // preview/confirmation/settlement logic reads or writes it. Always null
+  // for MONEYLINE_2WAY/MONEYLINE_3WAY (including DRAW), which have no
+  // line concept — matches lib/odds/domain.ts's CanonicalSelection.line
+  // (optional) and validateCanonicalSelection's own per-market rules.
+  // Decimal(4,1): football totals/spreads are always in whole or
+  // half-point increments (2.5, 10.5, -1.5), max realistic magnitude far
+  // below the 999.9 ceiling this precision allows.
+  line Decimal? @db.Decimal(4, 1)
+
   // Full event display metadata — the provider's own team names and a
   // human-readable competition name, alongside the provider fields above.
   // Display-only (never used for matching/settlement); same nullable,
@@ -244,6 +256,11 @@ model BetSelection {
   canonicalSelectionType String?
   canonicalParticipant   String?
   canonicalPeriod        String?
+
+  // Betting Markets V1, Phase 1 — same field, same rationale as Bet.line
+  // above, one per EXPRESS leg (Variant B: mirrors the same field set
+  // added to Bet, for SINGLE).
+  line Decimal? @db.Decimal(4, 1)
 
   // Same full event display metadata as Bet's own fields above, per leg.
   homeTeamName    String?

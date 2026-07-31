@@ -46,6 +46,13 @@ interface FakeBetRow extends FakeProviderReferenceColumns {
   totalOdds: Prisma.Decimal | null;
   stake: Prisma.Decimal;
   status: string;
+  // Betting Markets V1, Phase 1 — mirrors prisma/schema.prisma's new
+  // Bet.line column (Decimal(4,1), nullable). No production code sets
+  // this yet (createBetFromPreview.ts is unchanged this phase — see
+  // PreviewTokenPayload, which has no line field either) — modeled here
+  // purely to prove the schema/fake-persistence layer itself can round-trip
+  // a line value, independent of any application wiring.
+  line: Prisma.Decimal | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -60,6 +67,8 @@ interface FakeSelectionRow extends FakeProviderReferenceColumns {
   odds: Prisma.Decimal | null;
   currentOdds: Prisma.Decimal | null;
   oddsStatus: string;
+  // Same rationale as FakeBetRow.line above, mirroring BetSelection.line.
+  line: Prisma.Decimal | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -109,6 +118,7 @@ function createFakeDb(options: FakeDbOptions = {}) {
     stake: Prisma.Decimal;
     totalOdds: Prisma.Decimal | null;
     status: string;
+    line?: Prisma.Decimal | null;
     selections?: { create: Array<Omit<FakeSelectionRow, "id" | "betId" | "createdAt" | "updatedAt">> };
   } & Partial<FakeProviderReferenceColumns>) {
     createCallCount += 1;
@@ -135,6 +145,7 @@ function createFakeDb(options: FakeDbOptions = {}) {
       totalOdds: data.totalOdds,
       stake: data.stake,
       status: data.status,
+      line: data.line ?? null,
       createdAt: now,
       updatedAt: now,
       providerName: data.providerName ?? null,
@@ -703,4 +714,114 @@ test("Stage 3.1: existing OddsSnapshot behavior for SINGLE is unaffected by the 
   assert.equal(result.bet.stake.toString(), "100");
   assert.equal(result.bet.odds?.toString(), "2.1");
   assert.equal(result.bet.status, "PENDING");
+});
+
+// ---------------------------------------------------------------------
+// Betting Markets V1, Phase 1 — additive `line` column
+// (prisma/schema.prisma's Bet.line / BetSelection.line, Decimal(4,1)).
+// This phase adds the schema column only — createBetFromPreview.ts itself
+// is UNCHANGED (PreviewTokenPayload/ExpressPreviewTokenSelection have no
+// line field yet; that's Phase 2 plumbing, explicitly out of scope here).
+// These tests prove the schema/persistence layer itself can round-trip a
+// line value and that existing MONEYLINE creation is unaffected by the
+// new nullable column — they call the fake DB's insertBet directly (not
+// through createBetFromPreview()), since the production function has
+// nothing to pass yet.
+// ---------------------------------------------------------------------
+
+test("Betting Markets V1 Phase 1: existing MONEYLINE creation via the real createBetFromPreview() is unaffected — line persists as null", async () => {
+  const db = createFakeDb();
+  const result = await createBetFromPreview(singlePayload(), fakeOptions(db));
+
+  assert.equal(result.idempotent, false);
+  assert.equal(result.bet.line, null);
+  // Every pre-existing field stays correct — the new column changed
+  // nothing about the existing moneyline write path.
+  assert.equal(result.bet.event, "Real Madrid vs Barcelona");
+  assert.equal(result.bet.odds?.toString(), "2.1");
+});
+
+test("Betting Markets V1 Phase 1: SINGLE Bet schema can persist line = null", async () => {
+  const db = createFakeDb();
+  const created = await db.bet.create({
+    data: {
+      playerId: "player-1",
+      previewId: "preview-line-null",
+      type: "SINGLE",
+      sport: "Football",
+      event: "Arsenal vs Coventry City",
+      outcome: "Arsenal Win",
+      odds: new Prisma.Decimal("1.16"),
+      stake: new Prisma.Decimal("10"),
+      totalOdds: new Prisma.Decimal("1.16"),
+      status: "PENDING",
+      line: null,
+    },
+  });
+
+  assert.equal(created.line, null);
+});
+
+test("Betting Markets V1 Phase 1: SINGLE Bet schema can persist line = 2.5 (a TOTALS-shaped value, round-trips exactly)", async () => {
+  const db = createFakeDb();
+  const created = await db.bet.create({
+    data: {
+      playerId: "player-1",
+      previewId: "preview-line-2.5",
+      type: "SINGLE",
+      sport: "Football",
+      event: "Arsenal vs Coventry City",
+      outcome: "Over 2.5",
+      odds: new Prisma.Decimal("1.9"),
+      stake: new Prisma.Decimal("10"),
+      totalOdds: new Prisma.Decimal("1.9"),
+      status: "PENDING",
+      line: new Prisma.Decimal("2.5"),
+    },
+  });
+
+  assert.equal(created.line?.toString(), "2.5");
+});
+
+test("Betting Markets V1 Phase 1: EXPRESS BetSelection schema can persist line = -1.5 (a SPREAD-shaped value, round-trips exactly)", async () => {
+  const db = createFakeDb();
+  const created = await db.bet.create({
+    data: {
+      playerId: "player-1",
+      previewId: "preview-express-line",
+      type: "EXPRESS",
+      sport: "Football",
+      event: null,
+      outcome: null,
+      odds: null,
+      stake: new Prisma.Decimal("10"),
+      totalOdds: new Prisma.Decimal("3.06"),
+      status: "PENDING",
+      selections: {
+        create: [
+          {
+            sport: "Football",
+            event: "Arsenal vs Coventry City",
+            outcome: "Arsenal -1.5",
+            market: "Spread",
+            odds: new Prisma.Decimal("1.8"),
+            currentOdds: new Prisma.Decimal("1.8"),
+            oddsStatus: "VERIFIED",
+            line: new Prisma.Decimal("-1.5"),
+            providerName: null,
+            providerEventId: null,
+            providerSportKey: null,
+            eventStartTime: null,
+            canonicalMarketType: null,
+            canonicalSelectionType: null,
+            canonicalParticipant: null,
+            canonicalPeriod: null,
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(created.selections.length, 1);
+  assert.equal(created.selections[0].line?.toString(), "-1.5");
 });
