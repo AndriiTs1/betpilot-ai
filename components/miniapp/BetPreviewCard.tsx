@@ -195,18 +195,13 @@ export function OddsStatus({ preview }: { preview: BetPreview }) {
     return (
       <StatusBox
         tone="success"
-        label="Odds verified"
+        label="✓ Odds verified"
+        centered
         description={
           <>
-            Bookmaker odds: {selection.currentOdds !== null ? formatAmount(selection.currentOdds) : "—"}
+            Verified odds: {selection.currentOdds !== null ? formatAmount(selection.currentOdds) : "—"}
             <br />
             Difference: {discrepancy}%
-            {selection.bookmaker ? (
-              <>
-                <br />
-                {selection.bookmaker}
-              </>
-            ) : null}
           </>
         }
       />
@@ -275,22 +270,24 @@ function StatusBox({
   tone,
   label,
   description,
+  centered = false,
 }: {
   tone: "neutral" | "success" | "warning";
   label: string;
   description: ReactNode;
+  centered?: boolean;
 }) {
   const color = tone === "success" ? "#60E84A" : tone === "warning" ? "#E8B84A" : "#94a3b8";
 
   return (
     <div
-      className="mt-2 rounded-2xl p-4"
+      className={`mt-2 rounded-2xl p-4 ${centered ? "text-center" : ""}`}
       style={{ background: "rgba(255,255,255,0.03)", border: `1px solid ${color}33` }}
     >
       <p className="text-sm font-semibold" style={{ color }}>
         {label}
       </p>
-      <p className="mt-1 text-xs leading-relaxed text-slate-400">{description}</p>
+      <p className={`${centered ? "mt-3" : "mt-1"} text-xs leading-relaxed text-slate-400`}>{description}</p>
     </div>
   );
 }
