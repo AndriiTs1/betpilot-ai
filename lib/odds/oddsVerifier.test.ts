@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { verifyOdds, type OddsVerificationInput } from "./oddsVerifier";
+import {
+  verifyOdds,
+  fetchTotalsOddsForSport,
+  findTotalsOutcome,
+  type OddsVerificationInput,
+  type OddsApiEvent,
+  type OddsApiBookmaker,
+  type OddsApiOutcome,
+} from "./oddsVerifier";
 import { normalizeTeamName } from "./teamNameMatcher";
 
 // Same fetch-indirection technique as lib/ocr/claudeOcrProvider.test.ts and
@@ -1203,4 +1211,219 @@ test("Regression: an explicit two-team query ('Team A vs Team B') is completely 
 
   assert.equal(result.matched, true, result.note ?? "expected a match");
   assert.equal(result.sourceOdds, 1.16);
+});
+
+/* ============================================================================
+ * Betting Markets V1, Phase 3.1 — Totals fetch + pure outcome lookup.
+ * fetchTotalsOddsForSport()/findTotalsOutcome() are not called by verifyOdds()
+ * or anything else in the live pipeline yet (Phase 3.1 scope) — these tests
+ * exercise them directly, the same fetch-stub/no-real-network discipline as
+ * every test above.
+ * ============================================================================ */
+
+function marketsParamFromUrl(url: string): string {
+  const match = /[?&]markets=([^&]+)/.exec(url);
+  if (!match) throw new Error(`oddsVerifier.test.ts: could not extract markets= from URL "${url}"`);
+  return match[1];
+}
+
+function totalsOutcome(name: string, price: number, point: number | undefined): OddsApiOutcome {
+  return point === undefined ? { name, price } : { name, price, point };
+}
+
+function totalsEvent(
+  homeTeam: string,
+  awayTeam: string,
+  bookmakers: OddsApiBookmaker[],
+): OddsApiEvent {
+  return { id: "evt-totals-1", home_team: homeTeam, away_team: awayTeam, bookmakers };
+}
+
+function pinnacleTotalsBookmaker(outcomes: OddsApiOutcome[]): OddsApiBookmaker {
+  return { key: "pinnacle", title: "Pinnacle", markets: [{ key: "totals", outcomes }] };
+}
+
+test("Phase 3.1 fetch: fetchTotalsOddsForSport requests markets=totals, not h2h", async () => {
+  let requestedUrl = "";
+  currentHandler = async (url: string) => {
+    requestedUrl = url;
+    return jsonResponse([]);
+  };
+
+  await fetchTotalsOddsForSport("soccer_epl");
+
+  assert.equal(marketsParamFromUrl(requestedUrl), "totals");
+});
+
+test("Phase 3.1 fetch: verifyOdds() (h2h) still requests exactly markets=h2h, unaffected by the totals path existing", async () => {
+  let requestedUrl = "";
+  currentHandler = async (url: string) => {
+    requestedUrl = url;
+    return jsonResponse([h2hEvent("Arsenal", "Chelsea", standardOutcomes("Arsenal", "Chelsea", 1.9, 3.8))]);
+  };
+
+  await verifyOdds(bet({ sport: "football", event: "Arsenal vs Chelsea", selection: "1", odds: 1.9 }));
+
+  assert.equal(marketsParamFromUrl(requestedUrl), "h2h");
+});
+
+test("Phase 3.1 cache: an h2h response never satisfies a totals request for the same sport_key, or vice versa", async () => {
+  let callCount = 0;
+  currentHandler = async (url: string) => {
+    callCount += 1;
+    const market = marketsParamFromUrl(url);
+    return jsonResponse([{ id: `evt-${market}`, home_team: "Arsenal", away_team: "Chelsea", bookmakers: [] }]);
+  };
+
+  // "premier league" (a single-sport_key alias, soccer_epl) rather than
+  // generic "football" — the latter fans out across all 7 supported
+  // competitions (Step 16A), which would make the "exactly once" assertion
+  // below actually mean "exactly seven," obscuring the one thing this test
+  // exists to prove: h2h and totals get separate cache entries.
+  await verifyOdds(bet({ sport: "premier league", event: "Arsenal vs Chelsea", selection: "1", odds: 1.9 }));
+  assert.equal(callCount, 1, "the h2h request itself must hit the network exactly once");
+
+  const totalsEvents = await fetchTotalsOddsForSport("soccer_epl");
+  assert.equal(callCount, 2, "a totals request for the same sport_key must NOT be served from the h2h cache entry — it must be a real second fetch");
+  assert.equal(totalsEvents[0].id, "evt-totals", "must return the totals-specific payload, not the h2h one");
+
+  // A second h2h-shaped call (via verifyOdds, still within the 45s TTL)
+  // should now be served from ITS OWN cache entry, not force a third fetch.
+  await verifyOdds(bet({ sport: "premier league", event: "Arsenal vs Chelsea", selection: "1", odds: 1.9 }));
+  assert.equal(callCount, 2, "the h2h cache entry (separate key from totals) must still be warm and reused");
+});
+
+test("Phase 3.1 lookup: Over 2.5 exact match", () => {
+  const event = totalsEvent("Arsenal", "Chelsea", [
+    pinnacleTotalsBookmaker([totalsOutcome("Over", 1.85, 2.5), totalsOutcome("Under", 1.95, 2.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "2.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.price, 1.85);
+  assert.equal(result.point, "2.5");
+  assert.equal(result.bookmaker, "Pinnacle");
+  assert.equal(result.marketKey, "totals");
+  assert.equal(result.isFallbackBookmaker, false);
+});
+
+test("Phase 3.1 lookup: Under 2.5 exact match", () => {
+  const event = totalsEvent("Arsenal", "Chelsea", [
+    pinnacleTotalsBookmaker([totalsOutcome("Over", 1.85, 2.5), totalsOutcome("Under", 1.95, 2.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "UNDER", "2.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.price, 1.95);
+  assert.equal(result.point, "2.5");
+});
+
+test("Phase 3.1 lookup: multiple available lines — requested 2.5 does not match 3.5, never a closest-line fallback", () => {
+  const event = totalsEvent("Arsenal", "Chelsea", [
+    pinnacleTotalsBookmaker([
+      totalsOutcome("Over", 1.7, 3.5),
+      totalsOutcome("Under", 2.1, 3.5),
+    ]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "2.5");
+
+  assert.equal(result.kind, "LINE_NOT_AVAILABLE");
+});
+
+test("Phase 3.1 lookup: a totals market with only the requested-but-absent single line still reports LINE_NOT_AVAILABLE (missing requested line)", () => {
+  const event = totalsEvent("Arsenal", "Chelsea", [
+    pinnacleTotalsBookmaker([totalsOutcome("Over", 1.7, 1.5), totalsOutcome("Under", 2.2, 1.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "4.5");
+
+  assert.equal(result.kind, "LINE_NOT_AVAILABLE");
+});
+
+test("Phase 3.1 lookup: an Over outcome missing `point` entirely reports MISSING_POINT, never crashes or silently matches", () => {
+  const event = totalsEvent("Arsenal", "Chelsea", [
+    pinnacleTotalsBookmaker([totalsOutcome("Over", 1.85, undefined), totalsOutcome("Under", 1.95, 2.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "2.5");
+
+  assert.equal(result.kind, "MISSING_POINT");
+});
+
+test("Phase 3.1 lookup: a malformed `point` (non-finite) reports MALFORMED_POINT, never coerced or crashed on", () => {
+  const event = totalsEvent("Arsenal", "Chelsea", [
+    pinnacleTotalsBookmaker([{ name: "Over", price: 1.85, point: NaN }, totalsOutcome("Under", 1.95, 2.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "2.5");
+
+  assert.equal(result.kind, "MALFORMED_POINT");
+});
+
+test("Phase 3.1 lookup: no 'totals' market on the picked bookmaker reports MARKET_ABSENT", () => {
+  const event = totalsEvent("Arsenal", "Chelsea", [
+    { key: "pinnacle", title: "Pinnacle", markets: [{ key: "h2h", outcomes: [] }] },
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "2.5");
+
+  assert.equal(result.kind, "MARKET_ABSENT");
+});
+
+test("Phase 3.1 lookup: zero outcomes named Over/Under on an existing totals market reports OUTCOME_ABSENT", () => {
+  const event = totalsEvent("Arsenal", "Chelsea", [
+    pinnacleTotalsBookmaker([{ name: "Draw No Bet", price: 1.5, point: 0 }]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "2.5");
+
+  assert.equal(result.kind, "OUTCOME_ABSENT");
+});
+
+test("Phase 3.1 lookup: no bookmaker at all on the event reports NO_BOOKMAKER", () => {
+  const event = totalsEvent("Arsenal", "Chelsea", []);
+
+  const result = findTotalsOutcome(event, "OVER", "2.5");
+
+  assert.equal(result.kind, "NO_BOOKMAKER");
+});
+
+test("Phase 3.1 lookup: a malformed requestedLine is rejected up front as INVALID_REQUESTED_LINE, before any bookmaker/market work", () => {
+  const event = totalsEvent("Arsenal", "Chelsea", [
+    pinnacleTotalsBookmaker([totalsOutcome("Over", 1.85, 2.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "not-a-number");
+
+  assert.equal(result.kind, "INVALID_REQUESTED_LINE");
+});
+
+test("Phase 3.1 lookup: a '+2.5' requestedLine is accepted and canonicalized, matching the domain-wide line convention (Betting Markets V1 Phase 2 review fix)", () => {
+  const event = totalsEvent("Arsenal", "Chelsea", [
+    pinnacleTotalsBookmaker([totalsOutcome("Over", 1.85, 2.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "+2.5");
+
+  assert.equal(result.kind, "MATCHED");
+});
+
+test("Phase 3.1 lookup: fallback bookmaker behavior remains correct — no Pinnacle present, falls back to the first bookmaker, exactly like h2h", () => {
+  const event = totalsEvent("Arsenal", "Chelsea", [
+    { key: "bet365", title: "Bet365", markets: [{ key: "totals", outcomes: [totalsOutcome("Over", 1.8, 2.5), totalsOutcome("Under", 2.0, 2.5)] }] },
+    { key: "williamhill", title: "William Hill", markets: [{ key: "totals", outcomes: [totalsOutcome("Over", 1.75, 2.5), totalsOutcome("Under", 2.05, 2.5)] }] },
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "2.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.bookmaker, "Bet365", "must fall back to the first bookmaker (bet365), same rule as h2h's pickBookmaker()");
+  assert.equal(result.price, 1.8);
+  assert.equal(result.isFallbackBookmaker, true);
 });

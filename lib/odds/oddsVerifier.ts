@@ -1,6 +1,7 @@
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { normalizeTeamName, overlapScore } from "./teamNameMatcher";
 import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
+import { normalizeLineString } from "./domain";
 
 const ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4";
 const ODDS_API_TIMEOUT_MS = 8000;
@@ -150,23 +151,35 @@ function splitEventTeams(event: string): [string, string] | null {
   return parts.length === 2 ? [parts[0].trim(), parts[1].trim()] : null;
 }
 
-interface OddsApiOutcome {
+// Betting Markets V1, Phase 3.1 — these four are now exported (previously
+// module-private). Purely a visibility change, no shape/behavior change to
+// any existing member: findTotalsOutcome()'s test fixtures need OddsApiEvent
+// (and its nested types) to construct realistic, type-checked "already
+// matched" events, the same way this file's own internal functions already
+// consume them.
+export interface OddsApiOutcome {
   name: string;
   price: number;
+  // Betting Markets V1, Phase 3.1 — only ever present on a "totals" market's
+  // outcomes (the line, e.g. 2.5); The Odds API's "h2h" outcomes never carry
+  // this field. Optional because every existing h2h-only code path above
+  // this comment continues to construct/consume OddsApiOutcome without it —
+  // purely additive, no existing behavior changes.
+  point?: number;
 }
 
-interface OddsApiMarket {
+export interface OddsApiMarket {
   key: string;
   outcomes: OddsApiOutcome[];
 }
 
-interface OddsApiBookmaker {
+export interface OddsApiBookmaker {
   key: string;
   title: string;
   markets: OddsApiMarket[];
 }
 
-interface OddsApiEvent {
+export interface OddsApiEvent {
   id: string;
   // Step 16B — The Odds API already sends this on every event; not read
   // until now. Used only for semantic dedup's tolerant time-window check
@@ -540,6 +553,25 @@ interface CacheEntry {
 
 const oddsCache = new Map<string, CacheEntry>();
 
+// Betting Markets V1, Phase 3.1 — the closed set of market keys this file
+// can request. "h2h" is the only value verifyOdds() itself ever passes
+// (unchanged); "totals" exists for fetchOddsForSport()'s new second caller,
+// not yet wired into verifyOdds() at all (Phase 3.1 scope — see this
+// section's own header comment further down).
+export type OddsApiMarketKey = "h2h" | "totals";
+
+// Cache key is sportKey+market, not sportKey alone — an h2h response must
+// never satisfy a totals request or vice versa (they are genuinely
+// different provider payloads for the same event). Before this phase every
+// call requested "h2h" only, so this is a behavior-preserving key-shape
+// change for every existing caller: the old bare sportKey key and the new
+// `${sportKey}:h2h` key address the same, single-market cache population
+// verifyOdds() has always produced — just spelled out explicitly now that a
+// second market exists to collide with.
+function oddsCacheKey(sportKey: string, market: OddsApiMarketKey): string {
+  return `${sportKey}:${market}`;
+}
+
 // Structural failure carrier — status and the provider's own short
 // error_code (never the raw body) — so both the safe note text below AND
 // the safe operational log in verifyOdds() can read them directly, instead
@@ -556,8 +588,17 @@ class OddsApiHttpError extends Error {
   }
 }
 
-async function fetchOddsForSport(sportKey: string): Promise<OddsApiEvent[]> {
-  const cached = oddsCache.get(sportKey);
+// Betting Markets V1, Phase 3.1 — generalized to accept a market key rather
+// than hardcoding "h2h", so a second, isolated Totals fetch path can reuse
+// this exact function (same timeout, same error classification, same cache
+// mechanics) instead of duplicating it. `market` defaults to "h2h" so
+// verifyOdds()'s own call below needs no signature-shape change beyond the
+// one explicit argument it now passes — every existing h2h request still
+// asks for exactly `markets=h2h`, byte-for-byte, and still populates the
+// same effective cache entry a pre-Phase-3.1 sportKey-only key would have.
+async function fetchOddsForSport(sportKey: string, market: OddsApiMarketKey = "h2h"): Promise<OddsApiEvent[]> {
+  const cacheKey = oddsCacheKey(sportKey, market);
+  const cached = oddsCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.events;
   }
@@ -571,7 +612,11 @@ async function fetchOddsForSport(sportKey: string): Promise<OddsApiEvent[]> {
   const timeout = setTimeout(() => controller.abort(), ODDS_API_TIMEOUT_MS);
 
   try {
-    const url = `${ODDS_API_BASE_URL}/sports/${sportKey}/odds/?apiKey=${apiKey}&regions=eu&markets=h2h&oddsFormat=decimal`;
+    // Requests exactly the one market asked for — never `markets=h2h,totals`
+    // together "just in case" (API-credit discipline, Phase 3.1 task 8: The
+    // Odds API bills per market requested, so a combined request would cost
+    // double for every existing h2h-only bet that never needed Totals data).
+    const url = `${ODDS_API_BASE_URL}/sports/${sportKey}/odds/?apiKey=${apiKey}&regions=eu&markets=${market}&oddsFormat=decimal`;
     const response = await fetch(url, { signal: controller.signal });
 
     if (!response.ok) {
@@ -605,7 +650,7 @@ async function fetchOddsForSport(sportKey: string): Promise<OddsApiEvent[]> {
       throw new Error("Unexpected response shape from The Odds API");
     }
 
-    oddsCache.set(sportKey, { expiresAt: Date.now() + ODDS_CACHE_TTL_MS, events: events as OddsApiEvent[] });
+    oddsCache.set(cacheKey, { expiresAt: Date.now() + ODDS_CACHE_TTL_MS, events: events as OddsApiEvent[] });
 
     return events as OddsApiEvent[];
   } finally {
@@ -720,7 +765,7 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
   for (const sportKey of sportKeys) {
     const fetchStartedAt = Date.now();
     try {
-      const fetched = await fetchOddsForSport(sportKey);
+      const fetched = await fetchOddsForSport(sportKey, "h2h");
       // Tag every event from this fetch with the exact sport_key that
       // produced it, before merging into the shared `events` array — once
       // merged, array position/order no longer distinguishes which key an
@@ -854,4 +899,160 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
       : null,
     ...providerMetadata,
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Totals market — Betting Markets V1, Phase 3.1                              */
+/*                                                                             */
+/* Fetch + pure outcome lookup only. Neither export below is called by        */
+/* verifyOdds() or anything else in this file, TheOddsApiProvider.ts, or any  */
+/* live route — there is no wiring into buildBetSlipPreview.ts,               */
+/* legacySelectionToCanonicalRequest(), or Telegram at this phase. This is    */
+/* dead code from the live pipeline's perspective, on purpose: Phase 3.2      */
+/* (selection classification) and later phases are what will eventually call  */
+/* these. Existing h2h behavior above this section is unchanged.              */
+/* -------------------------------------------------------------------------- */
+
+// Thin, explicit wrapper (rather than exporting fetchOddsForSport directly
+// with its market argument) so a future caller can't accidentally omit the
+// market and silently fetch h2h — the whole point of this function existing
+// is "fetch totals, and only totals, for this sport_key."
+export async function fetchTotalsOddsForSport(sportKey: string): Promise<OddsApiEvent[]> {
+  return fetchOddsForSport(sportKey, "totals");
+}
+
+export type TotalsDirection = "OVER" | "UNDER";
+
+export interface TotalsOutcomeMatch {
+  readonly price: number;
+  readonly bookmaker: string;
+  readonly isFallbackBookmaker: boolean;
+  readonly marketKey: "totals";
+  // Canonical decimal string (e.g. "2.5") — the provider's own point,
+  // re-expressed through the same canonicalization the request line was
+  // checked against. Since matching is exact-only (never "closest
+  // available"), this always equals the caller's own requestedLine once
+  // both are canonicalized — returned anyway so a caller has the provider's
+  // own value on hand without re-deriving it, matching this file's existing
+  // "return what was actually found" convention (see providerMetadata above).
+  readonly point: string;
+}
+
+// Every failure kind below maps to one bullet of Phase 3.1's task 9 list —
+// none of these collapse into an existing VerificationReasonCode (Section 9
+// of that reason-code model is for the LIVE verification pipeline; this
+// function has no caller in that pipeline yet, so inventing a mapping now
+// would be guessing at a Phase 3.2+ decision, not describing this phase's
+// own code).
+export type TotalsOutcomeLookupResult =
+  | ({ readonly kind: "MATCHED" } & TotalsOutcomeMatch)
+  // requestedLine itself isn't a valid decimal string — checked first, zero
+  // bookmaker/market work wasted on an already-invalid request.
+  | { readonly kind: "INVALID_REQUESTED_LINE" }
+  // event.bookmakers is empty — mirrors extractOutcomePrice's existing "No
+  // bookmaker odds available" h2h case exactly (same pickBookmaker() call).
+  | { readonly kind: "NO_BOOKMAKER" }
+  // The picked bookmaker has no "totals" market entry at all.
+  | { readonly kind: "MARKET_ABSENT" }
+  // A "totals" market exists but has zero outcomes named "Over"/"Under" for
+  // the requested direction — a degenerate/unexpected provider shape.
+  | { readonly kind: "OUTCOME_ABSENT" }
+  // Outcome(s) named for the requested direction exist, but at least one
+  // (and none that matched) has no `point` field at all.
+  | { readonly kind: "MISSING_POINT" }
+  // Outcome(s) named for the requested direction exist, but at least one
+  // (and none that matched) has a `point` that isn't a finite, decimal-
+  // shaped number once canonicalized.
+  | { readonly kind: "MALFORMED_POINT" }
+  // Every candidate outcome for the requested direction has a validly-
+  // shaped point, but none of them equals the requested line — e.g. the
+  // bookmaker only offers 3.5 and the player asked for 2.5. This is the
+  // "never silently match 2.5 against 3.5" case, made a distinct, honest
+  // outcome rather than a generic not-found.
+  | { readonly kind: "LINE_NOT_AVAILABLE" };
+
+const TOTALS_OUTCOME_NAME: Readonly<Record<TotalsDirection, string>> = {
+  OVER: "over",
+  UNDER: "under",
+};
+
+// Converts a provider-supplied point (a JSON number, e.g. 2.5) into the
+// codebase's canonical decimal-string form via lib/odds/domain.ts's
+// normalizeLineString — the comparison against requestedLine below is
+// therefore always a STRING equality check, never a floating-point
+// subtraction/tolerance comparison. String(point) is what feeds that
+// canonicalization: safe for the bounded, simple magnitudes real football
+// totals lines use (whole or half-point, far under the Decimal(4,1) ceiling
+// prisma/schema.prisma's own Bet.line/BetSelection.line already assume) —
+// this is not a general float-to-decimal-string solver, and isn't meant to
+// be one. Returns null (the "malformed point" case) for anything that
+// doesn't survive that round-trip: non-finite numbers, or a shape
+// normalizeLineString itself rejects.
+function canonicalizeProviderPoint(point: number): string | null {
+  if (typeof point !== "number" || !Number.isFinite(point)) return null;
+  return normalizeLineString(String(point));
+}
+
+// Pure — no I/O, no caching, no mutation. Operates on an already-matched
+// event (the caller is responsible for event resolution, exactly like every
+// existing extractOutcomePrice() caller in this file already is) and reuses
+// pickBookmaker() unchanged, so Totals gets the identical Pinnacle-preferred/
+// first-bookmaker-fallback policy h2h already has — never a second,
+// independently-maintained bookmaker-selection rule.
+export function findTotalsOutcome(
+  event: OddsApiEvent,
+  direction: TotalsDirection,
+  requestedLine: string,
+): TotalsOutcomeLookupResult {
+  const canonicalRequestedLine = normalizeLineString(requestedLine);
+  if (canonicalRequestedLine === null) {
+    return { kind: "INVALID_REQUESTED_LINE" };
+  }
+
+  const bookmakerPick = pickBookmaker(event);
+  if (!bookmakerPick) {
+    return { kind: "NO_BOOKMAKER" };
+  }
+
+  const market = bookmakerPick.bookmaker.markets.find((m) => m.key === "totals");
+  if (!market) {
+    return { kind: "MARKET_ABSENT" };
+  }
+
+  const targetName = TOTALS_OUTCOME_NAME[direction];
+  const candidates = market.outcomes.filter((outcome) => outcome.name.trim().toLowerCase() === targetName);
+  if (candidates.length === 0) {
+    return { kind: "OUTCOME_ABSENT" };
+  }
+
+  let sawMissingPoint = false;
+  let sawMalformedPoint = false;
+
+  for (const outcome of candidates) {
+    if (outcome.point === undefined || outcome.point === null) {
+      sawMissingPoint = true;
+      continue;
+    }
+
+    const canonicalPoint = canonicalizeProviderPoint(outcome.point);
+    if (canonicalPoint === null) {
+      sawMalformedPoint = true;
+      continue;
+    }
+
+    if (canonicalPoint === canonicalRequestedLine) {
+      return {
+        kind: "MATCHED",
+        price: outcome.price,
+        bookmaker: bookmakerPick.bookmaker.title,
+        isFallbackBookmaker: bookmakerPick.isFallback,
+        marketKey: "totals",
+        point: canonicalPoint,
+      };
+    }
+  }
+
+  if (sawMissingPoint) return { kind: "MISSING_POINT" };
+  if (sawMalformedPoint) return { kind: "MALFORMED_POINT" };
+  return { kind: "LINE_NOT_AVAILABLE" };
 }
