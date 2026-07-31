@@ -582,14 +582,54 @@ async function fetchOddsForSport(sportKey: string): Promise<OddsApiEvent[]> {
 /* Stage 3.1 — provider event metadata extraction                             */
 /* -------------------------------------------------------------------------- */
 
+// Human-readable competition names for every sport_key this file can ever
+// tag an event with (every entry of FOOTBALL_FALLBACK_SPORT_KEYS,
+// TENNIS_SPORT_KEYS, and the single-key sports below) — display purposes
+// only, never used for matching/routing. A sport_key this map doesn't
+// recognize (should not happen — this file is the only place
+// providerSportKey is ever set) falls back to the raw key rather than
+// crashing or omitting the competition name entirely.
+const SPORT_KEY_DISPLAY_NAMES: Readonly<Record<string, string>> = {
+  [SOCCER_EPL_KEY]: "Premier League",
+  [SOCCER_LA_LIGA_KEY]: "La Liga",
+  [SOCCER_SERIE_A_KEY]: "Serie A",
+  [SOCCER_BUNDESLIGA_KEY]: "Bundesliga",
+  [SOCCER_LIGUE_1_KEY]: "Ligue 1",
+  [SOCCER_UEFA_CL_KEY]: "UEFA Champions League",
+  [SOCCER_UEFA_CL_QUALIFICATION_KEY]: "UEFA Champions League Qualification",
+  basketball_nba: "NBA",
+  americanfootball_nfl: "NFL",
+  icehockey_nhl: "NHL",
+  tennis_atp_aus_open_singles: "ATP Australian Open",
+  tennis_wta_aus_open_singles: "WTA Australian Open",
+  tennis_atp_french_open: "ATP French Open",
+  tennis_wta_french_open: "WTA French Open",
+  tennis_atp_wimbledon: "ATP Wimbledon",
+  tennis_wta_wimbledon: "WTA Wimbledon",
+  tennis_atp_us_open: "ATP US Open",
+  tennis_wta_us_open: "WTA US Open",
+};
+
+function competitionDisplayName(sportKey: string): string {
+  return SPORT_KEY_DISPLAY_NAMES[sportKey] ?? sportKey;
+}
+
 interface ProviderEventMetadata {
   readonly providerEventId: string;
   readonly providerSportKey: string;
   readonly eventStartTime: string;
+  // Threaded through so Preview/Active Bets/History/Operator Dashboard can
+  // show the full resolved event ("Arsenal — Coventry City", "Premier
+  // League") instead of only the player's own single-team query text — see
+  // lib/bets/buildBetSlipPreview.ts. Sourced directly from the matched
+  // OddsApiEvent, never from the player's parsed text.
+  readonly homeTeamName: string;
+  readonly awayTeamName: string;
+  readonly competitionName: string;
 }
 
 // All-or-nothing by design: returns either a complete, trustworthy metadata
-// triple or nothing at all — never an event id with a missing/invalid start
+// set or nothing at all — never an event id with a missing/invalid start
 // time. `event.providerSportKey` is only absent if some future code path
 // forgets to tag it (defensive only — every real call site above always
 // tags it); a missing or unparsable commence_time is the realistic failure
@@ -606,6 +646,9 @@ function extractProviderEventMetadata(event: OddsApiEvent): ProviderEventMetadat
     providerEventId: event.id,
     providerSportKey: event.providerSportKey,
     eventStartTime: new Date(parsedMs).toISOString(),
+    homeTeamName: event.home_team,
+    awayTeamName: event.away_team,
+    competitionName: competitionDisplayName(event.providerSportKey),
   };
 }
 

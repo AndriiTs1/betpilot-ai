@@ -30,6 +30,8 @@
 // the type system to avoid.
 
 import { normalizeSelectionToEnglish } from "./normalizeSelectionToEnglish";
+import { formatFullEventName } from "./formatFullEventName";
+import { formatEventDateTime } from "./formatEventDateTime";
 
 export interface DisplaySelection {
   id: string;
@@ -44,6 +46,16 @@ export interface DisplaySelection {
   market?: string | null;
   currentOdds?: string | null;
   oddsStatus?: string | null;
+  // Raw provider event-display fields — present whenever the odds provider
+  // unambiguously resolved the event (see lib/odds/oddsVerifier.ts's
+  // extractProviderEventMetadata), null/absent otherwise. homeTeamName/
+  // awayTeamName are only ever read by mapBetForDisplay() itself (to
+  // compose `event` into "Home — Away"); competitionName/eventStartTime are
+  // also read directly by SelectionRow.tsx to render a secondary line.
+  homeTeamName?: string | null;
+  awayTeamName?: string | null;
+  competitionName?: string | null;
+  eventStartTime?: string | null;
 }
 
 // Only the fields the mapper actually needs — a structural subset every
@@ -63,6 +75,13 @@ export interface BetLikeForDisplay {
   sport: string;
   event: string | null;
   outcome: string | null;
+  // Same "SINGLE has no BetSelection row, so its provider/display metadata
+  // lives on Bet itself" rationale as event/outcome above — only read
+  // inside toLegacyFallbackSelections, never by a UI component directly.
+  homeTeamName: string | null;
+  awayTeamName: string | null;
+  competitionName: string | null;
+  eventStartTime: string | null;
   selections: readonly DisplaySelection[];
 }
 
@@ -92,6 +111,16 @@ export interface DisplayBet {
   // a legacy row with zero BetSelection rows AND a null legacy outcome,
   // i.e. corrupt/incomplete data).
   displaySubtitle: string | null;
+  // First selection's competition/kickoff-time, for consumers that show a
+  // single compact secondary line (Mini App Active Bets/History cards,
+  // Operator Dashboard PlayerCard rows) rather than per-leg detail (which
+  // reads DisplaySelection.competitionName/eventStartTime directly via
+  // SelectionRow instead). null whenever the provider never resolved this
+  // event, or there's no first selection.
+  displayCompetition: string | null;
+  // Pre-formatted ("21 Aug 2026 • 20:00"), not raw ISO — see
+  // formatEventDateTime.
+  displayEventTime: string | null;
 }
 
 const NO_TITLE_FALLBACK = "—";
@@ -117,6 +146,10 @@ function toLegacyFallbackSelections(bet: BetLikeForDisplay): DisplaySelection[] 
       event: bet.event,
       outcome: bet.outcome,
       odds: bet.odds,
+      homeTeamName: bet.homeTeamName,
+      awayTeamName: bet.awayTeamName,
+      competitionName: bet.competitionName,
+      eventStartTime: bet.eventStartTime,
     },
   ];
 }
@@ -126,6 +159,7 @@ export function mapBetForDisplay(bet: BetLikeForDisplay): DisplayBet {
 
   const selections = rawSelections.map((selection) => ({
     ...selection,
+    event: formatFullEventName(selection.event, selection.homeTeamName, selection.awayTeamName),
     outcome: normalizeSelectionToEnglish({
       selection: selection.outcome,
       sport: selection.sport,
@@ -145,6 +179,8 @@ export function mapBetForDisplay(bet: BetLikeForDisplay): DisplayBet {
         : first.event;
 
   const displaySubtitle = first?.outcome ?? null;
+  const displayCompetition = first?.competitionName ?? null;
+  const displayEventTime = formatEventDateTime(first?.eventStartTime ?? null);
 
   const effectiveOdds = bet.totalOdds ?? bet.odds;
   const stakeNum = Number(bet.stake);
@@ -166,5 +202,7 @@ export function mapBetForDisplay(bet: BetLikeForDisplay): DisplayBet {
     selectionCount,
     displayTitle,
     displaySubtitle,
+    displayCompetition,
+    displayEventTime,
   };
 }

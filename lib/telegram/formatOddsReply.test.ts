@@ -14,6 +14,10 @@ function selection(overrides: Partial<BetSlipPreviewSelection> = {}): BetSlipPre
     oddsStatus: "VERIFIED",
     bookmaker: null,
     discrepancyPercent: 0,
+    homeTeamName: null,
+    awayTeamName: null,
+    competitionName: null,
+    eventStartTime: null,
     ...overrides,
   };
 }

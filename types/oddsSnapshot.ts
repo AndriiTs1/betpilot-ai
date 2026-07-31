@@ -39,6 +39,15 @@ export interface OddsCheckResult {
   providerSportKey?: string;
   eventStartTime?: string; // ISO 8601, the provider's own commence_time
 
+  // Same presence rule as the three fields above (set together, only once
+  // an event was unambiguously resolved) — the provider's own team names
+  // and a human-readable competition name, for display only (never used for
+  // matching/settlement). See lib/odds/oddsVerifier.ts's
+  // extractProviderEventMetadata.
+  homeTeamName?: string;
+  awayTeamName?: string;
+  competitionName?: string;
+
   // Stage 4.2B1 — the structured reason lib/odds/verification.ts's
   // VerificationResult already always carries, now threaded through
   // lib/odds/legacyOddsBridge.ts instead of being discarded. Optional

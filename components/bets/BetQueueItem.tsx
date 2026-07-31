@@ -14,6 +14,10 @@ export interface PendingBetSelection {
   odds: string | null;
   currentOdds: string | null;
   oddsStatus: string;
+  homeTeamName?: string | null;
+  awayTeamName?: string | null;
+  competitionName?: string | null;
+  eventStartTime?: string | null;
 }
 
 export interface PendingBet {
@@ -26,6 +30,15 @@ export interface PendingBet {
   // Already true on the wire; this type was simply never honest about it.
   event: string | null;
   outcome: string | null;
+  // Full event display metadata for a SINGLE bet (no BetSelection row) —
+  // already on the wire (GET /api/bets/pending returns every scalar
+  // column); not previously declared here. Required (not optional),
+  // matching event/outcome's own nullable-but-always-present shape, since
+  // this type is passed straight into mapBetForDisplay's BetLikeForDisplay.
+  homeTeamName: string | null;
+  awayTeamName: string | null;
+  competitionName: string | null;
+  eventStartTime: string | null;
   odds: string | null;
   totalOdds: string | null;
   stake: string;

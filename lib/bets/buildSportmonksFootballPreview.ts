@@ -217,6 +217,10 @@ export async function buildSportmonksFootballPreview(
     oddsStatus: "VERIFIED",
     bookmaker: oddsResult.snapshot.bookmakerName,
     discrepancyPercent,
+    homeTeamName: fixtureCheck.fixture.homeTeamName,
+    awayTeamName: fixtureCheck.fixture.awayTeamName,
+    competitionName: fixtureCheck.fixture.leagueName,
+    eventStartTime: fixtureCheck.fixture.commenceTime,
   };
 
   const stakeDecimal = new Prisma.Decimal(slip.stake);
@@ -284,6 +288,9 @@ export function signSportmonksFootballPreviewToken(
       canonicalSelectionType: result.raw.selectionSide,
       canonicalParticipant: result.raw.selectionSide === "HOME" ? result.raw.homeTeamName : result.raw.selectionSide === "AWAY" ? result.raw.awayTeamName : null,
       canonicalPeriod: "FULL_GAME",
+      homeTeamName: result.raw.homeTeamName,
+      awayTeamName: result.raw.awayTeamName,
+      competitionName: result.raw.leagueName,
     },
     previewTokenSecret,
   );

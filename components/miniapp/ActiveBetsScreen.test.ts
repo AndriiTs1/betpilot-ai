@@ -28,6 +28,10 @@ function bet(overrides: Partial<RecentBet> = {}): RecentBet {
     status: "CONFIRMED",
     createdAt: "2026-07-21T12:00:00.000Z",
     totalOdds: null,
+    homeTeamName: null,
+    awayTeamName: null,
+    competitionName: null,
+    eventStartTime: null,
     selections: [],
     ...overrides,
   };

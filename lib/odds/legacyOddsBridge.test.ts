@@ -316,6 +316,9 @@ test("result mapping: VERIFIED reconstructs matched:true, withinTolerance:true",
     providerEventId: undefined,
     providerSportKey: undefined,
     eventStartTime: undefined,
+    homeTeamName: undefined,
+    awayTeamName: undefined,
+    competitionName: undefined,
     // Stage 4.2B1 — createVerifiedResult() always sets reasonCode "NONE".
     reasonCode: "NONE",
   });
@@ -484,6 +487,9 @@ test("result mapping: a successful null-input lookup (VERIFIED) reconstructs sub
     providerEventId: undefined,
     providerSportKey: undefined,
     eventStartTime: undefined,
+    homeTeamName: undefined,
+    awayTeamName: undefined,
+    competitionName: undefined,
     reasonCode: "NONE",
   });
 });

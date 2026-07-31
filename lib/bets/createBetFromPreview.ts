@@ -137,6 +137,9 @@ interface ProviderReferenceColumns {
   canonicalSelectionType: string | null;
   canonicalParticipant: string | null;
   canonicalPeriod: string | null;
+  homeTeamName: string | null;
+  awayTeamName: string | null;
+  competitionName: string | null;
 }
 
 function providerReferenceColumnsFromToken(source: {
@@ -148,6 +151,9 @@ function providerReferenceColumnsFromToken(source: {
   canonicalSelectionType?: string | null;
   canonicalParticipant?: string | null;
   canonicalPeriod?: string | null;
+  homeTeamName?: string | null;
+  awayTeamName?: string | null;
+  competitionName?: string | null;
 }): ProviderReferenceColumns {
   const providerEventId = source.providerEventId ?? null;
 
@@ -160,6 +166,9 @@ function providerReferenceColumnsFromToken(source: {
     canonicalSelectionType: source.canonicalSelectionType ?? null,
     canonicalParticipant: source.canonicalParticipant ?? null,
     canonicalPeriod: source.canonicalPeriod ?? null,
+    homeTeamName: source.homeTeamName ?? null,
+    awayTeamName: source.awayTeamName ?? null,
+    competitionName: source.competitionName ?? null,
   };
 }
 

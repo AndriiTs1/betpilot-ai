@@ -51,6 +51,10 @@ export interface PlayerBetSelection {
   odds: string | null;
   currentOdds: string | null;
   oddsStatus: string;
+  homeTeamName?: string | null;
+  awayTeamName?: string | null;
+  competitionName?: string | null;
+  eventStartTime?: string | null;
 }
 
 export interface PlayerBet {
@@ -64,6 +68,10 @@ export interface PlayerBet {
   status: string;
   createdAt: string;
   updatedAt: string;
+  homeTeamName: string | null;
+  awayTeamName: string | null;
+  competitionName: string | null;
+  eventStartTime: string | null;
   selections: PlayerBetSelection[];
 }
 
@@ -339,7 +347,7 @@ function DesktopBetRow({ bet, tab }: { bet: PlayerBet; tab: Tab }) {
   return (
     <>
       <tr className="border-t border-slate-800">
-        <td className="max-w-52 truncate py-2 pr-4 text-left text-white" title={eventLabel}>
+        <td className="max-w-52 py-2 pr-4 text-left text-white" title={eventLabel}>
           {isExpress ? (
             <button
               type="button"
@@ -360,6 +368,13 @@ function DesktopBetRow({ bet, tab }: { bet: PlayerBet; tab: Tab }) {
               <BetRowIcon isExpress={false} sport={bet.sport} />
               <span className="truncate">{eventLabel}</span>
             </span>
+          )}
+          {(display.displayCompetition || display.displayEventTime) && (
+            <p className="truncate pl-[26px] text-xs text-slate-500">
+              {display.displayCompetition}
+              {display.displayCompetition && display.displayEventTime ? " · " : ""}
+              {display.displayEventTime}
+            </p>
           )}
         </td>
         <td className="max-w-60 truncate py-2 pr-4 text-left text-slate-200" title={selectionSummary ?? undefined}>
@@ -475,6 +490,13 @@ function BetsTable({ bets, tab }: { bets: PlayerBet[]; tab: Tab }) {
                     <BetRowIcon isExpress={isExpress} sport={bet.sport} />
                     <span>{eventLabel}</span>
                   </p>
+                  {(display.displayCompetition || display.displayEventTime) && (
+                    <p className="truncate pl-[26px] text-xs text-slate-500">
+                      {display.displayCompetition}
+                      {display.displayCompetition && display.displayEventTime ? " · " : ""}
+                      {display.displayEventTime}
+                    </p>
+                  )}
                   {!isExpress && (
                     <p className="text-sm text-slate-400">
                       {display.displaySubtitle}

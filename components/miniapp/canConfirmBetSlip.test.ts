@@ -19,6 +19,10 @@ function singleSelection(overrides: Partial<BetPreviewSelection> = {}): BetPrevi
     oddsStatus: "VERIFIED",
     bookmaker: "Pinnacle",
     discrepancyPercent: 0,
+    homeTeamName: null,
+    awayTeamName: null,
+    competitionName: null,
+    eventStartTime: null,
     ...overrides,
   };
 }

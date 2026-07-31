@@ -42,6 +42,15 @@ export async function GET(request: NextRequest) {
             status: true,
             createdAt: true,
             updatedAt: true,
+            // Full event display metadata for a SINGLE bet (no
+            // BetSelection row — see mapBetForDisplay.ts's own comment).
+            // eventStartTime was never selected here before either — this
+            // route is the one query in the codebase that hand-picks
+            // columns instead of returning every scalar field.
+            homeTeamName: true,
+            awayTeamName: true,
+            competitionName: true,
+            eventStartTime: true,
             // Stage 12.2 — deterministic leg order, oldest first
             // (submission order), same as GET /api/miniapp/me.
             selections: { orderBy: { createdAt: "asc" } },
@@ -118,6 +127,10 @@ export async function GET(request: NextRequest) {
         status: bet.status,
         createdAt: bet.createdAt.toISOString(),
         updatedAt: bet.updatedAt.toISOString(),
+        homeTeamName: bet.homeTeamName,
+        awayTeamName: bet.awayTeamName,
+        competitionName: bet.competitionName,
+        eventStartTime: bet.eventStartTime ? bet.eventStartTime.toISOString() : null,
         selections: bet.selections,
       });
 

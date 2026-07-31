@@ -44,6 +44,15 @@ function toRecentBet(bet: AnyConfirmedBet): RecentBet {
       status: bet.status,
       createdAt: bet.createdAt,
       totalOdds: bet.totalOdds !== null ? String(bet.totalOdds) : null,
+      // Not returned by the confirm API — the optimistic card briefly shows
+      // just the event/outcome it already has, exactly as before this
+      // field existed, until the next background reconciliation fetch
+      // (GET /api/miniapp/me) replaces this with the real, full server
+      // data. Never fabricated here.
+      homeTeamName: null,
+      awayTeamName: null,
+      competitionName: null,
+      eventStartTime: null,
       selections: [],
     };
   }
@@ -77,6 +86,12 @@ function toRecentBet(bet: AnyConfirmedBet): RecentBet {
     status: bet.status,
     createdAt: bet.createdAt,
     totalOdds: bet.totalOdds,
+    // Same "not returned by the confirm API, corrected on next background
+    // refresh" rationale as the SINGLE branch above.
+    homeTeamName: null,
+    awayTeamName: null,
+    competitionName: null,
+    eventStartTime: null,
     selections,
   };
 }

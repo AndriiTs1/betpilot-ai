@@ -21,7 +21,7 @@
 // one level, once.
 
 import type { TeamIndex, TeamIndexEntry, BuildTeamIndexResult } from "./teamIndex";
-import type { TeamAliasIndex, BuildTeamAliasIndexResult } from "./teamAliasIndex";
+import type { TeamAliasIndex } from "./teamAliasIndex";
 import { teamIndex as defaultTeamIndex } from "./teamIndex";
 import { teamAliasIndex as defaultTeamAliasIndex } from "./teamAliasIndex";
 import type { ProviderName } from "@/lib/odds/oddsProvider";

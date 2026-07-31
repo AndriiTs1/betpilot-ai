@@ -25,6 +25,10 @@ function bet(overrides: Partial<BetLikeForDisplay> = {}): BetLikeForDisplay {
     sport: "Football",
     event: "Real Madrid vs Barcelona",
     outcome: "Real Madrid Win",
+    homeTeamName: null,
+    awayTeamName: null,
+    competitionName: null,
+    eventStartTime: null,
     selections: [],
     ...overrides,
   };

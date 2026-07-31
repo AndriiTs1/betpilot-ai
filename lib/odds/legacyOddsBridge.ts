@@ -333,6 +333,21 @@ export function verificationResultToLegacyOddsCheck(
   const providerSportKey = result.matchedEvent?.reference.sportKey;
   const eventStartTime = result.matchedEvent?.event.startTime;
 
+  // Same round-trip as the three fields above — the provider's own team
+  // names/competition (threaded onto CanonicalEvent by
+  // theOddsApiProvider.ts's buildMatchedEvent), read back out here so
+  // buildBetSlipPreview.ts only ever has to read one place. `participants`
+  // is ordered (never assumed [0]=home) — homeParticipantIndex/
+  // awayParticipantIndex are the only honest pointers into it.
+  const matchedParticipants = result.matchedEvent?.event.participants;
+  const homeIndex = result.matchedEvent?.event.homeParticipantIndex;
+  const awayIndex = result.matchedEvent?.event.awayParticipantIndex;
+  const homeTeamName =
+    matchedParticipants && homeIndex !== undefined ? matchedParticipants[homeIndex]?.name : undefined;
+  const awayTeamName =
+    matchedParticipants && awayIndex !== undefined ? matchedParticipants[awayIndex]?.name : undefined;
+  const competitionName = result.matchedEvent?.event.league?.name;
+
   switch (result.status) {
     case "VERIFIED":
     case "ODDS_CHANGED":
@@ -354,6 +369,9 @@ export function verificationResultToLegacyOddsCheck(
           providerEventId,
           providerSportKey,
           eventStartTime,
+          homeTeamName,
+          awayTeamName,
+          competitionName,
           // Stage 4.2B1 — carried through unconditionally, same as every
           // other field derived straight from `result` here: VerificationResult
           // always has a reasonCode (NONE for VERIFIED, ODDS_OUTSIDE_TOLERANCE
@@ -377,6 +395,9 @@ export function verificationResultToLegacyOddsCheck(
           providerEventId,
           providerSportKey,
           eventStartTime,
+          homeTeamName,
+          awayTeamName,
+          competitionName,
           // Stage 4.2B1 — root cause fix: this used to be the one place that
           // silently dropped the classification lib/odds/theOddsApiProvider.ts's
           // classifyLegacyFailureNote() already computed (PROVIDER_UNAVAILABLE/

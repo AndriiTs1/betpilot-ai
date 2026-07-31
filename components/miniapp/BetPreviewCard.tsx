@@ -4,6 +4,8 @@ import SelectionList from "@/components/bets/SelectionList";
 import type { DisplaySelection } from "@/lib/bets/mapBetForDisplay";
 import { formatAmount } from "@/lib/bets/formatAmount";
 import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
+import { formatFullEventName } from "@/lib/bets/formatFullEventName";
+import { formatEventDateTime } from "@/lib/bets/formatEventDateTime";
 import { hasUnverifiedOddsStatus } from "./canConfirmBetSlip";
 
 // Shown whenever the odds provider could not positively confirm a
@@ -39,6 +41,8 @@ const ODDS_UNVERIFIED_MESSAGE =
 export function PreviewCard({ preview }: { preview: BetPreview }) {
   if (preview.type === "SINGLE") {
     const selection = preview.selections[0];
+    const fullEventName = formatFullEventName(selection.event, selection.homeTeamName, selection.awayTeamName);
+    const eventDateTime = formatEventDateTime(selection.eventStartTime);
     return (
       <div
         className="rounded-2xl p-4"
@@ -46,7 +50,9 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
       >
         <PreviewRow label="Bet type" value="Single" />
         <PreviewRow label="Sport" value={selection.sport} />
-        <PreviewRow label="Event" value={selection.event} wrap />
+        <PreviewRow label="Event" value={fullEventName} wrap />
+        {selection.competitionName && <PreviewRow label="Competition" value={selection.competitionName} wrap />}
+        {eventDateTime && <PreviewRow label="Date" value={eventDateTime} />}
         <PreviewRow
           label="Selection"
           value={normalizeSelectionToEnglish({
@@ -79,7 +85,7 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
   const selections: DisplaySelection[] = preview.selections.map((selection, index) => ({
     id: String(index),
     sport: selection.sport,
-    event: selection.event,
+    event: formatFullEventName(selection.event, selection.homeTeamName, selection.awayTeamName),
     outcome: normalizeSelectionToEnglish({
       selection: selection.selection,
       sport: selection.sport,
@@ -90,6 +96,8 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
     odds: selection.submittedOdds !== null ? String(selection.submittedOdds) : null,
     currentOdds: selection.currentOdds !== null ? String(selection.currentOdds) : null,
     oddsStatus: selection.oddsStatus,
+    competitionName: selection.competitionName,
+    eventStartTime: selection.eventStartTime,
   }));
 
   return (

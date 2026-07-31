@@ -156,7 +156,7 @@ test("requestRateLimiter: maxTrackedKeys bounds the map — expired entries are 
 });
 
 test("requestRateLimiter: a live (unexpired) bucket is never swept merely because the map is over its bound", () => {
-  let clock = 0;
+  const clock = 0;
   const limiter = createRequestRateLimiter({
     maxRequests: 1,
     windowMs: 100_000, // long-lived, still active window
@@ -181,7 +181,7 @@ test("requestRateLimiter: a live (unexpired) bucket is never swept merely becaus
 /* E2. Step 13D — hard capacity boundary                                   */
 
 test("requestRateLimiter (capacity): a third distinct key at capacity is allowed but not tracked — active buckets keep their state, not evicted", () => {
-  let clock = 0;
+  const clock = 0;
   const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000, now: () => clock, maxTrackedKeys: 2 });
 
   // Fill both tracked slots.
@@ -226,7 +226,7 @@ test("requestRateLimiter (capacity): capacity becomes available once tracked ent
 });
 
 test("requestRateLimiter (capacity): buckets.size never exceeds maxTrackedKeys, proven behaviorally across many distinct overflow keys", () => {
-  let clock = 0;
+  const clock = 0;
   const limiter = createRequestRateLimiter({ maxRequests: 1, windowMs: 60_000, now: () => clock, maxTrackedKeys: 3 });
 
   assert.equal(limiter.checkAndRecord("keep1").allowed, true);

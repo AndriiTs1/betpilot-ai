@@ -16,6 +16,15 @@ export interface MiniAppBetSelection {
   market?: string | null;
   currentOdds?: string | null;
   oddsStatus?: string | null;
+  // Full event display metadata — already present on every real API
+  // response (serializeBet spreads the raw BetSelection row, which
+  // includes these columns) — declared here so mapBetForDisplay.ts's
+  // "Home — Away" composition and SelectionRow's competition/date line
+  // actually receive real data instead of reading past a narrower type.
+  homeTeamName?: string | null;
+  awayTeamName?: string | null;
+  competitionName?: string | null;
+  eventStartTime?: string | null;
 }
 
 export interface RecentBet {
@@ -36,6 +45,14 @@ export interface RecentBet {
   status: string;
   createdAt: string;
   totalOdds: string | null;
+  // Full event display metadata for a SINGLE bet (which has no
+  // BetSelection row — see mapBetForDisplay.ts's own comment on
+  // BetLikeForDisplay). Already present on every real API response; not
+  // previously declared here.
+  homeTeamName: string | null;
+  awayTeamName: string | null;
+  competitionName: string | null;
+  eventStartTime: string | null;
   selections: MiniAppBetSelection[];
 }
 

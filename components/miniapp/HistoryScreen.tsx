@@ -61,8 +61,20 @@ export default function HistoryScreen({ recentBets }: HistoryScreenProps) {
                     bottom, row 2 centered between them — same as
                     ActiveBetsScreen.tsx's right column. */}
                 <div className="grid content-between gap-y-1.5 px-3 py-3">
-                  {/* Row 1: event title — one line, ellipsis. */}
-                  <p className="truncate text-[15px] font-semibold text-white">{display.displayTitle}</p>
+                  {/* Row 1: event title, plus an optional secondary line
+                      (competition · kickoff time) — same conditional
+                      rendering as ActiveBetsScreen.tsx, so an older bet
+                      keeps its exact original single-line height. */}
+                  <div>
+                    <p className="truncate text-[15px] font-semibold text-white">{display.displayTitle}</p>
+                    {(display.displayCompetition || display.displayEventTime) && (
+                      <p className="truncate text-xs text-slate-500">
+                        {display.displayCompetition}
+                        {display.displayCompetition && display.displayEventTime ? " · " : ""}
+                        {display.displayEventTime}
+                      </p>
+                    )}
+                  </div>
 
                   {/* Row 2: outcome / odds / stake, same fixed columns as
                       Active Bets so both screens' figures line up. */}

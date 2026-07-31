@@ -1,6 +1,7 @@
 import { SportIcon } from "@/components/miniapp/sportIcons";
 import { getOddsStatusBadge } from "@/lib/bets/oddsStatusBadge";
 import { formatAmount } from "@/lib/bets/formatAmount";
+import { formatEventDateTime } from "@/lib/bets/formatEventDateTime";
 import type { DisplaySelection } from "@/lib/bets/mapBetForDisplay";
 
 // English-only selection labels (temporary product rule) are normalized by
@@ -44,6 +45,7 @@ export default function SelectionRow({ selection, legLabel, showStatus = true }:
   const odds = toNumber(selection.odds);
   const currentOdds = showStatus ? toNumber(selection.currentOdds) : null;
   const statusBadge = showStatus ? getOddsStatusBadge(selection.oddsStatus) : null;
+  const eventDateTime = formatEventDateTime(selection.eventStartTime);
 
   return (
     <div
@@ -71,6 +73,14 @@ export default function SelectionRow({ selection, legLabel, showStatus = true }:
               </span>
             )}
           </div>
+
+          {(selection.competitionName || eventDateTime) && (
+            <p className="break-words text-xs text-slate-500">
+              {selection.competitionName}
+              {selection.competitionName && eventDateTime ? " · " : ""}
+              {eventDateTime}
+            </p>
+          )}
 
           <p className="break-words text-xs text-slate-400">
             {selection.outcome}

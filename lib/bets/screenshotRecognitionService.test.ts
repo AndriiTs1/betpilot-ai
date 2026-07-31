@@ -153,7 +153,21 @@ function samplePreview(oddsStatus: "VERIFIED" | "ODDS_CHANGED" | "NOT_FOUND" | "
     totalOdds: 1.9,
     potentialWin: 19,
     selections: [
-      { sport: "Football", event: "Team A vs Team B", market: null, selection: "Team A Win", submittedOdds: 1.9, currentOdds: 1.9, oddsStatus, bookmaker: "Pinnacle", discrepancyPercent: 0 },
+      {
+        sport: "Football",
+        event: "Team A vs Team B",
+        market: null,
+        selection: "Team A Win",
+        submittedOdds: 1.9,
+        currentOdds: 1.9,
+        oddsStatus,
+        bookmaker: "Pinnacle",
+        discrepancyPercent: 0,
+        homeTeamName: null,
+        awayTeamName: null,
+        competitionName: null,
+        eventStartTime: null,
+      },
     ],
   };
 }

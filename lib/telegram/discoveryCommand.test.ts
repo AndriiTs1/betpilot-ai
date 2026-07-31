@@ -7,7 +7,7 @@ import path from "node:path";
 import type { PrismaClient } from "@/lib/generated/prisma/client";
 import { handleDiscoveryCommand, isTelegramDiscoveryReadOnlyEnabled } from "./discoveryCommand";
 import type { TelegramMessage } from "./telegramTypes";
-import type { CandidateResolver, ResolveQueryResult, ResolvedEventCandidate } from "@/lib/odds/discovery/candidateResolver";
+import type { CandidateResolver, ResolvedEventCandidate } from "@/lib/odds/discovery/candidateResolver";
 
 const originalEnv = { ...process.env };
 

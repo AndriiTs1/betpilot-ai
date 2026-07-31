@@ -314,7 +314,7 @@ test("getCatalog(): a League Catalog outage fails open — every supported key i
 test("getStats(): reflects competitionCount/eventCount/failedLoadCount/lastUpdatedAt correctly after a partial-failure load", async () => {
   const failingKey = getSupportedSportKeys()[0];
   const resultsMap = { ...defaultSuccessMap(), [failingKey]: { status: "FAILED", reason: "HTTP_ERROR" } as const };
-  let clock = 5_000_000;
+  const clock = 5_000_000;
 
   const catalog = createEventCatalog({
     fetchEvents: fakeFetchEvents(resultsMap),

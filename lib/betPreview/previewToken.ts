@@ -41,6 +41,15 @@ export interface PreviewTokenProviderMetadata {
   canonicalSelectionType: string | null;
   canonicalParticipant: string | null;
   canonicalPeriod: string | null;
+  // Full event display metadata — the provider's own team names and a
+  // human-readable competition name (see lib/odds/oddsVerifier.ts's
+  // extractProviderEventMetadata), carried through the token so
+  // createBetFromPreview.ts can persist them without a second provider
+  // request. Same "all present or all null" / undefined-means-older-token
+  // rules as every other field in this interface.
+  homeTeamName: string | null;
+  awayTeamName: string | null;
+  competitionName: string | null;
 }
 
 // Partial, not the full (required) PreviewTokenProviderMetadata — so every
@@ -144,6 +153,9 @@ const PROVIDER_METADATA_KEYS = [
   "canonicalSelectionType",
   "canonicalParticipant",
   "canonicalPeriod",
+  "homeTeamName",
+  "awayTeamName",
+  "competitionName",
 ] as const;
 
 function hasValidProviderMetadataShape(p: Record<string, unknown>): boolean {
@@ -166,6 +178,9 @@ function normalizeProviderMetadata(p: PreviewTokenPayload): PreviewTokenPayload 
     canonicalSelectionType: p.canonicalSelectionType ?? null,
     canonicalParticipant: p.canonicalParticipant ?? null,
     canonicalPeriod: p.canonicalPeriod ?? null,
+    homeTeamName: p.homeTeamName ?? null,
+    awayTeamName: p.awayTeamName ?? null,
+    competitionName: p.competitionName ?? null,
     // Stage 10.2 — an absent providerName (every token signed before this
     // field existed) means exactly what createBetFromPreview.ts already
     // hardcoded unconditionally: "THE_ODDS_API". Never left undefined.
@@ -228,6 +243,9 @@ export function signPreviewToken(input: PreviewTokenInput, secret: string): stri
     canonicalSelectionType: input.canonicalSelectionType ?? null,
     canonicalParticipant: input.canonicalParticipant ?? null,
     canonicalPeriod: input.canonicalPeriod ?? null,
+    homeTeamName: input.homeTeamName ?? null,
+    awayTeamName: input.awayTeamName ?? null,
+    competitionName: input.competitionName ?? null,
   };
 
   const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
@@ -447,6 +465,9 @@ function normalizeExpressSelection(selection: ExpressPreviewTokenSelection): Exp
     canonicalSelectionType: selection.canonicalSelectionType ?? null,
     canonicalParticipant: selection.canonicalParticipant ?? null,
     canonicalPeriod: selection.canonicalPeriod ?? null,
+    homeTeamName: selection.homeTeamName ?? null,
+    awayTeamName: selection.awayTeamName ?? null,
+    competitionName: selection.competitionName ?? null,
   };
 }
 

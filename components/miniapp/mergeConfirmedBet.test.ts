@@ -26,6 +26,10 @@ function existingBet(overrides: Partial<RecentBet> = {}): RecentBet {
     status: "PENDING",
     createdAt: "2026-07-20T10:00:00.000Z",
     totalOdds: "1.5",
+    homeTeamName: null,
+    awayTeamName: null,
+    competitionName: null,
+    eventStartTime: null,
     selections: [],
     ...overrides,
   };

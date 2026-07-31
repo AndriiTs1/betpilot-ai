@@ -18,6 +18,13 @@ export interface BetPreviewSelection {
   oddsStatus: BetSelectionOddsStatus;
   bookmaker: string | null;
   discrepancyPercent: number | null;
+  // Full event display metadata — present only when the odds provider
+  // unambiguously resolved the event; null otherwise, never fabricated.
+  // Mirrors lib/bets/buildBetSlipPreview.ts's BetSlipPreviewSelection.
+  homeTeamName: string | null;
+  awayTeamName: string | null;
+  competitionName: string | null;
+  eventStartTime: string | null;
 }
 
 export interface BetPreview {
@@ -97,7 +104,11 @@ function isBetPreviewSelection(value: unknown): value is BetPreviewSelection {
     typeof s.oddsStatus === "string" &&
     ODDS_STATUSES.has(s.oddsStatus) &&
     (s.bookmaker === null || typeof s.bookmaker === "string") &&
-    (s.discrepancyPercent === null || typeof s.discrepancyPercent === "number")
+    (s.discrepancyPercent === null || typeof s.discrepancyPercent === "number") &&
+    (s.homeTeamName === null || typeof s.homeTeamName === "string") &&
+    (s.awayTeamName === null || typeof s.awayTeamName === "string") &&
+    (s.competitionName === null || typeof s.competitionName === "string") &&
+    (s.eventStartTime === null || typeof s.eventStartTime === "string")
   );
 }
 

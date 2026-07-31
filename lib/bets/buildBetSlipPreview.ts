@@ -17,6 +17,7 @@ import {
 import { signPreviewToken, signExpressPreviewToken } from "@/lib/betPreview/previewToken";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
+import { formatFullEventName } from "@/lib/bets/formatFullEventName";
 
 // Stage 12, Phase 3 — the one shared pipeline both the text and screenshot
 // preview routes run a parsed slip through: validate shape -> verify odds
@@ -87,6 +88,12 @@ function resolveOddsVerificationService(
 
 export interface BetSlipPreviewSelection {
   sport: string;
+  // The full resolved event name ("Arsenal — Coventry City") whenever the
+  // odds provider unambiguously matched one, falling back to exactly what
+  // it always was (the player's own parsed text, e.g. "Arsenal") when it
+  // didn't — see formatFullEventName. Never breaks an existing consumer:
+  // this field's type and "always present" contract are unchanged, only
+  // its value gets richer.
   event: string;
   market: string | null;
   selection: string;
@@ -95,6 +102,16 @@ export interface BetSlipPreviewSelection {
   oddsStatus: BetSelectionOddsStatus;
   bookmaker: string | null;
   discrepancyPercent: number | null;
+  // Present only when the odds provider unambiguously resolved the event
+  // (mirrors OddsCheckResult's own all-or-nothing rule) — null otherwise,
+  // never fabricated. homeTeamName/awayTeamName are the provider's own team
+  // names (not the player's typed text); competitionName is a
+  // human-readable league name; eventStartTime is the provider's own
+  // commence_time (ISO 8601).
+  homeTeamName: string | null;
+  awayTeamName: string | null;
+  competitionName: string | null;
+  eventStartTime: string | null;
 }
 
 export interface BetSlipPreview {
@@ -146,6 +163,9 @@ interface ProviderTokenFields {
   canonicalSelectionType: string | null;
   canonicalParticipant: string | null;
   canonicalPeriod: string | null;
+  homeTeamName: string | null;
+  awayTeamName: string | null;
+  competitionName: string | null;
 }
 
 const NULL_PROVIDER_TOKEN_FIELDS: ProviderTokenFields = {
@@ -156,6 +176,9 @@ const NULL_PROVIDER_TOKEN_FIELDS: ProviderTokenFields = {
   canonicalSelectionType: null,
   canonicalParticipant: null,
   canonicalPeriod: null,
+  homeTeamName: null,
+  awayTeamName: null,
+  competitionName: null,
 };
 
 function buildProviderTokenFields(
@@ -174,6 +197,9 @@ function buildProviderTokenFields(
     canonicalSelectionType: canonicalSelection.selectionType,
     canonicalParticipant: canonicalSelection.participant?.name ?? null,
     canonicalPeriod: canonicalSelection.period,
+    homeTeamName: oddsCheck.homeTeamName ?? null,
+    awayTeamName: oddsCheck.awayTeamName ?? null,
+    competitionName: oddsCheck.competitionName ?? null,
   };
 }
 
@@ -301,7 +327,7 @@ export async function buildBetSlipPreview(
 
     return {
       sport: selection.sport,
-      event: selection.event,
+      event: formatFullEventName(selection.event, oddsCheck?.homeTeamName ?? null, oddsCheck?.awayTeamName ?? null),
       market: selection.market,
       selection: selection.selection,
       submittedOdds: effectiveSubmittedOdds,
@@ -309,6 +335,10 @@ export async function buildBetSlipPreview(
       oddsStatus: mapOddsCheckToSelectionStatus(oddsCheck),
       bookmaker: oddsCheck?.bookmaker ?? null,
       discrepancyPercent: oddsCheck?.discrepancyPercent ?? null,
+      homeTeamName: oddsCheck?.homeTeamName ?? null,
+      awayTeamName: oddsCheck?.awayTeamName ?? null,
+      competitionName: oddsCheck?.competitionName ?? null,
+      eventStartTime: oddsCheck?.eventStartTime ?? null,
     };
   });
 

@@ -57,12 +57,30 @@ const PROVIDER_NAME: ProviderName = "THE_ODDS_API";
 function buildMatchedEvent(legacyResult: OddsCheckResult, selection: CanonicalSelection): ProviderEventCandidate | undefined {
   if (!legacyResult.providerEventId || !legacyResult.providerSportKey) return undefined;
 
+  // Prefer the provider's OWN team names/competition (oddsVerifier.ts's
+  // extractProviderEventMetadata) over the player's pre-verification typed
+  // text (selection.event.name/participants) — this is what lets a
+  // single-team query like "Arsenal" surface the full resolved event
+  // ("Arsenal — Coventry City", "Premier League") downstream, instead of
+  // only ever repeating back whatever the player happened to type. Falls
+  // back to the pre-verification text when the provider names are somehow
+  // absent (should not happen — extractProviderEventMetadata is
+  // all-or-nothing alongside providerEventId/providerSportKey — but this
+  // keeps the pre-existing behavior as a safe default rather than crashing).
+  const hasProviderTeamNames = Boolean(legacyResult.homeTeamName && legacyResult.awayTeamName);
+
   return {
     event: {
       sport: selection.sport,
-      league: selection.league,
-      name: selection.event.name,
-      participants: selection.event.participants,
+      league: legacyResult.competitionName ? { name: legacyResult.competitionName } : selection.league,
+      name: hasProviderTeamNames
+        ? `${legacyResult.homeTeamName} — ${legacyResult.awayTeamName}`
+        : selection.event.name,
+      participants: hasProviderTeamNames
+        ? [{ name: legacyResult.homeTeamName! }, { name: legacyResult.awayTeamName! }]
+        : selection.event.participants,
+      homeParticipantIndex: hasProviderTeamNames ? 0 : selection.event.homeParticipantIndex,
+      awayParticipantIndex: hasProviderTeamNames ? 1 : selection.event.awayParticipantIndex,
       startTime: legacyResult.eventStartTime,
       period: selection.period,
     },

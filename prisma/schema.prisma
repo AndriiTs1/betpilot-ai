@@ -189,6 +189,15 @@ model Bet {
   canonicalParticipant   String?
   canonicalPeriod        String?
 
+  // Full event display metadata — the provider's own team names and a
+  // human-readable competition name, alongside the provider fields above.
+  // Display-only (never used for matching/settlement); same nullable,
+  // additive, never-fabricated semantics — see
+  // lib/odds/oddsVerifier.ts's extractProviderEventMetadata.
+  homeTeamName    String?
+  awayTeamName    String?
+  competitionName String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -235,6 +244,11 @@ model BetSelection {
   canonicalSelectionType String?
   canonicalParticipant   String?
   canonicalPeriod        String?
+
+  // Same full event display metadata as Bet's own fields above, per leg.
+  homeTeamName    String?
+  awayTeamName    String?
+  competitionName String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

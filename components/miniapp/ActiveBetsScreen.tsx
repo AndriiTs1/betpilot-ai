@@ -99,9 +99,21 @@ export default function ActiveBetsScreen({ recentBets }: ActiveBetsScreenProps) 
                     justify-between, which let element position drift with
                     content length instead of guaranteeing it. */}
                 <div className="grid content-between gap-y-1.5 px-3 py-3">
-                  {/* Row 1: event title — one line, ellipsis, never pushes
-                      the rows below. */}
-                  <p className="truncate text-[15px] font-semibold text-white">{display.displayTitle}</p>
+                  {/* Row 1: event title, plus an optional secondary line
+                      (competition · kickoff time) — only rendered when the
+                      odds provider resolved this event, so an older bet
+                      created before this metadata existed keeps its exact
+                      original single-line height. */}
+                  <div>
+                    <p className="truncate text-[15px] font-semibold text-white">{display.displayTitle}</p>
+                    {(display.displayCompetition || display.displayEventTime) && (
+                      <p className="truncate text-xs text-slate-500">
+                        {display.displayCompetition}
+                        {display.displayCompetition && display.displayEventTime ? " · " : ""}
+                        {display.displayEventTime}
+                      </p>
+                    )}
+                  </div>
 
                   {/* Row 2: outcome / odds / stake, each its own fixed
                       column so every card's odds and stake land at the same
