@@ -18,6 +18,7 @@ import { signPreviewToken, signExpressPreviewToken } from "@/lib/betPreview/prev
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
 import { formatFullEventName } from "@/lib/bets/formatFullEventName";
+import { oddsDebugLog } from "@/lib/odds/oddsDebugLogging";
 
 // Stage 12, Phase 3 — the one shared pipeline both the text and screenshot
 // preview routes run a parsed slip through: validate shape -> verify odds
@@ -269,11 +270,31 @@ export async function buildBetSlipPreview(
     );
   });
 
+  // TEMPORARY DEBUG LOGGING — see lib/odds/oddsDebugLogging.ts for the full
+  // rationale/removal note. Gated off by default (ODDS_DEBUG_LOGGING must
+  // be "true"), so this never fires during tests. Batch-level view: how
+  // many selections, of which bet type, and how long the whole verifyMany()
+  // call actually took — the piece oddsVerifier.ts's own per-request logs
+  // can't show on their own (whether an EXPRESS batch's legs ran
+  // concurrently/sequentially and how that adds up).
+  const debugBatchId = `${slip.type}::${Date.now()}::${Math.random().toString(36).slice(2, 8)}`;
+  oddsDebugLog("verify_many_start", { debugBatchId, type: slip.type, selectionCount: requests.length });
+  const verifyManyStartedAt = Date.now();
+
   // One call for the whole batch — OddsVerificationService owns
   // concurrency (bounded, order-preserving, failure-isolated) internally;
   // this file never loops verifyOne() itself. See
   // lib/odds/oddsVerificationService.ts.
   const results = await oddsVerificationService.verifyMany(requests);
+
+  oddsDebugLog("verify_many_end", {
+    debugBatchId,
+    type: slip.type,
+    selectionCount: requests.length,
+    elapsedMs: Date.now() - verifyManyStartedAt,
+    statuses: results.map((r) => r.status).join(","),
+    reasonCodes: results.map((r) => r.reasonCode).join(","),
+  });
 
   // Step 15I — no longer passes a submittedOdds argument: Step 15H made
   // verificationResultToLegacyOddsCheck derive submittedOdds entirely from
@@ -290,6 +311,32 @@ export async function buildBetSlipPreview(
   const previewSelections: BetSlipPreviewSelection[] = slip.selections.map((selection, index) => {
     const reconstructed = reconstructedByIndex.get(index);
     const oddsCheck: OddsCheckResult | null = reconstructed?.oddsCheck ?? null;
+
+    // TEMPORARY DEBUG LOGGING — see lib/odds/oddsVerifier.ts's matching
+    // matching module. Per-selection view: resolved fixture (if any), final
+    // verification result, and failure reason — correlated with
+    // oddsVerifier.ts's own per-call logs (which DO log the raw input text)
+    // via debugBatchId + selectionIndex + timing proximity. Deliberately
+    // does NOT include selection.event/selection.selection/selection.market
+    // here — see the very next comment block (Stage 14.4A) and this file's
+    // own "odds check failures never log..." test, which this must not
+    // violate: free-text bet content stays out of this file's logs, exactly
+    // as before this debug block was added. resolvedFixture/providerEventId
+    // are provider-sourced data, not player-submitted text.
+    oddsDebugLog("selection", {
+      debugBatchId,
+      type: slip.type,
+      selectionIndex: index,
+      inputSport: selection.sport,
+      matched: String(oddsCheck?.matched ?? "unknown"),
+      resolvedFixture:
+        oddsCheck?.homeTeamName && oddsCheck?.awayTeamName
+          ? `${oddsCheck.homeTeamName} vs ${oddsCheck.awayTeamName}`
+          : "none",
+      providerEventId: oddsCheck?.providerEventId ?? "none",
+      oddsStatus: mapOddsCheckToSelectionStatus(oddsCheck),
+      reasonCode: oddsCheck?.reasonCode ?? "none",
+    });
 
     // Stage 14.4A security cleanup: this used to log selection.event
     // directly (plus, on the rejected-check path, oddsCheck.note /
