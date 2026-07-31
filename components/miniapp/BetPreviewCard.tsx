@@ -46,6 +46,15 @@ export function isProviderUnavailable(oddsStatus: BetSelectionOddsStatus): boole
   return oddsStatus === "UNAVAILABLE";
 }
 
+// UI Polish — currency-suffixed Potential win display. Formatting only
+// (formatAmount already does the Decimal-safe 2-decimal string conversion
+// upstream) — this just appends the unit, never recomputes the value.
+// Exported so the requirement ("Potential win must include the currency")
+// is unit-testable without this project's absent DOM-rendering test infra.
+export function formatPotentialWin(potentialWin: number | null): string {
+  return potentialWin !== null ? `${formatAmount(potentialWin)} USDC` : "Not available";
+}
+
 // Shared preview display — used by both BetTextForm (text flow) and
 // BetScreenshotForm (screenshot flow, Stage 4.5D). Extracted out of
 // BetTextForm.tsx rather than duplicated: the two flows return the exact
@@ -75,7 +84,7 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
         className="rounded-2xl p-4"
         style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
       >
-        <PreviewRow label="Bet type" value="Single" />
+        <h3 className="mb-3 text-base font-bold text-white">Single</h3>
         <PreviewRow label="Sport" value={selection.sport} />
         <PreviewRow label="Event" value={fullEventName} wrap />
         {selection.competitionName && <PreviewRow label="Competition" value={selection.competitionName} wrap />}
@@ -94,10 +103,12 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
         <PreviewRow
           label="Submitted odds"
           value={selection.submittedOdds !== null ? formatAmount(selection.submittedOdds) : "Not provided"}
+          emphasis="prominent"
         />
         <PreviewRow
           label="Potential win"
-          value={preview.potentialWin !== null ? formatAmount(preview.potentialWin) : "Not available"}
+          value={formatPotentialWin(preview.potentialWin)}
+          emphasis="hero"
           last
         />
       </div>
@@ -132,7 +143,7 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
       className="rounded-2xl p-4"
       style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
     >
-      <PreviewRow label="Bet type" value={`Express ×${preview.selections.length}`} />
+      <h3 className="text-base font-bold text-white">Express ×{preview.selections.length}</h3>
 
       {/* Decision context (the player is about to confirm) — every
           selection is always shown, never truncated, regardless of count. */}
@@ -148,10 +159,12 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
         <PreviewRow
           label="Total odds"
           value={preview.totalOdds !== null ? formatAmount(preview.totalOdds) : "Not available"}
+          emphasis="prominent"
         />
         <PreviewRow
           label="Potential win"
-          value={preview.potentialWin !== null ? formatAmount(preview.potentialWin) : "Not available"}
+          value={formatPotentialWin(preview.potentialWin)}
+          emphasis="hero"
           last
         />
       </div>
@@ -159,21 +172,36 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
   );
 }
 
+// emphasis — UI Polish: three-tier visual hierarchy for the summary block.
+// "normal" (default) is unchanged from before this task. "prominent" (Total
+// odds / Submitted odds) is bigger/bolder than ordinary metadata but still
+// neutral-colored. "hero" (Potential win — the bottom-line figure) is the
+// most prominent, in the same accent green already used for Confirm/
+// Verified elsewhere, not a new color.
 function PreviewRow({
   label,
   value,
   wrap = false,
   last = false,
+  emphasis = "normal",
 }: {
   label: string;
   value: string;
   wrap?: boolean;
   last?: boolean;
+  emphasis?: "normal" | "prominent" | "hero";
 }) {
+  const valueClass =
+    emphasis === "hero" ? "text-lg font-bold" : emphasis === "prominent" ? "text-base font-bold" : "text-sm font-medium";
+  const valueColor = emphasis === "hero" ? "#60E84A" : "#ffffff";
+
   return (
     <div className={`flex items-start justify-between gap-3 ${last ? "" : "mb-2"}`}>
       <span className="shrink-0 text-xs text-slate-400">{label}</span>
-      <span className={`min-w-0 text-right text-sm font-medium text-white ${wrap ? "break-words" : ""}`}>
+      <span
+        className={`min-w-0 text-right ${valueClass} ${wrap ? "break-words" : ""}`}
+        style={{ color: valueColor }}
+      >
         {value}
       </span>
     </div>

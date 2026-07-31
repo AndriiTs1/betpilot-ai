@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isProviderUnavailable, PROVIDER_UNAVAILABLE_TITLE, PROVIDER_UNAVAILABLE_MESSAGE } from "./BetPreviewCard";
+import {
+  isProviderUnavailable,
+  PROVIDER_UNAVAILABLE_TITLE,
+  PROVIDER_UNAVAILABLE_MESSAGE,
+  formatPotentialWin,
+} from "./BetPreviewCard";
 import type { BetSelectionOddsStatus } from "./betPreviewApi";
 
 // This project deliberately has no DOM-rendering test infra (see
@@ -41,4 +46,24 @@ test("PROVIDER_UNAVAILABLE_TITLE/MESSAGE never imply the team wasn't found, the 
   for (const forbidden of ["not found", "doesn't exist", "does not exist", "incorrect", "edit your bet", "check the spelling"]) {
     assert.equal(combined.includes(forbidden), false, `copy must not contain: "${forbidden}"`);
   }
+});
+
+/* -------------------------------------------------------------------------- */
+/* UI Polish task — Bet Preview Cards                                         */
+/* -------------------------------------------------------------------------- */
+
+// Requirement: "Potential win must include the currency, for example
+// '16.90 USDC'." Formatting only — formatPotentialWin never recomputes the
+// value, only appends the unit to what buildBetSlipPreview.ts already
+// computed.
+test("formatPotentialWin: appends USDC to a real value, matching the exact reproduction figure from this task", () => {
+  assert.equal(formatPotentialWin(16.9), "16.90 USDC");
+});
+
+test("formatPotentialWin: null (nothing available yet) stays the existing 'Not available' text, no fabricated currency", () => {
+  assert.equal(formatPotentialWin(null), "Not available");
+});
+
+test("formatPotentialWin: zero is a real value, not treated as absent", () => {
+  assert.equal(formatPotentialWin(0), "0.00 USDC");
 });

@@ -41,11 +41,56 @@ function toNumber(value: string | number | null | undefined): number | null {
   return Number.isFinite(num) ? num : null;
 }
 
+export type OddsPresentation =
+  | { mode: "prominent"; value: number }
+  | { mode: "dual"; submitted: number; current: number }
+  | { mode: "plain"; odds: number | null; currentOdds: number | null };
+
+// UI Polish — the odds-presentation decision, extracted as a pure function
+// so it's unit-testable without this project's deliberately absent
+// DOM-rendering test infra (same pattern as BetPreviewCard.tsx's
+// isProviderUnavailable). Never returns "prominent" for anything other than
+// VERIFIED — an unavailable/unverified selection must never render a value
+// that looks like a confirmed price (see this file's own test suite).
+export function getOddsPresentation(
+  oddsStatus: string | null | undefined,
+  odds: number | null,
+  currentOdds: number | null,
+): OddsPresentation {
+  const isVerified = oddsStatus === "VERIFIED";
+  const isChanged = oddsStatus === "ODDS_CHANGED";
+  const prominentOdds = currentOdds ?? odds;
+
+  if (isVerified && prominentOdds !== null) {
+    return { mode: "prominent", value: prominentOdds };
+  }
+  if (isChanged && odds !== null && currentOdds !== null) {
+    return { mode: "dual", submitted: odds, current: currentOdds };
+  }
+  return { mode: "plain", odds, currentOdds };
+}
+
 export default function SelectionRow({ selection, legLabel, showStatus = true }: SelectionRowProps) {
   const odds = toNumber(selection.odds);
   const currentOdds = showStatus ? toNumber(selection.currentOdds) : null;
   const statusBadge = showStatus ? getOddsStatusBadge(selection.oddsStatus) : null;
   const eventDateTime = formatEventDateTime(selection.eventStartTime);
+
+  // Reuses statusBadge.color computed above (one source of truth for status
+  // color, same as the badge pill) rather than inventing a new palette.
+  // Text labels ("Submitted"/"Current"/"Odds") are the accessible signal in
+  // every branch — color is only ever a secondary cue, never the sole
+  // indicator.
+  const statusColor = statusBadge?.color ?? "#ffffff";
+  // Scoped to decision contexts only (showStatus=true — Preview/
+  // Confirmation Ticket/Pending Queue): a review-context row (Active Bets/
+  // History/PlayerCard, showStatus=false) must render byte-for-byte as it
+  // did before this task, even for a VERIFIED historical selection — never
+  // call getOddsPresentation there, since oddsStatus alone (without the
+  // showStatus gate) can't distinguish the two contexts.
+  const presentation: OddsPresentation = showStatus
+    ? getOddsPresentation(selection.oddsStatus, odds, currentOdds)
+    : { mode: "plain", odds, currentOdds: null };
 
   return (
     <div
@@ -87,10 +132,34 @@ export default function SelectionRow({ selection, legLabel, showStatus = true }:
             {selection.market ? ` · ${selection.market}` : ""}
           </p>
 
-          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
-            <span>Odds: {odds !== null ? formatAmount(odds) : "—"}</span>
-            {showStatus && currentOdds !== null && <span>Current: {formatAmount(currentOdds)}</span>}
-          </div>
+          {presentation.mode === "prominent" ? (
+            // Submitted odds equal (or were promoted from) the verified
+            // current price — showing both fields would just repeat the
+            // same number twice, so this collapses to one prominent value.
+            <div className="mt-1.5 flex items-baseline gap-1.5">
+              <span className="text-xs text-slate-500">Odds</span>
+              <span className="text-base font-bold" style={{ color: statusColor }}>
+                {formatAmount(presentation.value)}
+              </span>
+            </div>
+          ) : presentation.mode === "dual" ? (
+            // Genuinely different values — both stay visible, clearly
+            // labeled; the current price is the prominent one since that's
+            // what re-confirming would accept.
+            <div className="mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              <span className="text-xs text-slate-500">Submitted {formatAmount(presentation.submitted)}</span>
+              <span className="text-base font-bold" style={{ color: statusColor }}>
+                Current {formatAmount(presentation.current)}
+              </span>
+            </div>
+          ) : (
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+              <span>Odds: {presentation.odds !== null ? formatAmount(presentation.odds) : "—"}</span>
+              {showStatus && presentation.currentOdds !== null && (
+                <span>Current: {formatAmount(presentation.currentOdds)}</span>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
