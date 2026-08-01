@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { TheOddsApiProvider } from "./theOddsApiProvider";
 import type { CanonicalEvent, CanonicalSelection } from "./domain";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
-import type { OddsVerificationInput } from "./oddsVerifier";
+import type { OddsVerificationInput, TotalsVerificationInput } from "./oddsVerifier";
 
 const FOOTBALL_EVENT: CanonicalEvent = {
   sport: "FOOTBALL",
@@ -42,6 +42,27 @@ function capturingVerifyOddsFn(result: OddsCheckResult) {
   return { fn, calls };
 }
 
+// Betting Markets V1, Phase 3.3 — same capturing-fake shape as
+// capturingVerifyOddsFn above, for the new, independently-injected
+// verifyTotalsOddsFn constructor parameter.
+function capturingVerifyTotalsOddsFn(result: OddsCheckResult) {
+  const calls: TotalsVerificationInput[] = [];
+  const fn = async (input: TotalsVerificationInput): Promise<OddsCheckResult> => {
+    calls.push(input);
+    return result;
+  };
+  return { fn, calls };
+}
+
+// A verifyOddsFn that always throws — used to prove a TOTALS selection
+// never reaches this (the h2h) function at all, complementing the
+// totals-capturing helper above.
+function throwingVerifyOddsFn(): typeof import("./oddsVerifier").verifyOdds {
+  return (async () => {
+    throw new Error("verifyOddsFn (h2h) must never be called for a TOTALS selection");
+  }) as typeof import("./oddsVerifier").verifyOdds;
+}
+
 function baseLegacyResult(overrides: Partial<OddsCheckResult>): OddsCheckResult {
   return {
     matched: false,
@@ -72,12 +93,12 @@ test("capabilities: only the four current MVP sports plus American Football are 
   assert.ok(!capabilities.supportedSports.includes("UNKNOWN"));
 });
 
-test("capabilities: only moneyline markets are advertised — totals/spread/BTTS/double-chance are not current", () => {
+test("capabilities: moneyline + totals markets are advertised — spread/BTTS/double-chance are not current (Betting Markets V1, Phase 3.3 — TOTALS now intentionally supported)", () => {
   const provider = new TheOddsApiProvider();
   const capabilities = provider.getCapabilities();
 
-  assert.deepEqual(capabilities.supportedMarketTypes.slice().sort(), ["MONEYLINE_2WAY", "MONEYLINE_3WAY"].sort());
-  for (const notCurrent of ["TOTALS", "SPREAD", "BOTH_TEAMS_TO_SCORE", "DOUBLE_CHANCE"] as const) {
+  assert.deepEqual(capabilities.supportedMarketTypes.slice().sort(), ["MONEYLINE_2WAY", "MONEYLINE_3WAY", "TOTALS"].sort());
+  for (const notCurrent of ["SPREAD", "BOTH_TEAMS_TO_SCORE", "DOUBLE_CHANCE"] as const) {
     assert.ok(!capabilities.supportedMarketTypes.includes(notCurrent), `${notCurrent} must not be advertised as current`);
   }
 });
@@ -365,12 +386,25 @@ test("adapter mapping: request-level submittedOdds overrides selection.submitted
   assert.equal(calls[0].odds, 3.0);
 });
 
-test("adapter mapping: an unsupported market (TOTALS) never reaches the legacy verifier — FAILED/MARKET_NOT_SUPPORTED", async () => {
+test("adapter mapping: an unsupported market (SPREAD) never reaches the legacy verifier — FAILED/MARKET_NOT_SUPPORTED", async () => {
   const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({}));
   const provider = new TheOddsApiProvider(fn);
 
   const result = await provider.verifySelection({
-    selection: moneyline3Way({ marketType: "TOTALS", selectionType: "OVER", line: "2.5" }),
+    selection: moneyline3Way({ marketType: "SPREAD", selectionType: "HOME", participant: { name: "Manchester United" }, line: "-1.5" }),
+  });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED");
+  assert.equal(calls.length, 0);
+});
+
+test("adapter mapping: TOTALS for a non-football sport is not yet supported — FAILED/MARKET_NOT_SUPPORTED, football-only this phase (Betting Markets V1, Phase 3.3)", async () => {
+  const { fn, calls } = capturingVerifyTotalsOddsFn(baseLegacyResult({}));
+  const provider = new TheOddsApiProvider(throwingVerifyOddsFn(), fn);
+
+  const result = await provider.verifySelection({
+    selection: moneyline3Way({ sport: "BASKETBALL", event: { ...FOOTBALL_EVENT, sport: "BASKETBALL" }, marketType: "TOTALS", selectionType: "OVER", line: "220.5" }),
   });
 
   assert.equal(result.status, "FAILED");
@@ -480,6 +514,10 @@ test("adapter mapping: matchedOutcome IS populated from the canonical selection 
     period: "FULL_GAME",
     selectionType: "HOME",
     participant: undefined,
+    // Betting Markets V1, Phase 3.3 — line is now always present on
+    // ProviderOutcome (undefined for every non-TOTALS market, populated
+    // only for TOTALS — see buildMatchedOutcome's own comment).
+    line: undefined,
     currentOdds: "2",
     bookmaker: "Pinnacle",
     marketReference: { provider: "THE_ODDS_API", marketKey: "h2h" },
@@ -494,6 +532,114 @@ test("adapter mapping: a null legacy bookmaker never becomes a fabricated string
   const result = await provider.verifySelection({ selection: moneyline3Way() });
 
   assert.equal(result.bookmaker, undefined);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Betting Markets V1, Phase 3.3 — TOTALS routed through verifyTotalsOddsFn   */
+/* -------------------------------------------------------------------------- */
+
+function totalsSelection(overrides: Partial<CanonicalSelection> = {}): CanonicalSelection {
+  return {
+    sport: "FOOTBALL",
+    event: FOOTBALL_EVENT,
+    marketType: "TOTALS",
+    period: "FULL_GAME",
+    selectionType: "OVER",
+    line: "2.5",
+    submittedOdds: "1.9",
+    ...overrides,
+  };
+}
+
+test("adapter mapping: TOTALS routes to verifyTotalsOddsFn, never verifyOddsFn (h2h)", async () => {
+  const { fn: totalsFn, calls: totalsCalls } = capturingVerifyTotalsOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9, bookmaker: "Pinnacle" }),
+  );
+  const provider = new TheOddsApiProvider(throwingVerifyOddsFn(), totalsFn);
+
+  const result = await provider.verifySelection({ selection: totalsSelection() });
+
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(totalsCalls.length, 1);
+  assert.equal(totalsCalls[0].direction, "OVER");
+  assert.equal(totalsCalls[0].line, "2.5");
+  assert.equal(totalsCalls[0].sport, "football");
+  assert.equal(totalsCalls[0].event, "Manchester United vs Chelsea");
+  assert.equal(totalsCalls[0].odds, 1.9);
+});
+
+test("adapter mapping: TOTALS UNDER routes direction through correctly", async () => {
+  const { fn: totalsFn, calls: totalsCalls } = capturingVerifyTotalsOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.95, bookmaker: "Pinnacle" }),
+  );
+  const provider = new TheOddsApiProvider(throwingVerifyOddsFn(), totalsFn);
+
+  await provider.verifySelection({ selection: totalsSelection({ selectionType: "UNDER", line: "3.5" }) });
+
+  assert.equal(totalsCalls[0].direction, "UNDER");
+  assert.equal(totalsCalls[0].line, "3.5");
+});
+
+test("adapter mapping: TOTALS VERIFIED result carries matchedOutcome with marketReference.marketKey 'totals' and the canonical line", async () => {
+  const { fn: totalsFn } = capturingVerifyTotalsOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9, bookmaker: "Pinnacle" }),
+  );
+  const provider = new TheOddsApiProvider(throwingVerifyOddsFn(), totalsFn);
+
+  const result = await provider.verifySelection({ selection: totalsSelection() });
+
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(result.matchedOutcome?.marketType, "TOTALS");
+  assert.equal(result.matchedOutcome?.selectionType, "OVER");
+  assert.equal(result.matchedOutcome?.line, "2.5");
+  assert.deepEqual(result.matchedOutcome?.marketReference, { provider: "THE_ODDS_API", marketKey: "totals" });
+});
+
+test("adapter mapping: TOTALS ODDS_CHANGED when the legacy result is matched but outside tolerance", async () => {
+  const { fn: totalsFn } = capturingVerifyTotalsOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: false, sourceOdds: 2.5, bookmaker: "Pinnacle", discrepancyPercent: 31.58 }),
+  );
+  const provider = new TheOddsApiProvider(throwingVerifyOddsFn(), totalsFn);
+
+  const result = await provider.verifySelection({ selection: totalsSelection() });
+
+  assert.equal(result.status, "ODDS_CHANGED");
+  assert.equal(result.currentOdds, "2.5");
+});
+
+test("adapter mapping: a TOTALS-specific legacy failure note classifies to FAILED/SELECTION_NOT_FOUND, never a misleading VERIFIED", async () => {
+  const { fn: totalsFn } = capturingVerifyTotalsOddsFn(
+    baseLegacyResult({ note: 'Could not match totals selection "OVER 2.5" for "Manchester United vs Chelsea" (LINE_NOT_AVAILABLE)' }),
+  );
+  const provider = new TheOddsApiProvider(throwingVerifyOddsFn(), totalsFn);
+
+  const result = await provider.verifySelection({ selection: totalsSelection() });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "SELECTION_NOT_FOUND");
+});
+
+test("adapter mapping: TOTALS event-not-found classifies identically to h2h's own EVENT_NOT_FOUND", async () => {
+  const { fn: totalsFn } = capturingVerifyTotalsOddsFn(
+    baseLegacyResult({ note: 'No matching event found for "Manchester United vs Chelsea" in soccer_epl' }),
+  );
+  const provider = new TheOddsApiProvider(throwingVerifyOddsFn(), totalsFn);
+
+  const result = await provider.verifySelection({ selection: totalsSelection() });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "EVENT_NOT_FOUND");
+});
+
+test("adapter mapping: TOTALS with no line at all fails structural validation (INVALID_INPUT) before ever reaching verifyTotalsOddsFn", async () => {
+  const { fn: totalsFn, calls } = capturingVerifyTotalsOddsFn(baseLegacyResult({}));
+  const provider = new TheOddsApiProvider(throwingVerifyOddsFn(), totalsFn);
+
+  const result = await provider.verifySelection({ selection: totalsSelection({ line: undefined }) });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "INVALID_INPUT");
+  assert.equal(calls.length, 0);
 });
 
 /* -------------------------------------------------------------------------- */

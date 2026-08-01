@@ -736,21 +736,28 @@ function extractProviderEventMetadata(event: OddsApiEvent): ProviderEventMetadat
 /* Public entry point                                                          */
 /* -------------------------------------------------------------------------- */
 
-export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckResult> {
-  const baseResult: OddsCheckResult = {
-    matched: false,
-    withinTolerance: null,
-    sourceOdds: null,
-    submittedOdds: bet.odds,
-    discrepancyPercent: null,
-    bookmaker: null,
-    note: null,
-  };
+/* -------------------------------------------------------------------------- */
+/* Betting Markets V1, Phase 3.3 — shared sport_key resolution + fetch +      */
+/* dedupe + event matching, extracted (pure relocation, no behavior change)   */
+/* from verifyOdds()'s own body so verifyTotalsOdds() below can reuse the     */
+/* IDENTICAL algorithm — same sport_key aliasing, same multi-key merge/       */
+/* dedupe, same findMatchingEvent scoring — with only the market key          */
+/* requested from fetchOddsForSport differing. Every note string, every log   */
+/* call, every dedupe step is byte-for-byte what verifyOdds() already had.    */
+/* -------------------------------------------------------------------------- */
 
-  const sportKeys = getSportKeys(bet.sport);
+type ResolvedEventResult =
+  | { readonly kind: "RESOLVED"; readonly event: OddsApiEvent; readonly providerMetadata: Partial<ProviderEventMetadata> }
+  | { readonly kind: "NO_SPORT_KEYS" }
+  | { readonly kind: "FETCH_FAILED"; readonly note: string }
+  | { readonly kind: "NOT_FOUND"; readonly sportKeys: string[] }
+  | { readonly kind: "AMBIGUOUS" };
+
+async function resolveMatchedEvent(sport: string, eventText: string, market: OddsApiMarketKey): Promise<ResolvedEventResult> {
+  const sportKeys = getSportKeys(sport);
 
   if (!sportKeys) {
-    return { ...baseResult, note: `Sport/league "${bet.sport}" is not mapped to a The Odds API sport_key` };
+    return { kind: "NO_SPORT_KEYS" };
   }
 
   // Single-key sports (football/basketball/etc.) make exactly the one
@@ -765,7 +772,7 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
   for (const sportKey of sportKeys) {
     const fetchStartedAt = Date.now();
     try {
-      const fetched = await fetchOddsForSport(sportKey, "h2h");
+      const fetched = await fetchOddsForSport(sportKey, market);
       // Tag every event from this fetch with the exact sport_key that
       // produced it, before merging into the shared `events` array — once
       // merged, array position/order no longer distinguishes which key an
@@ -801,7 +808,7 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
   }
 
   if (successCount === 0 && lastFetchError) {
-    return { ...baseResult, note: lastFetchError };
+    return { kind: "FETCH_FAILED", note: lastFetchError };
   }
 
   // Step 16A — dedupe by provider event id before matching: a football
@@ -819,27 +826,57 @@ export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckR
   // never produces a false AMBIGUOUS_EVENT.
   const dedupedEvents = dedupeEventsSemantically(dedupedById);
 
-  const matchResult = findMatchingEvent(dedupedEvents, bet.event);
+  const matchResult = findMatchingEvent(dedupedEvents, eventText);
 
   if (matchResult.kind === "NOT_FOUND") {
-    return { ...baseResult, note: `No matching event found for "${bet.event}" in ${sportKeys.join(", ")}` };
+    return { kind: "NOT_FOUND", sportKeys };
   }
 
   if (matchResult.kind === "AMBIGUOUS") {
-    return { ...baseResult, note: `Ambiguous event match for "${bet.event}" across multiple leagues` };
+    return { kind: "AMBIGUOUS" };
   }
 
   const event = matchResult.event;
 
   // Stage 3.1 — computed once, right after the event is unambiguously
-  // resolved, and spread into every return branch from this point on
-  // (including the two failure branches immediately below, where the event
-  // itself WAS found even though bookmaker/selection matching then failed)
-  // — never into baseResult or any branch above this line, where no event
-  // was ever resolved at all. `?? {}` spreads nothing when metadata is
-  // null (an invalid/missing commence_time), rather than spreading
-  // `providerEventId: undefined` explicitly.
+  // resolved. `?? {}` spreads nothing when metadata is null (an invalid/
+  // missing commence_time), rather than spreading `providerEventId:
+  // undefined` explicitly.
   const providerMetadata = extractProviderEventMetadata(event) ?? {};
+
+  return { kind: "RESOLVED", event, providerMetadata };
+}
+
+export async function verifyOdds(bet: OddsVerificationInput): Promise<OddsCheckResult> {
+  const baseResult: OddsCheckResult = {
+    matched: false,
+    withinTolerance: null,
+    sourceOdds: null,
+    submittedOdds: bet.odds,
+    discrepancyPercent: null,
+    bookmaker: null,
+    note: null,
+  };
+
+  const resolved = await resolveMatchedEvent(bet.sport, bet.event, "h2h");
+
+  if (resolved.kind === "NO_SPORT_KEYS") {
+    return { ...baseResult, note: `Sport/league "${bet.sport}" is not mapped to a The Odds API sport_key` };
+  }
+
+  if (resolved.kind === "FETCH_FAILED") {
+    return { ...baseResult, note: resolved.note };
+  }
+
+  if (resolved.kind === "NOT_FOUND") {
+    return { ...baseResult, note: `No matching event found for "${bet.event}" in ${resolved.sportKeys.join(", ")}` };
+  }
+
+  if (resolved.kind === "AMBIGUOUS") {
+    return { ...baseResult, note: `Ambiguous event match for "${bet.event}" across multiple leagues` };
+  }
+
+  const { event, providerMetadata } = resolved;
 
   const bookmakerPick = pickBookmaker(event);
 
@@ -1055,4 +1092,113 @@ export function findTotalsOutcome(
   if (sawMissingPoint) return { kind: "MISSING_POINT" };
   if (sawMalformedPoint) return { kind: "MALFORMED_POINT" };
   return { kind: "LINE_NOT_AVAILABLE" };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Betting Markets V1, Phase 3.3 — Totals verification entry point.           */
+/* Mirrors verifyOdds()'s own structure and OddsCheckResult shape exactly     */
+/* (same VERIFIED/ODDS_CHANGED tolerance math, same fallback-bookmaker note   */
+/* convention) — reuses resolveMatchedEvent() (market="totals") for event     */
+/* resolution and findTotalsOutcome() (Phase 3.1, unmodified) for the         */
+/* market/outcome/point lookup, instead of extractOutcomePrice()'s h2h-only   */
+/* logic. Called by TheOddsApiProvider.verifySelection() when                 */
+/* selection.marketType === "TOTALS" — see that file's own Phase 3.3          */
+/* comments for the routing decision.                                        */
+/* -------------------------------------------------------------------------- */
+
+export interface TotalsVerificationInput {
+  sport: string;
+  event: string;
+  direction: TotalsDirection;
+  // Decimal string — the caller (TheOddsApiProvider.verifySelection) only
+  // ever supplies this after validateCanonicalSelection has already
+  // confirmed TOTALS has a present, decimal-shaped line; findTotalsOutcome's
+  // own INVALID_REQUESTED_LINE defense-in-depth check still applies here
+  // regardless, exactly as it does for any other caller.
+  line: string;
+  odds: number | null;
+}
+
+export async function verifyTotalsOdds(bet: TotalsVerificationInput): Promise<OddsCheckResult> {
+  const baseResult: OddsCheckResult = {
+    matched: false,
+    withinTolerance: null,
+    sourceOdds: null,
+    submittedOdds: bet.odds,
+    discrepancyPercent: null,
+    bookmaker: null,
+    note: null,
+  };
+
+  const resolved = await resolveMatchedEvent(bet.sport, bet.event, "totals");
+
+  if (resolved.kind === "NO_SPORT_KEYS") {
+    return { ...baseResult, note: `Sport/league "${bet.sport}" is not mapped to a The Odds API sport_key` };
+  }
+
+  if (resolved.kind === "FETCH_FAILED") {
+    return { ...baseResult, note: resolved.note };
+  }
+
+  if (resolved.kind === "NOT_FOUND") {
+    return { ...baseResult, note: `No matching event found for "${bet.event}" in ${resolved.sportKeys.join(", ")}` };
+  }
+
+  if (resolved.kind === "AMBIGUOUS") {
+    return { ...baseResult, note: `Ambiguous event match for "${bet.event}" across multiple leagues` };
+  }
+
+  const { event, providerMetadata } = resolved;
+
+  const lookup = findTotalsOutcome(event, bet.direction, bet.line);
+
+  if (lookup.kind !== "MATCHED") {
+    // A single, short, parseable note template covering every non-matched
+    // lookup kind (MARKET_ABSENT/OUTCOME_ABSENT/LINE_NOT_AVAILABLE/
+    // MISSING_POINT/MALFORMED_POINT/NO_BOOKMAKER/INVALID_REQUESTED_LINE) —
+    // mirrors the "provider's own short error_code" convention
+    // classifyLegacyFailureNote (theOddsApiProvider.ts) already uses for
+    // HTTP failures, rather than five separate note templates that would
+    // all classify to the same reason code anyway (see that file's own
+    // Phase 3.3 comment on classifyLegacyFailureNote). Never a "closest
+    // line" fallback — findTotalsOutcome itself already guarantees that.
+    return {
+      ...baseResult,
+      ...providerMetadata,
+      note: `Could not match totals selection "${bet.direction} ${bet.line}" for "${bet.event}" (${lookup.kind})`,
+    };
+  }
+
+  const price = lookup.price;
+  const bookmaker = lookup.bookmaker;
+
+  // Step 15G-equivalent — no odds were submitted to compare price against:
+  // the provider's own found price is adopted as both sourceOdds and
+  // submittedOdds, trivially "within tolerance" of itself. Same convention
+  // as verifyOdds()'s own null-odds branch.
+  if (bet.odds === null) {
+    return {
+      matched: true,
+      withinTolerance: true,
+      sourceOdds: price,
+      submittedOdds: price,
+      discrepancyPercent: 0,
+      bookmaker,
+      note: lookup.isFallbackBookmaker ? `Pinnacle odds unavailable — using ${bookmaker} instead` : null,
+      ...providerMetadata,
+    };
+  }
+
+  const discrepancyPercent = Number((((bet.odds - price) / price) * 100).toFixed(2));
+
+  return {
+    matched: true,
+    withinTolerance: Math.abs(discrepancyPercent) <= ODDS_TOLERANCE_PERCENT,
+    sourceOdds: price,
+    submittedOdds: bet.odds,
+    discrepancyPercent,
+    bookmaker,
+    note: lookup.isFallbackBookmaker ? `Pinnacle odds unavailable — using ${bookmaker} instead` : null,
+    ...providerMetadata,
+  };
 }

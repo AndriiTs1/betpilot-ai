@@ -97,6 +97,14 @@ export interface BetSlipPreviewSelection {
   event: string;
   market: string | null;
   selection: string;
+  // Betting Markets V1, Phase 3.3 — the numeric line for a TOTALS selection
+  // (e.g. "2.5"), when one was stated. Sourced from the same canonical
+  // request the odds check itself was verified against (requests[index]'s
+  // CanonicalSelection.line), not from the odds-check response — a
+  // player's requested line is part of what they asked for, shown
+  // regardless of whether verification succeeded. null for MONEYLINE/DRAW
+  // and for a Totals selection that stated no line at all.
+  line: string | null;
   submittedOdds: number | null;
   currentOdds: number | null;
   oddsStatus: BetSelectionOddsStatus;
@@ -349,6 +357,7 @@ export async function buildBetSlipPreview(
       event: formatFullEventName(selection.event, oddsCheck?.homeTeamName ?? null, oddsCheck?.awayTeamName ?? null),
       market: selection.market,
       selection: selection.selection,
+      line: requests[index]?.selection.line ?? null,
       submittedOdds: effectiveSubmittedOdds,
       currentOdds: oddsCheck?.sourceOdds ?? null,
       oddsStatus: mapOddsCheckToSelectionStatus(oddsCheck),

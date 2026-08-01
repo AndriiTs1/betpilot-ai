@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildBetSlipPreview, BetSlipValidationError, BuildBetSlipPreviewConfigError } from "./buildBetSlipPreview";
 import type { ParsedBetSlip } from "./betSlip";
-import type { OddsVerificationInput } from "@/lib/odds/oddsVerifier";
+import type { OddsVerificationInput, TotalsVerificationInput } from "@/lib/odds/oddsVerifier";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { verifyPreviewToken, verifyExpressPreviewToken } from "@/lib/betPreview/previewToken";
 import { OddsVerificationService } from "@/lib/odds/oddsVerificationService";
@@ -57,6 +57,30 @@ function fakeVerifyOddsFn(byEvent: Record<string, OddsCheckResult | "reject">) {
     if (outcome === "reject") throw new Error(`Simulated odds-check failure for "${input.event}"`);
     return outcome;
   };
+}
+
+// Betting Markets V1, Phase 3.3 — same keyed-by-event-name fake shape as
+// fakeVerifyOddsFn above, for the independent totals verification seam.
+// Wired in via a real TheOddsApiProvider (constructor's second argument),
+// passed to buildBetSlipPreview through the existing
+// options.oddsVerificationService seam — no new option needed, since that
+// seam already accepts any OddsVerificationService-shaped dependency.
+function fakeVerifyTotalsOddsFn(byEvent: Record<string, OddsCheckResult | "reject">) {
+  return async (input: TotalsVerificationInput): Promise<OddsCheckResult> => {
+    const outcome = byEvent[input.event];
+    if (outcome === undefined) throw new Error(`No fake totals outcome configured for event "${input.event}"`);
+    if (outcome === "reject") throw new Error(`Simulated totals odds-check failure for "${input.event}"`);
+    return outcome;
+  };
+}
+
+function totalsAwareVerificationService(
+  h2hByEvent: Record<string, OddsCheckResult | "reject">,
+  totalsByEvent: Record<string, OddsCheckResult | "reject">,
+): OddsVerificationService {
+  return new OddsVerificationService(
+    new TheOddsApiProvider(fakeVerifyOddsFn(h2hByEvent), fakeVerifyTotalsOddsFn(totalsByEvent)),
+  );
 }
 
 function singleSlip(submittedOdds: number | null): ParsedBetSlip {
@@ -1299,7 +1323,7 @@ test("Stage 3.1 EXPRESS: a leg whose provider check failed carries null provider
     stake: 50,
     selections: [
       { sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: 1.8 },
-      { sport: "Football", event: "Inter vs Juventus", market: null, selection: "Over 2.5", submittedOdds: 1.7 },
+      { sport: "Football", event: "Inter vs Juventus", market: null, selection: "Juventus", submittedOdds: 1.7 },
     ],
   };
 
@@ -1313,4 +1337,191 @@ test("Stage 3.1 EXPRESS: a leg whose provider check failed carries null provider
   // No token is signed (one leg is NOT_FOUND, a blocking status), same
   // existing rule as before this stage — nothing token-related to assert.
   assert.equal(result.preview.selections[1].oddsStatus, "NOT_FOUND");
+});
+
+/* ============================================================================
+ * Betting Markets V1, Phase 3.3 — Totals verification wired into the shared
+ * preview pipeline. No separate preview implementation: every test below
+ * goes through the exact same buildBetSlipPreview() function every other
+ * test in this file does.
+ * ============================================================================ */
+
+test("buildBetSlipPreview: SINGLE Over 2.5 preview shows full fixture, direction, line, verified odds, stake, and potential win", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 20,
+    selections: [
+      { sport: "Football", event: "Arsenal vs Chelsea", market: "Total Goals", selection: "Over 2.5", line: "2.5", submittedOdds: 1.9 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: totalsAwareVerificationService({}, {
+      "Arsenal vs Chelsea": {
+        ...verifiedWithProviderMetadata(1.9, 1.9, "evt-totals-single", "soccer_epl", "2026-08-15T18:00:00.000Z"),
+        homeTeamName: "Arsenal",
+        awayTeamName: "Chelsea",
+      },
+    }),
+  });
+
+  const selection = result.preview.selections[0];
+  assert.equal(selection.event, "Arsenal — Chelsea", "full resolved fixture, from the provider's own team names");
+  assert.equal(selection.selection, "Over 2.5", "the player's Over/Under intent");
+  assert.equal(selection.line, "2.5");
+  assert.equal(selection.oddsStatus, "VERIFIED");
+  assert.equal(selection.currentOdds, 1.9);
+  assert.equal(result.preview.stake, 20);
+  assert.equal(result.preview.potentialWin, 38); // 20 * 1.9
+  assert.equal(typeof result.previewToken, "string");
+  assert.ok(result.previewToken && result.previewToken.length > 0);
+});
+
+test("buildBetSlipPreview: SINGLE Under 2.5 VERIFIED", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 20,
+    selections: [
+      { sport: "Football", event: "Arsenal vs Chelsea", market: null, selection: "Under 2.5", line: "2.5", submittedOdds: 2.0 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: totalsAwareVerificationService({}, { "Arsenal vs Chelsea": verified(2.0, 2.0) }),
+  });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[0].line, "2.5");
+});
+
+test("buildBetSlipPreview: SINGLE Totals ODDS_CHANGED when the provider's current price differs beyond tolerance", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 20,
+    selections: [
+      { sport: "Football", event: "Arsenal vs Chelsea", market: null, selection: "Over 2.5", line: "2.5", submittedOdds: 1.9 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: totalsAwareVerificationService({}, { "Arsenal vs Chelsea": oddsChanged(2.5, 1.9) }),
+  });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "ODDS_CHANGED");
+});
+
+test("buildBetSlipPreview: SINGLE Totals token carries canonicalMarketType/canonicalSelectionType/canonicalLine", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 20,
+    selections: [
+      { sport: "Football", event: "Arsenal vs Chelsea", market: null, selection: "Over 2.5", line: "2.5", submittedOdds: 1.9 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: totalsAwareVerificationService({}, { "Arsenal vs Chelsea": verifiedWithProviderMetadata(1.9, 1.9, "evt-token-totals", "soccer_epl", "2026-08-15T18:00:00.000Z") }),
+  });
+
+  assert.ok(result.previewToken);
+  const verified_ = verifyPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verified_.ok, true);
+  if (!verified_.ok) return;
+
+  assert.equal(verified_.payload.canonicalMarketType, "TOTALS");
+  assert.equal(verified_.payload.canonicalSelectionType, "OVER");
+  assert.equal(verified_.payload.canonicalLine, "2.5");
+});
+
+test("buildBetSlipPreview: EXPRESS with two Totals legs — both verify through the same shared pipeline", async () => {
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 30,
+    selections: [
+      { sport: "Football", event: "Arsenal vs Chelsea", market: null, selection: "Over 2.5", line: "2.5", submittedOdds: 1.9 },
+      { sport: "Football", event: "Inter vs Juventus", market: null, selection: "Under 3.5", line: "3.5", submittedOdds: 1.8 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: totalsAwareVerificationService({}, {
+      // providerEventId must be present for the canonical fields to enter
+      // the token at all — buildProviderTokenFields' own "gated as one
+      // atomic unit" rule (buildBetSlipPreview.ts).
+      "Arsenal vs Chelsea": verifiedWithProviderMetadata(1.9, 1.9, "evt-express-totals-1", "soccer_epl", "2026-08-15T18:00:00.000Z"),
+      "Inter vs Juventus": verifiedWithProviderMetadata(1.8, 1.8, "evt-express-totals-2", "soccer_italy_serie_a", "2026-08-16T20:00:00.000Z"),
+    }),
+  });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[0].line, "2.5");
+  assert.equal(result.preview.selections[1].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[1].line, "3.5");
+  assert.ok(result.previewToken);
+
+  const verified_ = verifyExpressPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verified_.ok, true);
+  if (!verified_.ok) return;
+  assert.equal(verified_.payload.selections[0].canonicalMarketType, "TOTALS");
+  assert.equal(verified_.payload.selections[0].canonicalLine, "2.5");
+  assert.equal(verified_.payload.selections[1].canonicalMarketType, "TOTALS");
+  assert.equal(verified_.payload.selections[1].canonicalLine, "3.5");
+});
+
+test("buildBetSlipPreview: mixed EXPRESS with MONEYLINE + TOTALS legs — each routes through its own provider seam correctly", async () => {
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 30,
+    selections: [
+      { sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: 1.8 },
+      { sport: "Football", event: "Arsenal vs Chelsea", market: null, selection: "Over 2.5", line: "2.5", submittedOdds: 1.9 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: totalsAwareVerificationService(
+      { "Real Madrid vs Barcelona": verifiedWithProviderMetadata(1.8, 1.8, "evt-mixed-moneyline", "soccer_spain_la_liga", "2026-08-20T19:00:00.000Z") },
+      { "Arsenal vs Chelsea": verifiedWithProviderMetadata(1.9, 1.9, "evt-mixed-totals", "soccer_epl", "2026-08-15T18:00:00.000Z") },
+    ),
+  });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[0].line, null, "MONEYLINE leg has no line");
+  assert.equal(result.preview.selections[1].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[1].line, "2.5");
+
+  const verified_ = verifyExpressPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verified_.ok, true);
+  if (!verified_.ok) return;
+  assert.equal(verified_.payload.selections[0].canonicalMarketType, "MONEYLINE_2WAY");
+  assert.equal(verified_.payload.selections[0].canonicalLine, null);
+  assert.equal(verified_.payload.selections[1].canonicalMarketType, "TOTALS");
+  assert.equal(verified_.payload.selections[1].canonicalLine, "2.5");
+});
+
+test("buildBetSlipPreview: Totals FAILED (line not offered) never becomes a misleading VERIFIED", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 20,
+    selections: [
+      { sport: "Football", event: "Arsenal vs Chelsea", market: null, selection: "Over 2.5", line: "2.5", submittedOdds: 1.9 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: totalsAwareVerificationService({}, {
+      "Arsenal vs Chelsea": {
+        matched: false,
+        withinTolerance: null,
+        sourceOdds: null,
+        submittedOdds: 1.9,
+        discrepancyPercent: null,
+        bookmaker: null,
+        note: 'Could not match totals selection "OVER 2.5" for "Arsenal vs Chelsea" (LINE_NOT_AVAILABLE)',
+      },
+    }),
+  });
+
+  assert.notEqual(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[0].oddsStatus, "NOT_FOUND");
 });

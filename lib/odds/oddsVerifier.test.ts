@@ -4,6 +4,7 @@ import {
   verifyOdds,
   fetchTotalsOddsForSport,
   findTotalsOutcome,
+  verifyTotalsOdds,
   type OddsVerificationInput,
   type OddsApiEvent,
   type OddsApiBookmaker,
@@ -1426,4 +1427,144 @@ test("Phase 3.1 lookup: fallback bookmaker behavior remains correct — no Pinna
   assert.equal(result.bookmaker, "Bet365", "must fall back to the first bookmaker (bet365), same rule as h2h's pickBookmaker()");
   assert.equal(result.price, 1.8);
   assert.equal(result.isFallbackBookmaker, true);
+});
+
+/* ============================================================================
+ * Betting Markets V1, Phase 3.3 — verifyTotalsOdds(): the full fetch ->
+ * event-match -> findTotalsOutcome pipeline, mirroring verifyOdds()'s own
+ * end-to-end shape. "premier league" (single sport_key) is used throughout,
+ * same reasoning as the Phase 3.1 cache test above (generic "football" fans
+ * out across 7 competitions, which would obscure what each test is actually
+ * proving).
+ * ============================================================================ */
+
+function totalsFetchEvent(id: string, homeTeam: string, awayTeam: string, bookmakers: OddsApiBookmaker[]): unknown {
+  return { id, home_team: homeTeam, away_team: awayTeam, bookmakers };
+}
+
+test("verifyTotalsOdds: SINGLE Over 2.5 VERIFIED — submitted odds matches the provider's price within tolerance", async () => {
+  mockEvents([
+    totalsFetchEvent("evt-totals-over", "Arsenal", "Chelsea", [pinnacleTotalsBookmaker([totalsOutcome("Over", 1.9, 2.5), totalsOutcome("Under", 1.9, 2.5)])]),
+  ]);
+
+  const result = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Chelsea", direction: "OVER", line: "2.5", odds: 1.9 });
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(result.withinTolerance, true);
+  assert.equal(result.sourceOdds, 1.9);
+  assert.equal(result.discrepancyPercent, 0);
+});
+
+test("verifyTotalsOdds: SINGLE Under 2.5 VERIFIED — submitted odds matches the provider's price within tolerance", async () => {
+  mockEvents([
+    totalsFetchEvent("evt-totals-under", "Arsenal", "Chelsea", [pinnacleTotalsBookmaker([totalsOutcome("Over", 1.9, 2.5), totalsOutcome("Under", 1.95, 2.5)])]),
+  ]);
+
+  const result = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Chelsea", direction: "UNDER", line: "2.5", odds: 1.95 });
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(result.withinTolerance, true);
+  assert.equal(result.sourceOdds, 1.95);
+});
+
+test("verifyTotalsOdds: ODDS_CHANGED when submitted odds differ from the provider's price beyond the existing tolerance", async () => {
+  mockEvents([
+    totalsFetchEvent("evt-totals-changed", "Arsenal", "Chelsea", [pinnacleTotalsBookmaker([totalsOutcome("Over", 2.5, 2.5), totalsOutcome("Under", 1.6, 2.5)])]),
+  ]);
+
+  // Player submitted 1.9, provider now shows 2.5 for Over 2.5 — well beyond
+  // the 3% tolerance.
+  const result = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Chelsea", direction: "OVER", line: "2.5", odds: 1.9 });
+
+  assert.equal(result.matched, true, result.note ?? "expected a match (matched, just not within tolerance)");
+  assert.equal(result.withinTolerance, false);
+  assert.equal(result.sourceOdds, 2.5);
+  assert.equal(result.submittedOdds, 1.9);
+});
+
+test("verifyTotalsOdds: requested 2.5 never matches a bookmaker that only offers 3.5 — FAILED, never a closest-line fallback", async () => {
+  mockEvents([
+    totalsFetchEvent("evt-totals-wrongline", "Arsenal", "Chelsea", [pinnacleTotalsBookmaker([totalsOutcome("Over", 1.7, 3.5), totalsOutcome("Under", 2.1, 3.5)])]),
+  ]);
+
+  const result = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Chelsea", direction: "OVER", line: "2.5", odds: 1.9 });
+
+  assert.equal(result.matched, false);
+  assert.ok(result.note?.includes("LINE_NOT_AVAILABLE"), `expected a LINE_NOT_AVAILABLE note, got: ${result.note}`);
+});
+
+test("verifyTotalsOdds: missing totals market on the bookmaker — FAILED", async () => {
+  mockEvents([
+    totalsFetchEvent("evt-totals-nomarket", "Arsenal", "Chelsea", [{ key: "pinnacle", title: "Pinnacle", markets: [{ key: "h2h", outcomes: [] }] }]),
+  ]);
+
+  const result = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Chelsea", direction: "OVER", line: "2.5", odds: 1.9 });
+
+  assert.equal(result.matched, false);
+  assert.ok(result.note?.includes("MARKET_ABSENT"), `expected a MARKET_ABSENT note, got: ${result.note}`);
+});
+
+test("verifyTotalsOdds: a malformed provider point — FAILED, never coerced or crashed on", async () => {
+  mockEvents([
+    // A string, not a number — NaN would round-trip through JSON as `null`
+    // (JSON.stringify(NaN) === "null"), which is indistinguishable from a
+    // genuinely absent point; a malformed-but-present value is what a real
+    // non-numeric provider payload would actually look like on the wire.
+    totalsFetchEvent("evt-totals-badpoint", "Arsenal", "Chelsea", [
+      {
+        key: "pinnacle",
+        title: "Pinnacle",
+        markets: [{ key: "totals", outcomes: [{ name: "Over", price: 1.9, point: "not-a-number" as unknown as number }, totalsOutcome("Under", 1.9, 2.5)] }],
+      },
+    ]),
+  ]);
+
+  const result = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Chelsea", direction: "OVER", line: "2.5", odds: 1.9 });
+
+  assert.equal(result.matched, false);
+  assert.ok(result.note?.includes("MALFORMED_POINT"), `expected a MALFORMED_POINT note, got: ${result.note}`);
+});
+
+test("verifyTotalsOdds: a missing provider point on the matched-direction outcome — FAILED", async () => {
+  mockEvents([
+    totalsFetchEvent("evt-totals-nopoint", "Arsenal", "Chelsea", [
+      pinnacleTotalsBookmaker([totalsOutcome("Over", 1.9, undefined), totalsOutcome("Under", 1.9, 2.5)]),
+    ]),
+  ]);
+
+  const result = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Chelsea", direction: "OVER", line: "2.5", odds: 1.9 });
+
+  assert.equal(result.matched, false);
+  assert.ok(result.note?.includes("MISSING_POINT"), `expected a MISSING_POINT note, got: ${result.note}`);
+});
+
+test("verifyTotalsOdds: event not found — FAILED, same note template as h2h", async () => {
+  mockEvents([]);
+
+  const result = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Chelsea", direction: "OVER", line: "2.5", odds: 1.9 });
+
+  assert.equal(result.matched, false);
+  assert.ok(result.note?.includes("No matching event found"), `expected an event-not-found note, got: ${result.note}`);
+});
+
+test("verifyTotalsOdds: provider fetch failure (unavailable) — FAILED, same fetch-error handling as h2h", async () => {
+  currentHandler = async () => new Response("", { status: 500 });
+
+  const result = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Chelsea", direction: "OVER", line: "2.5", odds: 1.9 });
+
+  assert.equal(result.matched, false);
+  assert.ok(result.note?.includes("status 500"), `expected an HTTP-failure note, got: ${result.note}`);
+});
+
+test("verifyTotalsOdds: provider event metadata (providerEventId/providerSportKey/eventStartTime) round-trips exactly like h2h", async () => {
+  mockEvents([
+    { ...(totalsFetchEvent("evt-totals-meta", "Arsenal", "Chelsea", [pinnacleTotalsBookmaker([totalsOutcome("Over", 1.9, 2.5), totalsOutcome("Under", 1.9, 2.5)])]) as object), commence_time: "2026-08-15T18:00:00.000Z" },
+  ]);
+
+  const result = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Chelsea", direction: "OVER", line: "2.5", odds: 1.9 });
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(result.providerEventId, "evt-totals-meta");
+  assert.equal(result.providerSportKey, "soccer_epl");
+  assert.equal(result.eventStartTime, "2026-08-15T18:00:00.000Z");
 });

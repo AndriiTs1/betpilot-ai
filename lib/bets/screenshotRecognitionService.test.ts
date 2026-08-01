@@ -158,6 +158,7 @@ function samplePreview(oddsStatus: "VERIFIED" | "ODDS_CHANGED" | "NOT_FOUND" | "
         event: "Team A vs Team B",
         market: null,
         selection: "Team A Win",
+        line: null,
         submittedOdds: 1.9,
         currentOdds: 1.9,
         oddsStatus,

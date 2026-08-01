@@ -212,6 +212,10 @@ export async function buildSportmonksFootballPreview(
     event: `${candidate.homeTeam ?? "?"} vs ${candidate.awayTeam ?? "?"}`,
     market: oddsResult.snapshot.marketName,
     selection: selection.selection,
+    // Betting Markets V1, Phase 3.3 — this Sportmonks football vertical
+    // slice only ever handles MONEYLINE match-result selections; Totals
+    // is not part of this pipeline.
+    line: null,
     submittedOdds: effectiveSubmittedOdds,
     currentOdds,
     oddsStatus: "VERIFIED",

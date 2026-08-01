@@ -910,3 +910,94 @@ test("Betting Markets V1 Phase 2 review fix SINGLE: a positive spread persists w
   assert.equal(positive.bet.canonicalParticipant, "Coventry");
   assert.equal(positive.bet.line?.toString(), "1.5");
 });
+
+// ---------------------------------------------------------------------
+// Betting Markets V1, Phase 3.3 — confirmation/persistence for a real
+// TOTALS-classified, provider-verified selection. No changes were made to
+// createBetFromPreview.ts itself this phase — these tests confirm the
+// existing, unmodified signed-token flow (Phase 1's line column, Phase 2's
+// line plumbing) already persists canonicalMarketType/canonicalSelectionType/
+// line correctly for a genuine TOTALS payload, not just a synthetic one.
+// ---------------------------------------------------------------------
+
+test("Betting Markets V1 Phase 3.3 SINGLE: confirmation persists canonicalMarketType=TOTALS, canonicalSelectionType=OVER, line=requested line", async () => {
+  const db = createFakeDb();
+  const payload = singlePayload({
+    providerEventId: "evt-totals-confirm",
+    providerSportKey: "soccer_epl",
+    canonicalMarketType: "TOTALS",
+    canonicalSelectionType: "OVER",
+    canonicalLine: "2.5",
+  });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  assert.equal(result.bet.canonicalMarketType, "TOTALS");
+  assert.equal(result.bet.canonicalSelectionType, "OVER");
+  assert.equal(result.bet.line?.toString(), "2.5");
+});
+
+test("Betting Markets V1 Phase 3.3 SINGLE: confirmation persists canonicalSelectionType=UNDER correctly", async () => {
+  const db = createFakeDb();
+  const payload = singlePayload({
+    previewId: "preview-totals-under",
+    providerEventId: "evt-totals-under-confirm",
+    providerSportKey: "soccer_epl",
+    canonicalMarketType: "TOTALS",
+    canonicalSelectionType: "UNDER",
+    canonicalLine: "3.5",
+  });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  assert.equal(result.bet.canonicalMarketType, "TOTALS");
+  assert.equal(result.bet.canonicalSelectionType, "UNDER");
+  assert.equal(result.bet.line?.toString(), "3.5");
+});
+
+test("Betting Markets V1 Phase 3.3 EXPRESS: each BetSelection stores its own market type, direction and line independently, per leg", async () => {
+  const db = createFakeDb();
+  const payload = expressPayload({
+    selections: [
+      expressSelection({
+        event: "Arsenal vs Chelsea",
+        providerEventId: "evt-express-totals-over",
+        canonicalMarketType: "TOTALS",
+        canonicalSelectionType: "OVER",
+        canonicalLine: "2.5",
+      }),
+      expressSelection({
+        event: "Real Madrid vs Barcelona",
+        providerEventId: "evt-express-moneyline",
+        canonicalMarketType: "MONEYLINE_2WAY",
+        canonicalSelectionType: "PARTICIPANT",
+        canonicalParticipant: "Real Madrid",
+      }),
+      expressSelection({
+        event: "Inter vs Juventus",
+        providerEventId: "evt-express-totals-under",
+        canonicalMarketType: "TOTALS",
+        canonicalSelectionType: "UNDER",
+        canonicalLine: "3.5",
+      }),
+    ],
+  });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  const [leg1, leg2, leg3] = result.bet.selections;
+  assert.equal(leg1.canonicalMarketType, "TOTALS");
+  assert.equal(leg1.canonicalSelectionType, "OVER");
+  assert.equal(leg1.line?.toString(), "2.5");
+
+  assert.equal(leg2.canonicalMarketType, "MONEYLINE_2WAY");
+  assert.equal(leg2.canonicalSelectionType, "PARTICIPANT");
+  assert.equal(leg2.line, null, "a MONEYLINE leg alongside TOTALS legs must still persist line = null");
+
+  assert.equal(leg3.canonicalMarketType, "TOTALS");
+  assert.equal(leg3.canonicalSelectionType, "UNDER");
+  assert.equal(leg3.line?.toString(), "3.5");
+
+  // Different legs' market/direction/line must never bleed into each other.
+  assert.notEqual(leg1.canonicalSelectionType, leg3.canonicalSelectionType);
+});

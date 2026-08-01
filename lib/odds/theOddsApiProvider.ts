@@ -12,7 +12,7 @@
 // buildBetSlipPreview.ts is expected to start depending on this instead of
 // calling verifyOdds() directly.
 
-import { verifyOdds, type OddsVerificationInput } from "./oddsVerifier";
+import { verifyOdds, verifyTotalsOdds, type OddsVerificationInput, type TotalsVerificationInput } from "./oddsVerifier";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { validateCanonicalSelection, type CanonicalSelection, type Sport } from "./domain";
 import { resolveFootballLeague } from "./footballLeagues";
@@ -100,16 +100,23 @@ function buildMatchedEvent(legacyResult: OddsCheckResult, selection: CanonicalSe
 function buildMatchedOutcome(legacyResult: OddsCheckResult, selection: CanonicalSelection): ProviderOutcome | undefined {
   if (legacyResult.sourceOdds === null || legacyResult.sourceOdds === undefined) return undefined;
 
+  // Betting Markets V1, Phase 3.3 — the only two market keys this adapter
+  // ever actually requests (oddsVerifier.ts's verifyOdds()/verifyTotalsOdds()
+  // hardcode "h2h"/"totals" respectively) — not synthesized, not guessed.
+  const marketKey = selection.marketType === "TOTALS" ? "totals" : "h2h";
+
   return {
     marketType: selection.marketType,
     period: selection.period,
     selectionType: selection.selectionType,
     participant: selection.participant,
+    // line is only ever meaningful for TOTALS — the request-side
+    // canonicalLine (already exact-match-verified against the provider's
+    // own point by findTotalsOutcome), never re-derived from the response.
+    line: selection.marketType === "TOTALS" ? selection.line : undefined,
     currentOdds: String(legacyResult.sourceOdds),
     bookmaker: legacyResult.bookmaker ?? undefined,
-    // "h2h" is a real, known constant (oddsVerifier.ts always requests
-    // exactly this market key) — not synthesized, not guessed.
-    marketReference: { provider: PROVIDER_NAME, marketKey: "h2h" },
+    marketReference: { provider: PROVIDER_NAME, marketKey },
     // outcomeReference deliberately omitted — see this section's header
     // comment.
   };
@@ -127,9 +134,12 @@ function buildMatchedOutcome(legacyResult: OddsCheckResult, selection: Canonical
 const CAPABILITIES: OddsProviderCapabilities = {
   provider: PROVIDER_NAME,
   supportedSports: ["FOOTBALL", "BASKETBALL", "TENNIS", "ICE_HOCKEY", "AMERICAN_FOOTBALL"],
-  // h2h/moneyline only — oddsVerifier.ts:406 hardcodes `markets=h2h`;
-  // oddsVerifier.ts:330 only ever reads the "h2h" market key.
-  supportedMarketTypes: ["MONEYLINE_2WAY", "MONEYLINE_3WAY"],
+  // Betting Markets V1, Phase 3.3 — TOTALS joins MONEYLINE_2WAY/3WAY, but
+  // ONLY for football (see the sport gate in verifySelection() below) —
+  // oddsVerifier.ts's verifyTotalsOdds() has only ever been built/tested
+  // against football fixtures this phase; Team Totals and Spreads remain
+  // fully out of scope.
+  supportedMarketTypes: ["MONEYLINE_2WAY", "MONEYLINE_3WAY", "TOTALS"],
   // Step 16A — true as of this step: a stated, supported football league
   // (lib/odds/footballLeagues.ts) now actually routes the request to that
   // league's own sport_key, and an unsupported one is honestly reported as
@@ -143,7 +153,7 @@ const CAPABILITIES: OddsProviderCapabilities = {
   notes: [
     "Generic football/soccer with no stated league now merges across every currently supported competition (lib/odds/footballLeagues.ts / oddsVerifier.ts SPORT_KEY_ALIASES), not only the English Premier League. A football selection whose league is one of the supported names (or a recognized alias, e.g. EPL/UCL) resolves to that league's own sport_key alone; an unrecognized league returns LEAGUE_NOT_SUPPORTED rather than querying an unrelated competition.",
     "Tennis coverage is limited to the four Grand Slam tournaments, in-tournament only (oddsVerifier.ts TENNIS_SPORT_KEYS) — no year-round ATP/WTA tour coverage.",
-    "Only bare 1X2/moneyline selections are verifiable — no totals, spreads, both-teams-to-score, or double-chance markets.",
+    "1X2/moneyline selections are verifiable for every supported sport; TOTALS (Over/Under) is verifiable for football only (Betting Markets V1, Phase 3.3) — no spreads, both-teams-to-score, double-chance, or team-totals markets.",
     "findEvents() and getEventMarkets() are not implemented by this adapter in Step 5 — verifySelection() is the only operational method (see its own code comment below).",
   ],
 };
@@ -300,6 +310,18 @@ function classifyLegacyFailureNote(
   if (/^Could not match selection /.test(note)) {
     return { reasonCode: "SELECTION_NOT_FOUND", diagnosticCode: "LEGACY_SELECTION_NOT_FOUND" };
   }
+  // Betting Markets V1, Phase 3.3 — verifyTotalsOdds()'s own note template,
+  // covering every findTotalsOutcome() non-match kind (MARKET_ABSENT/
+  // OUTCOME_ABSENT/LINE_NOT_AVAILABLE/MISSING_POINT/MALFORMED_POINT/
+  // NO_BOOKMAKER/INVALID_REQUESTED_LINE — see that function's own doc
+  // comments). All classify to the same SELECTION_NOT_FOUND family as
+  // h2h's own "market/event were found, the specific outcome wasn't" cases
+  // above — the captured kind is preserved only in diagnosticCode, for
+  // operator-visible precision, never in the public reasonCode surface.
+  const totalsMatch = note.match(/^Could not match totals selection ".*" for ".*" \(([A-Z_]+)\)$/);
+  if (totalsMatch) {
+    return { reasonCode: "SELECTION_NOT_FOUND", diagnosticCode: `LEGACY_TOTALS_${totalsMatch[1]}` };
+  }
 
   // Defensive fallback only — every note template oddsVerifier.ts can
   // currently produce is enumerated above (confirmed by a full read of the
@@ -321,7 +343,15 @@ export class TheOddsApiProvider implements OddsProvider {
   // module internals or making real network calls — defaults to the real,
   // unmodified verifyOdds() in production (no caller in this step passes
   // an override; see the constructor's own default parameter).
-  constructor(private readonly verifyOddsFn: typeof verifyOdds = verifyOdds) {}
+  // Betting Markets V1, Phase 3.3 — verifyTotalsOddsFn added as a second,
+  // independently-injectable seam (purely additive: every existing
+  // single-argument `new TheOddsApiProvider(fn)` call site keeps compiling
+  // and behaving unchanged, since this is a new parameter with its own
+  // default, not a change to the first one).
+  constructor(
+    private readonly verifyOddsFn: typeof verifyOdds = verifyOdds,
+    private readonly verifyTotalsOddsFn: typeof verifyTotalsOdds = verifyTotalsOdds,
+  ) {}
 
   getCapabilities(): OddsProviderCapabilities {
     return CAPABILITIES;
@@ -403,7 +433,12 @@ export class TheOddsApiProvider implements OddsProvider {
       });
     }
 
-    if (selection.marketType !== "MONEYLINE_2WAY" && selection.marketType !== "MONEYLINE_3WAY") {
+    // Betting Markets V1, Phase 3.3 — TOTALS joins the two MONEYLINE variants.
+    if (
+      selection.marketType !== "MONEYLINE_2WAY" &&
+      selection.marketType !== "MONEYLINE_3WAY" &&
+      selection.marketType !== "TOTALS"
+    ) {
       return createFailedResult({
         submittedOdds,
         provider: PROVIDER_NAME,
@@ -420,6 +455,21 @@ export class TheOddsApiProvider implements OddsProvider {
         checkedAt: checkedAtFor(),
         reasonCode: "SPORT_NOT_SUPPORTED",
         diagnosticCode: "ADAPTER_SPORT_UNKNOWN",
+      });
+    }
+
+    // Betting Markets V1, Phase 3.3 — TOTALS is football-only this phase
+    // (CAPABILITIES.supportedMarketTypes above documents this same
+    // restriction). Checked before the football-specific league resolution
+    // below so a non-football TOTALS selection never has to wait on that
+    // logic to be honestly rejected.
+    if (selection.marketType === "TOTALS" && selection.sport !== "FOOTBALL") {
+      return createFailedResult({
+        submittedOdds,
+        provider: PROVIDER_NAME,
+        checkedAt: checkedAtFor(),
+        reasonCode: "MARKET_NOT_SUPPORTED",
+        diagnosticCode: "ADAPTER_TOTALS_FOOTBALL_ONLY",
       });
     }
 
@@ -478,25 +528,42 @@ export class TheOddsApiProvider implements OddsProvider {
       });
     }
 
-    const legacySelection = selectionToLegacyText(selection);
-    if (!legacySelection) {
-      return createFailedResult({
-        submittedOdds,
-        provider: PROVIDER_NAME,
-        checkedAt: checkedAtFor(),
-        reasonCode: "MARKET_NOT_SUPPORTED",
-        diagnosticCode: "ADAPTER_SELECTION_TYPE_NOT_SUPPORTED",
-      });
+    let legacyResult: OddsCheckResult;
+
+    if (selection.marketType === "TOTALS") {
+      // selectionType is guaranteed "OVER"/"UNDER" and line is guaranteed a
+      // present, decimal-shaped string here — validateCanonicalSelection's
+      // own TOTALS rule (selectionType must be OVER/UNDER, line required)
+      // already ran above and would have returned INVALID_INPUT otherwise.
+      const totalsInput: TotalsVerificationInput = {
+        sport: legacySport,
+        event: legacyEvent,
+        direction: selection.selectionType as "OVER" | "UNDER",
+        line: selection.line as string,
+        odds: submittedOddsNumber,
+      };
+      legacyResult = await this.verifyTotalsOddsFn(totalsInput);
+    } else {
+      const legacySelection = selectionToLegacyText(selection);
+      if (!legacySelection) {
+        return createFailedResult({
+          submittedOdds,
+          provider: PROVIDER_NAME,
+          checkedAt: checkedAtFor(),
+          reasonCode: "MARKET_NOT_SUPPORTED",
+          diagnosticCode: "ADAPTER_SELECTION_TYPE_NOT_SUPPORTED",
+        });
+      }
+
+      const legacyInput: OddsVerificationInput = {
+        sport: legacySport,
+        event: legacyEvent,
+        selection: legacySelection,
+        odds: submittedOddsNumber,
+      };
+
+      legacyResult = await this.verifyOddsFn(legacyInput);
     }
-
-    const legacyInput: OddsVerificationInput = {
-      sport: legacySport,
-      event: legacyEvent,
-      selection: legacySelection,
-      odds: submittedOddsNumber,
-    };
-
-    const legacyResult: OddsCheckResult = await this.verifyOddsFn(legacyInput);
     const checkedAt = checkedAtFor();
 
     // Bookmaker is passed through whenever the legacy result actually
