@@ -333,3 +333,66 @@ test("evidence list is sorted by source position", () => {
     assert.ok(evidence[i - 1].start <= evidence[i].start);
   }
 });
+
+/* ============================================================================
+ * Review round: European/RU-UA decimal comma ("2,5") support for LINE
+ * evidence — classifyBettingSelectionText (Stage BA-2A) only recognizes a
+ * dot decimal separator; comma normalization happens ONLY in the ephemeral
+ * text handed to it, never in originalText or any reported evidence.value.
+ * ============================================================================ */
+
+test("comma decimal: 'Арсенал ТБ 2,5' — LINE evidence raw value stays '2,5' (comma preserved), never rewritten to '2.5'", () => {
+  const text = "Арсенал ТБ 2,5";
+  const evidence = extractNumericRoleEvidence(text);
+  const lines = findByRole(evidence, "LINE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].value, "2,5");
+  assertSpanText(text, lines[0], "2,5");
+});
+
+test("comma decimal: 'Арсенал ТБ 2,5, ставка 10' — LINE '2,5' and STAKE '10' both correct, trailing comma still stripped", () => {
+  const text = "Арсенал ТБ 2,5, ставка 10";
+  const evidence = extractNumericRoleEvidence(text);
+  const lines = findByRole(evidence, "LINE");
+  const stakes = findByRole(evidence, "STAKE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].value, "2,5");
+  assert.equal(stakes.length, 1);
+  assertSpanText(text, stakes[0], "10");
+});
+
+test("comma decimal: ODDS 'коэффициент 1,90' — raw value stays '1,90'", () => {
+  const text = "Арсенал победа коэффициент 1,90 ставка 10";
+  const evidence = extractNumericRoleEvidence(text);
+  const odds = findByRole(evidence, "ODDS");
+  assert.equal(odds.length, 1);
+  assert.equal(odds[0].value, "1,90");
+  assertSpanText(text, odds[0], "1,90");
+});
+
+test("comma decimal: signed SPREAD 'Арсенал Ф1(-1,5)' — raw value stays '-1,5'", () => {
+  const text = "Арсенал Ф1(-1,5) 20";
+  const evidence = extractNumericRoleEvidence(text);
+  const lines = findByRole(evidence, "LINE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].value, "-1,5");
+  assertSpanText(text, lines[0], "-1,5");
+  const stakes = findByRole(evidence, "STAKE");
+  assert.equal(stakes.length, 1);
+  assertSpanText(text, stakes[0], "20");
+});
+
+test("comma decimal: '+1,5' (positive signed comma line) is preserved raw and classified correctly", () => {
+  const text = "Челси Ф2(+1,5) 10";
+  const evidence = extractNumericRoleEvidence(text);
+  const lines = findByRole(evidence, "LINE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].value, "+1,5");
+});
+
+test("comma decimal never rewrites originalText", () => {
+  const text = "Арсенал ТБ 2,5 ставка 10";
+  const before = text.slice();
+  extractNumericRoleEvidence(text);
+  assert.equal(text, before);
+});

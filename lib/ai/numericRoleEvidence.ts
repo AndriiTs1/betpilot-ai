@@ -235,7 +235,11 @@ function findEnclosingTokenIndex(tokens: readonly Token[], occurrence: NumberOcc
 // classifyBettingSelectionText's TOTALS/TEAM_TOTAL patterns never capture a
 // sign, while SPREAD's does; this file must not reject a real match merely
 // over "+"/"-"/","/"." formatting differences it doesn't itself own.
-function sameNumericValue(a: string, b: string): boolean {
+//
+// Exported (Stage BA-2B, Step 2) so lib/ai/numericRoleVerifier.ts reuses
+// this exact comparison instead of maintaining a second one — the same
+// "one implementation" discipline established in Stage BA-2A.
+export function sameNumericValue(a: string, b: string): boolean {
   const na = Number(a.replace(",", "."));
   const nb = Number(b.replace(",", "."));
   return Number.isFinite(na) && Number.isFinite(nb) && na === nb;
@@ -262,11 +266,27 @@ function stripTrailingSentencePunctuation(tokenText: string): string {
   return tokenText.replace(/[,;]+$/, "");
 }
 
+// classifyBettingSelectionText's own patterns (Stage BA-2A) only recognize
+// a dot decimal separator ("2.5"), not the European/RU-UA comma form
+// ("2,5") — confirmed by reading its LINE_NUMBER pattern. That file is not
+// touched here (out of this stage's scope); instead, ONLY the ephemeral
+// window text handed to the classifier gets comma->dot normalization —
+// never originalText, never a returned evidence.value, which always stays
+// the exact raw source substring (comma included) regardless of this
+// internal step. Only a comma directly BETWEEN two digits is touched
+// (decimal-separator shape) — never a broader "any comma is a decimal"
+// rule, so a genuine sentence-separating comma elsewhere is unaffected.
+function normalizeDecimalCommaForClassification(tokenText: string): string {
+  return tokenText.replace(/(\d),(\d)/g, "$1.$2");
+}
+
 function classifyWindow(tokens: readonly Token[], endIndex: number, windowSize: number): WindowClassification | null {
   const startIndex = endIndex - windowSize + 1;
   if (startIndex < 0) return null;
   const windowTokens = tokens.slice(startIndex, endIndex + 1);
-  const windowText = windowTokens.map((token) => stripTrailingSentencePunctuation(token.text)).join(" ");
+  const windowText = windowTokens
+    .map((token) => normalizeDecimalCommaForClassification(stripTrailingSentencePunctuation(token.text)))
+    .join(" ");
   const classified = classifyBettingSelectionText(windowText);
   return {
     ...classified,
@@ -330,7 +350,13 @@ function findLineEvidence(text: string, occurrences: readonly NumberOccurrence[]
         lineEvidence.push({
           role: "LINE",
           value: occurrence.value,
-          marker: deriveLineMarkerLabel(classified.windowText, occurrence.value),
+          // Stripped using classified.embeddedLine (already dot-normalized,
+          // guaranteed to appear literally in classified.windowText) rather
+          // than occurrence.value (the raw, possibly comma-containing
+          // source substring, e.g. "2,5") — the latter would never be
+          // found inside the normalized window text, leaving the label
+          // uncleanly stripped for comma inputs.
+          marker: deriveLineMarkerLabel(classified.windowText, classified.embeddedLine),
           confidence: "MARKER_HIGH",
           start: occurrence.start,
           end: occurrence.end,
