@@ -458,6 +458,34 @@ test("Step 15J.3 (C): a Zod/schema validation failure (no code field) also retur
   assert.deepEqual(body, { error: "PARSE_FAILED", detail: "Unable to understand the bet message" });
 });
 
+test("BA-2B Step 4: a numeric_mismatch parser rejection (lib/ai/betParser.ts's new CONTRADICTED/AMBIGUOUS safety check) returns the exact same generic 422 PARSE_FAILED body as any other parse failure — no new error shape, no client-visible change — and NEVER reaches odds verification", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  let providerCalls = 0;
+  const response = await handleTextPreview(
+    buildRequest(initData, { message: "Арсенал ТБ 2.5, ставка 10" }),
+    baseOptions({
+      // Exactly the shape buildParsedBetSlipResult (lib/ai/betParser.ts)
+      // now produces when a numeric claim is CONTRADICTED/AMBIGUOUS — this
+      // route requires zero changes to handle it correctly, since "code"
+      // other than "timeout" already falls through to the same generic path.
+      parseBetSlip: fakeParseBetSlip({
+        valid: false,
+        error: "Numeric claim not corroborated by message text (role=STAKE, verdict=CONTRADICTED)",
+        code: "numeric_mismatch",
+      }),
+      verifyOddsFn: fakeVerifyOddsFn(() => (providerCalls += 1)),
+    }),
+  );
+
+  assert.equal(response.status, 422);
+  const body = await response.json();
+  assert.deepEqual(body, { error: "PARSE_FAILED", detail: "Unable to understand the bet message" });
+  const bodyText = JSON.stringify(body);
+  assert.equal(bodyText.includes("STAKE"), false, "internal verdict detail must never reach the client");
+  assert.equal(bodyText.includes("CONTRADICTED"), false, "internal verdict detail must never reach the client");
+  assert.equal(providerCalls, 0, "a rejected numeric claim must never reach odds verification — no provider call, and therefore no previewToken, no Bet, no DB write is possible downstream");
+});
+
 test("Step 15J.3 (F): a successful preview is completely unaffected by the new timeout branch", async () => {
   const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
   const response = await handleTextPreview(buildRequest(initData, { message: "Real Madrid win, stake 100, odds 1.90" }), baseOptions());

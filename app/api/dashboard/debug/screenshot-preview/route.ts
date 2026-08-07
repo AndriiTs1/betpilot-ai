@@ -61,7 +61,12 @@ type OcrDiagnostic =
 
 type ParserDiagnostic =
   | { mode: "OCR"; durationMs: number; valid: true; type: "SINGLE" | "EXPRESS"; stake: number; selectionCount: number; selections: ParsedBetSlip["selections"] }
-  | { mode: "OCR"; durationMs: number; valid: false; code?: "timeout"; error: string };
+  // Stage BA-2B, Step 4 — "numeric_mismatch" added alongside "timeout",
+  // mirroring lib/ai/betParser.ts's own ParseBetSlipResult widening. This
+  // route only ever displays `code` as an operator-facing diagnostic
+  // field (never branches on it), so the new value needs no other change
+  // here.
+  | { mode: "OCR"; durationMs: number; valid: false; code?: "timeout" | "numeric_mismatch"; error: string };
 
 // Injectable so tests never make a real Claude/Odds API call — same DI
 // shape as handleScreenshotPreview.

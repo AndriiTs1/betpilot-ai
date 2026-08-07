@@ -663,3 +663,265 @@ test("parseBetSlipMessage: a failing call is never retried (maxRetries: 0) — t
   assert.equal(result.valid, false);
   assert.equal(callCount, 1, "the Anthropic client must not automatically retry a failed request");
 });
+
+/* ============================================================================
+ * Stage BA-2B, Step 4 — safe numeric enforcement.
+ *
+ * All simulate a real Claude tool_use response via the existing
+ * anthropicToolUseResponse()/currentHandler fetch-interception convention
+ * (see this file's own header), so `text` (the ORIGINAL player message) and
+ * `toolInput` (what the AI CLAIMED) can be independently controlled — this
+ * is what lets a test simulate "correct AI output" vs. "bad AI output"
+ * against the exact same real message.
+ * ============================================================================ */
+
+function singleToolInput(overrides: Partial<{
+  sport: string; league: string | null; event: string; market: string | null;
+  selection: string; period: string | null; line: string | null; stake: number; odds: number | null;
+}> = {}) {
+  return {
+    sport: "Football",
+    league: null,
+    event: "Arsenal",
+    market: null,
+    selection: "Win",
+    period: null,
+    line: null,
+    stake: 10,
+    odds: null,
+    ...overrides,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* 1-4. STAKE — critical regression                                          */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2B Step 4 (1): correct explicit stake — 'Арсенал ТБ 2.5, ставка 10' (stake=10, line=2.5) passes, STAKE and LINE both CORROBORATED", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ market: "Totals", selection: "Over", line: "2.5", stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2.5, ставка 10", "CHAT");
+
+  assert.equal(result.valid, true);
+  if (!result.valid) return;
+  assert.equal(result.stake, 10);
+  assert.equal(result.selections[0].line, "2.5");
+});
+
+test("BA-2B Step 4 (2): CRITICAL — bad AI output (stake=2.5 against explicit 'ставка 10') is rejected, never silently corrected to 10", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ market: "Totals", selection: "Over", line: "2.5", stake: 2.5 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2.5, ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "numeric_mismatch");
+  // The invalid branch of ParseBetSlipResult structurally has no stake/
+  // line/selections field at all — there is nowhere for a "corrected"
+  // value to even exist.
+  assert.deepEqual(Object.keys(result).sort(), ["code", "error", "valid"]);
+});
+
+test("BA-2B Step 4 (3): AMBIGUOUS stake — 'ставка 10, ставка 20' is rejected, never guesses between the two conflicting values", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал победа, ставка 10, ставка 20", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "numeric_mismatch");
+});
+
+test("BA-2B Step 4 (4): UNVERIFIED stake — 'Арсенал победа 10' (SOLE_CANDIDATE only, no explicit marker) still passes — player convenience preserved", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал победа 10", "CHAT");
+
+  assert.equal(result.valid, true);
+});
+
+/* -------------------------------------------------------------------------- */
+/* 5-6. LINE                                                                  */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2B Step 4 (5): correct line passes (covered structurally by test 1 above — repeated here for numbering clarity)", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ market: "Totals", selection: "Under", line: "3", stake: 20 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТМ 3 ставка 20", "CHAT");
+
+  assert.equal(result.valid, true);
+});
+
+test("BA-2B Step 4 (6): contradicted line — claimed line=10 against 'ТБ 2.5, ставка 10' is rejected", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ market: "Totals", selection: "Over", line: "10", stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2.5, ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "numeric_mismatch");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 7-8. Equal values / decimal comma                                         */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2B Step 4 (7): equal stake/line — 'Арсенал ТБ 10, ставка 10' passes, no equality heuristic rejects it", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ market: "Totals", selection: "Over", line: "10", stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 10, ставка 10", "CHAT");
+
+  assert.equal(result.valid, true);
+});
+
+test("BA-2B Step 4 (8): decimal comma — 'Арсенал ТБ 2,5 ставка 2,5' passes", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ market: "Totals", selection: "Over", line: "2,5", stake: 2.5 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2,5 ставка 2,5", "CHAT");
+
+  assert.equal(result.valid, true);
+});
+
+/* -------------------------------------------------------------------------- */
+/* 9-10. Submitted ODDS (never confused with live provider odds)             */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2B Step 4 (9): correct explicit submitted odds — 'коэффициент 1.90' passes", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ odds: 1.9 }));
+
+  const result = await parseBetSlipMessage("Арсенал победа коэффициент 1.90 ставка 10", "CHAT");
+
+  assert.equal(result.valid, true);
+});
+
+test("BA-2B Step 4 (10): contradicted submitted odds — claimed 2.10 against 'коэффициент 1.90' is rejected (this is about the player's OWN stated odds, never a live provider price)", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ odds: 2.1 }));
+
+  const result = await parseBetSlipMessage("Арсенал победа коэффициент 1.90 ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "numeric_mismatch");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 11-12. CHAT / OCR parity                                                   */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2B Step 4 (11): CHAT mode enforcement (explicit, all tests above already use CHAT)", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ market: "Totals", selection: "Over", line: "2.5", stake: 2.5 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2.5, ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+});
+
+test("BA-2B Step 4 (12): OCR mode enforces the exact same numeric safety check as CHAT — same rejection for the same contradicted claim, no screenshot-specific logic", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ market: "Totals", selection: "Over", line: "2.5", stake: 2.5 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2.5, ставка 10", "OCR");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "numeric_mismatch");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 13-15. EXPRESS — global stake enforced, per-leg LINE/ODDS explicitly NOT   */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2B Step 4 (13): EXPRESS global stake CONTRADICTED — claimed 10 against 'экспресс 20' is rejected", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_express_bet", {
+      stake: 10,
+      selections: [
+        { sport: "Football", league: null, event: "Arsenal", market: "Totals", selection: "Over", period: null, line: "2.5", odds: null },
+        { sport: "Football", league: null, event: "Real Madrid", market: null, selection: "Win", period: null, line: null, odds: null },
+      ],
+    });
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2.5 + Реал победа, экспресс 20", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "numeric_mismatch");
+});
+
+test("BA-2B Step 4 (14): EXPRESS global stake CORROBORATED — claimed 20, matches 'экспресс 20', passes", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_express_bet", {
+      stake: 20,
+      selections: [
+        { sport: "Football", league: null, event: "Arsenal", market: "Totals", selection: "Over", period: null, line: "2.5", odds: null },
+        { sport: "Football", league: null, event: "Real Madrid", market: null, selection: "Win", period: null, line: null, odds: null },
+      ],
+    });
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2.5 + Реал победа, экспресс 20", "CHAT");
+
+  assert.equal(result.valid, true);
+});
+
+test("BA-2B Step 4 (15): EXPRESS per-leg LINE is explicitly NOT hard-enforced yet — a wildly wrong per-leg line ('999', appearing nowhere in the message) still passes as long as the global stake corroborates", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_express_bet", {
+      stake: 20,
+      selections: [
+        { sport: "Football", league: null, event: "Arsenal", market: "Totals", selection: "Over", period: null, line: "999", odds: null },
+        { sport: "Football", league: null, event: "Real Madrid", market: "Totals", selection: "Under", period: null, line: "3.5", odds: null },
+      ],
+    });
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2.5 + Реал ТМ 3.5, экспресс 20", "CHAT");
+
+  assert.equal(result.valid, true, "EXPRESS per-leg LINE enforcement is deliberately out of scope for BA-2B Step 4 — do not enable this without building real leg attribution first");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 16. No numeric auto-correction, structurally proven                        */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2B Step 4 (16): no numeric auto-correction — a rejected result never contains a 'corrected' stake/line/odds anywhere in its shape", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ market: "Totals", selection: "Over", line: "2.5", stake: 2.5 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2.5, ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  assert.deepEqual(Object.keys(result).sort(), ["code", "error", "valid"]);
+});
+
+/* -------------------------------------------------------------------------- */
+/* 18. Existing valid flows unaffected — full regression list                 */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2B Step 4 (18a): 'Победа Арсенала, ставка 10' still passes (AI's own event/selection translation is untouched; only STAKE is checked here since no line/odds were claimed)", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal", selection: "Win", stake: 10 }));
+
+  const result = await parseBetSlipMessage("Победа Арсенала, ставка 10", "CHAT");
+
+  assert.equal(result.valid, true);
+});
+
+test("BA-2B Step 4 (18b): 'Арсенал X 10' (bare DRAW token, no explicit stake marker) still passes as UNVERIFIED, not rejected", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ selection: "X", stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал X 10", "CHAT");
+
+  assert.equal(result.valid, true);
+});
+
+test("BA-2B Step 4 (18c): English winner phrasing — 'Real Madrid to win, stake 10' still passes", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Real Madrid", selection: "Real Madrid to win", stake: 10 }));
+
+  const result = await parseBetSlipMessage("Real Madrid to win, stake 10", "CHAT");
+
+  assert.equal(result.valid, true);
+});
+
+test("BA-2B Step 4 (18d): a valid OCR-mode parse (mirroring test 1's scenario) still passes", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ market: "Totals", selection: "Over", line: "2.5", stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2.5, ставка 10", "OCR");
+
+  assert.equal(result.valid, true);
+});

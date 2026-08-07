@@ -6,7 +6,7 @@ import { z } from "zod";
 // reverse.
 import { normalizeParsedBet, type ParsedBetSlip } from "@/lib/bets/betSlip";
 import { chatPrompt, ocrPrompt } from "./betParserPrompt";
-import { mapRawBetSlipToParsedBetSlip, type RawBetSelectionFields } from "./betDraftMapper";
+import { mapRawBetSlipToParsedBetSlip, type RawBetSelectionFields, type NumericRoleObservation } from "./betDraftMapper";
 
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "llama3.2";
@@ -372,7 +372,14 @@ const parlayBetFieldsSchema = z.object({
 
 export type ParseBetSlipResult =
   | ({ valid: true } & ParsedBetSlip)
-  | { valid: false; error: string; code?: "timeout" };
+  // Stage BA-2B, Step 4 — "numeric_mismatch" added alongside the existing
+  // "timeout" code. Purely additive: every existing caller only ever
+  // checks `code === "timeout"` (app/api/miniapp/bets/text/preview/route.ts,
+  // app/api/miniapp/bets/screenshot/preview/route.ts) and folds every other
+  // value, old or new, into the exact same generic PARSE_FAILED/
+  // IMAGE_NOT_RECOGNIZED response — so this change requires, and receives,
+  // zero route changes.
+  | { valid: false; error: string; code?: "timeout" | "numeric_mismatch" };
 
 // Stage 14.3 — one parser, two prompts (lib/ai/betParserPrompt.ts), never
 // two parsers. CHAT is a player's own free-form message (unchanged
@@ -456,6 +463,33 @@ export const extractExpressBetTool: Anthropic.Beta.BetaTool = {
   },
 };
 
+// Stage BA-2B, Step 4 — the one place a computed numeric-role verdict
+// becomes a parser-level safety decision. Deliberately NOT inside
+// lib/ai/numericRoleVerifier.ts (which stays pure evidence/verdict logic,
+// no policy) and NOT inside lib/ai/betDraftMapper.ts (whose
+// mapRawBetSlipToParsedBetSlip contract is "map raw AI output to
+// ParsedBetSlip," not "decide whether this parse is trustworthy" — its
+// Step 3 observation hook exists exactly so this decision can live here
+// instead). CORROBORATED and UNVERIFIED both continue normally —
+// UNVERIFIED means "no strong evidence either way," not "wrong," so the
+// AI's own claim is trusted exactly as it always has been (this is what
+// keeps a short, common message like "Арсенал победа 10" working, per
+// this stage's own player-convenience requirement). CONTRADICTED and
+// AMBIGUOUS both fail closed: real text evidence disagrees with (or
+// cannot be reconciled for) this specific claimed value, so the parse is
+// rejected — the claimed value itself is NEVER read again or altered
+// anywhere in this function; only whether to proceed at all is decided.
+//
+// No EXPRESS per-leg enforcement is possible here even in principle:
+// computeNumericRoleObservations (betDraftMapper.ts) only ever produces a
+// LINE/ODDS observation for a SINGLE slip's one selection — EXPRESS legs
+// never produce one at all (leg attribution is out of scope, unchanged
+// from Step 3) — so this loop enforces exactly STAKE (both bet types) and,
+// for SINGLE only, LINE/ODDS, with no bet-type branching needed here.
+function isUnreliableNumericClaim(observation: NumericRoleObservation): boolean {
+  return observation.verification.verdict === "CONTRADICTED" || observation.verification.verdict === "AMBIGUOUS";
+}
+
 // Wraps mapRawBetSlipToParsedBetSlip() so a programmer-error throw (the
 // mapper/adapter only ever throws for a non-finite stake/odds or a sport
 // with no raw text at all — both impossible given betFieldsSchema/
@@ -470,7 +504,30 @@ function buildParsedBetSlipResult(
   mode: BetSlipParseMode,
 ): ParseBetSlipResult {
   try {
-    const parsedSlip = mapRawBetSlipToParsedBetSlip(raw, { originalText: text, sourceType: mode });
+    let numericRoleObservations: readonly NumericRoleObservation[] = [];
+
+    const parsedSlip = mapRawBetSlipToParsedBetSlip(raw, {
+      originalText: text,
+      sourceType: mode,
+      onNumericRoleObservation: (observations) => {
+        numericRoleObservations = observations;
+      },
+    });
+
+    const unreliableClaim = numericRoleObservations.find(isUnreliableNumericClaim);
+    if (unreliableClaim) {
+      // Internal diagnostic only — never sent to the client. Both preview
+      // routes already log `parsed.error` server-side and respond with
+      // their own generic PARSE_FAILED/IMAGE_NOT_RECOGNIZED body
+      // regardless of its content, exactly like every other non-timeout
+      // invalid-result reason already does.
+      return {
+        valid: false,
+        error: `Numeric claim not corroborated by message text (role=${unreliableClaim.role}, verdict=${unreliableClaim.verification.verdict})`,
+        code: "numeric_mismatch",
+      };
+    }
+
     return { valid: true, ...parsedSlip };
   } catch (err) {
     console.error("parseTextSlipWithClaude: failed to build bet draft", err instanceof Error ? err.name : "unknown error");
