@@ -36,6 +36,8 @@ import {
 import { universalBetDraftToParsedBetSlip } from "@/lib/bets/draft/legacyAdapter";
 import type { ParsedBetSlip } from "@/lib/bets/betSlip";
 import type { MarketType, Period, Sport } from "@/lib/odds/domain";
+import { extractNumericRoleEvidence } from "@/lib/ai/numericRoleEvidence";
+import { verifyNumericRoleClaim, type NumericRoleVerification } from "@/lib/ai/numericRoleVerifier";
 
 /* -------------------------------------------------------------------------- */
 /* Raw extraction shapes                                                      */
@@ -64,6 +66,17 @@ export interface RawBetSlipFields {
 export interface BetDraftMappingContext {
   readonly originalText: string;
   readonly sourceType: "CHAT" | "OCR";
+  // Stage BA-2B, Step 3 — observation only. When provided, receives the
+  // numeric-role verification observations computed for this slip (see
+  // computeNumericRoleObservations below). NEVER influences this function's
+  // return value in any way — mapRawBetSlipToParsedBetSlip's own output is
+  // byte-for-byte identical whether or not this is supplied. Omitted by
+  // every current production call site (lib/ai/betParser.ts never sets
+  // it), so this field changes no existing behavior; it exists purely as a
+  // side channel for tests (and, later, a genuinely separate enforcement
+  // stage) to inspect what the verifier concluded, without widening this
+  // function's return type or logging the player's original message.
+  readonly onNumericRoleObservation?: (observations: readonly NumericRoleObservation[]) => void;
 }
 
 export type BetDraftMapperErrorCode = "INVALID_NUMERIC_VALUE";
@@ -165,6 +178,77 @@ export function mapRawSelectionToDraftSelection(raw: RawBetSelectionFields): Map
 }
 
 /* -------------------------------------------------------------------------- */
+/* Stage BA-2B, Step 3 — numeric-role observation (observation only)         */
+/* -------------------------------------------------------------------------- */
+//
+// Compares what the AI/parser CLAIMED (raw.stake, and each selection's raw
+// line/odds) against lib/ai/numericRoleEvidence.ts's deterministic read of
+// the player's own original message, via lib/ai/numericRoleVerifier.ts.
+// Genuinely runs on every real call to mapRawBetSlipToParsedBetSlip below
+// (not merely reachable from tests) — but its result is reported ONLY
+// through BetDraftMappingContext.onNumericRoleObservation, an optional
+// callback no current production caller supplies. It never appears in this
+// function's return value, is never logged (this function contains no
+// console.* call anywhere, matching this file's own existing "logs
+// original bet content" prohibition — see this file's header), and is
+// never persisted.
+
+export interface NumericRoleObservation {
+  readonly role: "STAKE" | "LINE" | "ODDS";
+  // null for STAKE (one slip-level value, SINGLE or EXPRESS alike);
+  // otherwise the index into raw.selections this observation is about.
+  readonly selectionIndex: number | null;
+  readonly claimedValue: string;
+  readonly verification: NumericRoleVerification;
+}
+
+// Per-selection LINE/ODDS observation is only attempted for SINGLE slips —
+// exactly one selection, so "the selection this claim is about" is
+// unambiguous. For EXPRESS, lib/ai/numericRoleVerifier.ts has no leg-
+// attribution capability (deliberately out of scope — see its own Step 2
+// EXPRESS tests): several same-role LINE/ODDS evidence occurrences can
+// exist in one message, one per leg, and nothing here can safely say which
+// belongs to which selection. Reporting a per-leg EXPRESS LINE/ODDS
+// observation anyway would silently overclaim a confidence this code does
+// not have, so it is skipped entirely rather than reported unreliably.
+// STAKE is unaffected by this limitation — it is always exactly one
+// slip-level value regardless of bet type.
+function computeNumericRoleObservations(raw: RawBetSlipFields, originalText: string): NumericRoleObservation[] {
+  const evidence = extractNumericRoleEvidence(originalText);
+  const observations: NumericRoleObservation[] = [];
+
+  observations.push({
+    role: "STAKE",
+    selectionIndex: null,
+    claimedValue: String(raw.stake),
+    verification: verifyNumericRoleClaim({ role: "STAKE", value: raw.stake }, evidence),
+  });
+
+  if (raw.type === "SINGLE") {
+    raw.selections.forEach((selection, index) => {
+      if (selection.line !== null) {
+        observations.push({
+          role: "LINE",
+          selectionIndex: index,
+          claimedValue: selection.line,
+          verification: verifyNumericRoleClaim({ role: "LINE", value: selection.line }, evidence),
+        });
+      }
+      if (selection.odds !== null) {
+        observations.push({
+          role: "ODDS",
+          selectionIndex: index,
+          claimedValue: String(selection.odds),
+          verification: verifyNumericRoleClaim({ role: "ODDS", value: selection.odds }, evidence),
+        });
+      }
+    });
+  }
+
+  return observations;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Top-level slip mapping                                                     */
 /* -------------------------------------------------------------------------- */
 
@@ -190,6 +274,14 @@ export function mapRawBetSlipToParsedBetSlip(raw: RawBetSlipFields, context: Bet
     stake: numberToDecimalString(raw.stake),
     selections: mapped.map((entry) => entry.selection),
   };
+
+  // Stage BA-2B, Step 3 — always computed (so this is genuinely exercised
+  // on every real parse, not just in tests), reported only if a caller
+  // opted in. Computing this can never throw (both
+  // extractNumericRoleEvidence and verifyNumericRoleClaim are pure and
+  // documented as never-throwing) and never touches `draft` or the value
+  // returned below in any way.
+  context.onNumericRoleObservation?.(computeNumericRoleObservations(raw, context.originalText));
 
   return universalBetDraftToParsedBetSlip(draft);
 }

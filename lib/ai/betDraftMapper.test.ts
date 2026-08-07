@@ -5,6 +5,8 @@ import {
   mapRawBetSlipToParsedBetSlip,
   numberToDecimalString,
   type RawBetSelectionFields,
+  type RawBetSlipFields,
+  type NumericRoleObservation,
 } from "./betDraftMapper";
 
 function football(overrides: Partial<RawBetSelectionFields> = {}): RawBetSelectionFields {
@@ -224,4 +226,235 @@ test("mapper: HIGH confidence is always set on the underlying draft (visible onl
   assert.doesNotThrow(() =>
     mapRawBetSlipToParsedBetSlip({ type: "SINGLE", stake: 50, selections: [football()] }, { originalText: "x", sourceType: "CHAT" }),
   );
+});
+
+/* ============================================================================
+ * Stage BA-2B, Step 3 — numeric-role observation (observation only).
+ *
+ * Every test below captures observations via onNumericRoleObservation and
+ * separately asserts the RETURNED ParsedBetSlip — proving both that real
+ * verification runs, AND that its verdicts never influence the slip.
+ * ============================================================================ */
+
+function observe(raw: RawBetSlipFields, originalText: string, sourceType: "CHAT" | "OCR" = "CHAT") {
+  let captured: readonly NumericRoleObservation[] | null = null;
+  const slip = mapRawBetSlipToParsedBetSlip(raw, {
+    originalText,
+    sourceType,
+    onNumericRoleObservation: (observations) => {
+      captured = observations;
+    },
+  });
+  if (captured === null) throw new Error("onNumericRoleObservation was never called");
+  return { slip, observations: captured as readonly NumericRoleObservation[] };
+}
+
+function findObservation(observations: readonly NumericRoleObservation[], role: NumericRoleObservation["role"], selectionIndex: number | null = null) {
+  return observations.find((o) => o.role === role && o.selectionIndex === selectionIndex);
+}
+
+/* -------------------------------------------------------------------------- */
+/* 1-4. Critical regression: 'Арсенал ТБ 2.5, ставка 10'                     */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2B Step 3: correct AI output — 'Арсенал ТБ 2.5, ставка 10' (stake=10, line=2.5) -> STAKE CORROBORATED, LINE CORROBORATED", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Arsenal", selection: "Over", market: "totals", line: "2.5", odds: null })] };
+  const { slip, observations } = observe(raw, "Арсенал ТБ 2.5, ставка 10");
+
+  assert.equal(findObservation(observations, "STAKE")?.verification.verdict, "CORROBORATED");
+  assert.equal(findObservation(observations, "LINE", 0)?.verification.verdict, "CORROBORATED");
+
+  // The returned slip is exactly the raw claim, untouched.
+  assert.equal(slip.stake, 10);
+  assert.equal(slip.selections[0].line, "2.5");
+});
+
+test("BA-2B Step 3: CRITICAL — bad AI output (stake=2.5, line=2.5) -> STAKE CONTRADICTED, LINE CORROBORATED, and the CONTRADICTED stake is NEVER corrected", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 2.5, selections: [football({ event: "Arsenal", selection: "Over", market: "totals", line: "2.5", odds: null })] };
+  const { slip, observations } = observe(raw, "Арсенал ТБ 2.5, ставка 10");
+
+  const stakeObservation = findObservation(observations, "STAKE");
+  assert.equal(stakeObservation?.verification.verdict, "CONTRADICTED");
+  assert.equal(stakeObservation?.verification.conflictingEvidence[0]?.value, "10");
+  assert.equal(findObservation(observations, "LINE", 0)?.verification.verdict, "CORROBORATED");
+
+  // CRITICAL: despite STAKE being CONTRADICTED (real evidence says 10), the
+  // returned slip still carries the AI's own claimed 2.5 — never silently
+  // "fixed" to the evidence-backed value, and the call did not throw/reject.
+  assert.equal(slip.stake, 2.5);
+});
+
+test("BA-2B Step 3: wrong line (claimed line=10 against 'ТБ 2.5, ставка 10') -> LINE CONTRADICTED, never corrected", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Arsenal", selection: "Over", market: "totals", line: "10", odds: null })] };
+  const { slip, observations } = observe(raw, "Арсенал ТБ 2.5, ставка 10");
+
+  const lineObservation = findObservation(observations, "LINE", 0);
+  assert.equal(lineObservation?.verification.verdict, "CONTRADICTED");
+  assert.equal(lineObservation?.verification.conflictingEvidence[0]?.value, "2.5");
+  // The claimed (wrong) line survives into the slip unchanged.
+  assert.equal(slip.selections[0].line, "10");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 5-6. Equal values / decimal comma                                          */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2B Step 3: equal stake/line ('Арсенал ТБ 10, ставка 10') — both CORROBORATED, no equality heuristic rejects them", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Arsenal", selection: "Over", market: "totals", line: "10", odds: null })] };
+  const { observations } = observe(raw, "Арсенал ТБ 10, ставка 10");
+
+  assert.equal(findObservation(observations, "STAKE")?.verification.verdict, "CORROBORATED");
+  assert.equal(findObservation(observations, "LINE", 0)?.verification.verdict, "CORROBORATED");
+});
+
+test("BA-2B Step 3: decimal comma ('Арсенал ТБ 2,5 ставка 2,5') — both roles CORROBORATED via raw comma evidence", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 2.5, selections: [football({ event: "Arsenal", selection: "Over", market: "totals", line: "2,5", odds: null })] };
+  const { observations } = observe(raw, "Арсенал ТБ 2,5 ставка 2,5");
+
+  assert.equal(findObservation(observations, "STAKE")?.verification.verdict, "CORROBORATED");
+  assert.equal(findObservation(observations, "LINE", 0)?.verification.verdict, "CORROBORATED");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 7. UNVERIFIED preserves behavior                                           */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2B Step 3: UNVERIFIED ('Арсенал победа 10', stake only a SOLE_CANDIDATE) never becomes an error", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Arsenal", selection: "Win", odds: null })] };
+  const { slip, observations } = observe(raw, "Арсенал победа 10");
+
+  assert.equal(findObservation(observations, "STAKE")?.verification.verdict, "UNVERIFIED");
+  // Existing behavior fully preserved — no throw, slip built normally.
+  assert.equal(slip.stake, 10);
+  assert.equal(slip.type, "SINGLE");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 8. AMBIGUOUS preserves behavior                                            */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2B Step 3: AMBIGUOUS ('ставка 10, ставка 20') never rejects or changes the bet", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Arsenal", selection: "Win", odds: null })] };
+  const { slip, observations } = observe(raw, "Арсенал победа, ставка 10, ставка 20");
+
+  assert.equal(findObservation(observations, "STAKE")?.verification.verdict, "AMBIGUOUS");
+  assert.equal(slip.stake, 10, "the AI's own claimed stake survives unchanged, whichever conflicting value it happened to match");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 9-10. EXPRESS — global stake observed, per-leg LINE/ODDS skipped          */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2B Step 3: EXPRESS global stake IS observed", () => {
+  const raw: RawBetSlipFields = {
+    type: "EXPRESS",
+    stake: 20,
+    selections: [
+      football({ event: "Arsenal", selection: "Over", market: "totals", line: "2.5", odds: null }),
+      football({ event: "Real Madrid", selection: "Under", market: "totals", line: "3.5", odds: null }),
+    ],
+  };
+  const { slip, observations } = observe(raw, "Арсенал ТБ 2.5 + Реал ТМ 3.5, экспресс 20");
+
+  const stakeObservation = findObservation(observations, "STAKE");
+  assert.equal(stakeObservation?.verification.verdict, "CORROBORATED");
+  assert.equal(slip.stake, 20);
+});
+
+test("BA-2B Step 3: EXPRESS per-leg LINE/ODDS observation is explicitly SKIPPED — leg attribution is out of scope, never reported with false confidence", () => {
+  const raw: RawBetSlipFields = {
+    type: "EXPRESS",
+    stake: 20,
+    selections: [
+      football({ event: "Arsenal", selection: "Over", market: "totals", line: "2.5", odds: null }),
+      football({ event: "Real Madrid", selection: "Under", market: "totals", line: "3.5", odds: null }),
+    ],
+  };
+  const { observations } = observe(raw, "Арсенал ТБ 2.5 + Реал ТМ 3.5, экспресс 20");
+
+  const lineObservations = observations.filter((o) => o.role === "LINE");
+  const oddsObservations = observations.filter((o) => o.role === "ODDS");
+  assert.equal(lineObservations.length, 0, "EXPRESS legs must never receive a per-leg LINE observation in Step 3");
+  assert.equal(oddsObservations.length, 0, "EXPRESS legs must never receive a per-leg ODDS observation in Step 3");
+  // Only the one slip-level STAKE observation is ever produced for EXPRESS.
+  assert.equal(observations.length, 1);
+});
+
+/* -------------------------------------------------------------------------- */
+/* 11-12. Existing SINGLE/EXPRESS mapping is byte-for-byte unchanged          */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2B Step 3: SINGLE mapping unchanged when onNumericRoleObservation is omitted (the real production call shape)", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Arsenal", selection: "Over", market: "totals", line: "2.5", odds: null })] };
+  const withoutCallback = mapRawBetSlipToParsedBetSlip(raw, { originalText: "Арсенал ТБ 2.5, ставка 10", sourceType: "CHAT" });
+  const { slip: withCallback } = observe(raw, "Арсенал ТБ 2.5, ставка 10");
+
+  assert.deepEqual(withoutCallback, withCallback);
+});
+
+test("BA-2B Step 3: EXPRESS mapping unchanged when onNumericRoleObservation is omitted", () => {
+  const raw: RawBetSlipFields = {
+    type: "EXPRESS",
+    stake: 20,
+    selections: [football({ event: "Arsenal", selection: "Over", market: "totals", line: "2.5", odds: null }), football({ event: "Real Madrid", selection: "Win", odds: 1.8 })],
+  };
+  const withoutCallback = mapRawBetSlipToParsedBetSlip(raw, { originalText: "Арсенал ТБ 2.5 + Реал победа, экспресс 20", sourceType: "CHAT" });
+  const { slip: withCallback } = observe(raw, "Арсенал ТБ 2.5 + Реал победа, экспресс 20");
+
+  assert.deepEqual(withoutCallback, withCallback);
+});
+
+/* -------------------------------------------------------------------------- */
+/* 13. OCR flow unaffected                                                    */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2B Step 3: OCR reaches the exact same observation logic as CHAT — same raw input, same verdicts, same slip", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Arsenal", selection: "Over", market: "totals", line: "2.5", odds: null })] };
+  const text = "Арсенал ТБ 2.5, ставка 10";
+
+  const chatResult = observe(raw, text, "CHAT");
+  const ocrResult = observe(raw, text, "OCR");
+
+  assert.deepEqual(chatResult.slip, ocrResult.slip);
+  assert.equal(findObservation(chatResult.observations, "STAKE")?.verification.verdict, findObservation(ocrResult.observations, "STAKE")?.verification.verdict);
+  assert.equal(findObservation(chatResult.observations, "LINE", 0)?.verification.verdict, findObservation(ocrResult.observations, "LINE", 0)?.verification.verdict);
+});
+
+/* -------------------------------------------------------------------------- */
+/* 14. No mutation/correction of AI output, ever — including deep equality   */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2B Step 3: no AI-claimed field is ever mutated or corrected, regardless of verdict — deep structural proof", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 999, selections: [football({ event: "Arsenal", selection: "Over", market: "totals", line: "0.5", odds: 1.5 })] };
+  const rawSnapshot = JSON.parse(JSON.stringify(raw));
+  const { slip } = observe(raw, "Арсенал ТБ 2.5, ставка 10");
+
+  // The input object itself is never mutated...
+  assert.deepEqual(raw, rawSnapshot);
+  // ...and the wildly-contradicted claims (stake=999, line=0.5) still flow
+  // through verbatim — this function only ever observes, never enforces.
+  assert.equal(slip.stake, 999);
+  assert.equal(slip.selections[0].line, "0.5");
+  assert.equal(slip.selections[0].submittedOdds, 1.5);
+});
+
+test("BA-2B Step 3: no console output of any kind (never logs the player's original message)", () => {
+  const originalLog = console.log;
+  const originalWarn = console.warn;
+  const originalError = console.error;
+  const calls: unknown[][] = [];
+  console.log = (...args: unknown[]) => calls.push(args);
+  console.warn = (...args: unknown[]) => calls.push(args);
+  console.error = (...args: unknown[]) => calls.push(args);
+
+  try {
+    const raw: RawBetSlipFields = { type: "SINGLE", stake: 2.5, selections: [football({ event: "Arsenal", selection: "Over", market: "totals", line: "2.5", odds: null })] };
+    observe(raw, "Арсенал ТБ 2.5, ставка 10 — секретный текст игрока");
+  } finally {
+    console.log = originalLog;
+    console.warn = originalWarn;
+    console.error = originalError;
+  }
+
+  assert.equal(calls.length, 0, "mapRawBetSlipToParsedBetSlip must never log anything, especially not the player's original message");
 });
