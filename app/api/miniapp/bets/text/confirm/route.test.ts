@@ -184,6 +184,7 @@ function createFakeDb(options: { players?: Record<string, string> } = {}) {
       },
     },
   };
+  type FakeTx = typeof tx;
 
   return {
     player: {
@@ -194,7 +195,7 @@ function createFakeDb(options: { players?: Record<string, string> } = {}) {
     },
     bet: tx.bet,
     oddsSnapshot: tx.oddsSnapshot,
-    $transaction: async <T>(fn: (tx: typeof tx) => Promise<T>) => fn(tx),
+    $transaction: async <T>(fn: (tx: FakeTx) => Promise<T>) => fn(tx),
     _debug: {
       betCount: () => bets.size,
       createCallCount: () => createCallCount,

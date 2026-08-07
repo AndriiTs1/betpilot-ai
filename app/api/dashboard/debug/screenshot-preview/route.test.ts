@@ -35,6 +35,7 @@ interface FakeSessionRow {
   id: string;
   operatorId: string;
   tokenHash: string;
+  createdAt: Date;
   expiresAt: Date;
   revokedAt: Date | null;
   lastUsedAt: Date | null;
@@ -68,13 +69,14 @@ function validSessionRow(token: string): FakeSessionRow {
     id: "session-1",
     operatorId: "operator-1",
     tokenHash: hashToken(token),
+    createdAt: new Date(),
     expiresAt: new Date(Date.now() + 60 * 60 * 1000),
     revokedAt: null,
     lastUsedAt: null,
   };
 }
 
-function requestWithSession(fileBytes: Uint8Array, mimeType: string, rawToken: string | null): NextRequest {
+function requestWithSession(fileBytes: Uint8Array<ArrayBuffer>, mimeType: string, rawToken: string | null): NextRequest {
   const file = new File([fileBytes], "slip.jpg", { type: mimeType });
   const formData = new FormData();
   formData.set("image", file, "slip.jpg");
@@ -86,7 +88,7 @@ function requestWithSession(fileBytes: Uint8Array, mimeType: string, rawToken: s
   });
 }
 
-function jpegBytes(): Uint8Array {
+function jpegBytes(): Uint8Array<ArrayBuffer> {
   return new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0]);
 }
 

@@ -488,7 +488,7 @@ test("settleBet: guarded Bet update losing a race to a different final result th
       let firstAttempt = true;
       const tx = {
         bet: {
-          update: async ({ where, data }: { where: { id: string; status: string }; data: { status: string } }) => {
+          update: async ({ where, data }: { where: { id: string; status: BetStatus }; data: { status: BetStatus } }) => {
             if (firstAttempt) {
               firstAttempt = false;
               // Simulate a concurrent request winning the race and
@@ -538,7 +538,7 @@ test("settleBet: guarded Bet update losing a race to the SAME final result resol
       let firstAttempt = true;
       const tx = {
         bet: {
-          update: async ({ where, data }: { where: { id: string; status: string }; data: { status: string } }) => {
+          update: async ({ where, data }: { where: { id: string; status: BetStatus }; data: { status: BetStatus } }) => {
             if (firstAttempt) {
               firstAttempt = false;
               const b = fake._debug.getBet(BET_ID)!;
@@ -1122,7 +1122,7 @@ test("effectiveOdds: provided for VOID is rejected (misuse), no writes", async (
 });
 
 test("effectiveOdds: validation runs before any database read (fails fast even for a bet that doesn't exist)", async () => {
-  const fake = createFakeDb({ bet: null });
+  const fake = createFakeDb();
 
   await assert.rejects(
     () =>

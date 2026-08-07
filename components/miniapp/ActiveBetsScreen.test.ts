@@ -20,6 +20,7 @@ import type { RecentBet } from "./types";
 function bet(overrides: Partial<RecentBet> = {}): RecentBet {
   return {
     id: "bet-1",
+    type: "SINGLE",
     sport: "Football",
     event: "Real Madrid vs Barcelona",
     outcome: "Real Madrid Win",

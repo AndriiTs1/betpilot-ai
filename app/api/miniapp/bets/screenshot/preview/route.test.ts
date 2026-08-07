@@ -233,9 +233,9 @@ async function fakeVerifyOddsFn(): Promise<OddsCheckResult> {
 // LARGE_SCREENSHOT_MIN_DIMENSION_PX, so these fixtures exercise the
 // "already-cropped slip" path (skips region detection) by default, exactly
 // like a real cropped bet-slip screenshot would.
-let realJpegBytes: Uint8Array;
-let realPngBytes: Uint8Array;
-let realWebpBytes: Uint8Array;
+let realJpegBytes: Uint8Array<ArrayBuffer>;
+let realPngBytes: Uint8Array<ArrayBuffer>;
+let realWebpBytes: Uint8Array<ArrayBuffer>;
 
 test.before(async () => {
   const image = () => sharp({ create: { width: 64, height: 64, channels: 3, background: { r: 30, g: 30, b: 30 } } });
@@ -244,11 +244,11 @@ test.before(async () => {
   realWebpBytes = new Uint8Array(await image().webp().toBuffer());
 });
 
-function jpegBytes(): Uint8Array {
+function jpegBytes(): Uint8Array<ArrayBuffer> {
   return realJpegBytes;
 }
 
-function buildRequest(initData: string, fileBytes: Uint8Array, mimeType: string, filename = "slip.jpg"): NextRequest {
+function buildRequest(initData: string, fileBytes: Uint8Array<ArrayBuffer>, mimeType: string, filename = "slip.jpg"): NextRequest {
   const file = new File([fileBytes], filename, { type: mimeType });
   const formData = new FormData();
   formData.set("image", file, filename);
@@ -1384,7 +1384,7 @@ test("screenshot preview: INVALID_IMAGE_SIGNATURE is unchanged and does not cons
 
 function buildRequestWithFields(
   initData: string,
-  fileBytes: Uint8Array,
+  fileBytes: Uint8Array<ArrayBuffer>,
   mimeType: string,
   extraFields: Record<string, string> = {},
   filename = "slip.jpg",
