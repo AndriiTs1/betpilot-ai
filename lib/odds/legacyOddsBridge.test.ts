@@ -3,10 +3,8 @@ import assert from "node:assert/strict";
 import {
   legacySportToCanonical,
   legacyFootballLeagueFromSportString,
-  legacySelectionTextToCanonical,
   legacySelectionToCanonicalRequest,
   verificationResultToLegacyOddsCheck,
-  classifyTotalsDirection,
 } from "./legacyOddsBridge";
 import { createVerifiedResult, createOddsChangedResult, createFailedResult, createNotCheckedResult } from "./verification";
 
@@ -85,99 +83,13 @@ test("legacyFootballLeagueFromSportString: whitespace/case normalization works o
 });
 
 /* -------------------------------------------------------------------------- */
-/* legacySelectionTextToCanonical                                             */
-/* -------------------------------------------------------------------------- */
-
-test("legacySelectionTextToCanonical: 1X2 shorthand and spelling variants classify as HOME/DRAW/AWAY", () => {
-  for (const home of ["1", "П1", "p1", "Home", " home "]) {
-    const result = legacySelectionTextToCanonical(home);
-    assert.equal(result.selectionType, "HOME");
-    assert.equal(result.marketType, "MONEYLINE_3WAY");
-  }
-  for (const draw of ["X", "х", "Draw", "ничья"]) {
-    const result = legacySelectionTextToCanonical(draw);
-    assert.equal(result.selectionType, "DRAW");
-  }
-  for (const away of ["2", "П2", "p2", "Away"]) {
-    const result = legacySelectionTextToCanonical(away);
-    assert.equal(result.selectionType, "AWAY");
-  }
-});
-
-test("legacySelectionTextToCanonical: combined double-chance notation is NOT classified as a single HOME/DRAW/AWAY token", () => {
-  for (const combined of ["1X", "X2", "12"]) {
-    const result = legacySelectionTextToCanonical(combined);
-    assert.equal(result.selectionType, "PARTICIPANT");
-  }
-});
-
-test("legacySelectionTextToCanonical: a full team name or any other free text falls back to PARTICIPANT with the raw text preserved verbatim", () => {
-  // Step 16A — "X Win"/"X to win"/"X wins" are no longer arbitrary free
-  // text; see the dedicated winner-phrase-stripping tests below. These
-  // fixtures deliberately avoid that recognized suffix shape so this test
-  // stays about the true fallback: text that isn't any recognized token or
-  // phrase at all.
-  for (const text of ["Real Madrid", "Manchester City", "Over 2.5", "Carlos Alcaraz"]) {
-    const result = legacySelectionTextToCanonical(text);
-    assert.equal(result.selectionType, "PARTICIPANT");
-    assert.equal(result.marketType, "MONEYLINE_2WAY");
-    assert.equal(result.participant?.name, text);
-  }
-});
-
-// ---------------------------------------------------------------------
-// Step 16A — natural winner-phrase normalization ("Inter Win", "Inter to
-// win", "Home win", ...), never hardcoding any specific club/team name.
-// ---------------------------------------------------------------------
-
-test("legacySelectionTextToCanonical: 'X Win'/'X to win'/'X wins' strip the winner-intent suffix, leaving the participant name searchable", () => {
-  for (const [text, expectedName] of [
-    ["Inter Win", "Inter"],
-    ["Inter to win", "Inter"],
-    ["Inter wins", "Inter"],
-    ["Juventus wins", "Juventus"],
-    ["Real Madrid to win", "Real Madrid"],
-  ] as const) {
-    const result = legacySelectionTextToCanonical(text);
-    assert.equal(result.selectionType, "PARTICIPANT", `"${text}" must classify as PARTICIPANT`);
-    assert.equal(result.marketType, "MONEYLINE_2WAY");
-    assert.equal(result.participant?.name, expectedName, `"${text}" must strip to "${expectedName}"`);
-  }
-});
-
-test("legacySelectionTextToCanonical: 'Home win'/'home team wins'/'Away win'/'away team wins' resolve to HOME/AWAY, not PARTICIPANT", () => {
-  for (const text of ["Home win", "home team wins", "HOME WINS"]) {
-    const result = legacySelectionTextToCanonical(text);
-    assert.equal(result.selectionType, "HOME", `"${text}" must resolve to HOME`);
-    assert.equal(result.marketType, "MONEYLINE_3WAY");
-  }
-
-  for (const text of ["Away win", "away team wins", "AWAY WINS"]) {
-    const result = legacySelectionTextToCanonical(text);
-    assert.equal(result.selectionType, "AWAY", `"${text}" must resolve to AWAY`);
-    assert.equal(result.marketType, "MONEYLINE_3WAY");
-  }
-});
-
-test("legacySelectionTextToCanonical: 'Draw' still resolves to DRAW, unaffected by winner-suffix stripping", () => {
-  const result = legacySelectionTextToCanonical("Draw");
-  assert.equal(result.selectionType, "DRAW");
-  assert.equal(result.marketType, "MONEYLINE_3WAY");
-});
-
-test("legacySelectionTextToCanonical: a real participant name is never damaged by the winner-suffix strip when there is no actual separating word boundary", () => {
-  // No literal club is named here — this proves the *mechanism* (anchored,
-  // whitespace-preceded suffix only) rather than special-casing any team.
-  for (const text of ["Darwin", "Edwin", "Corwin"]) {
-    const result = legacySelectionTextToCanonical(text);
-    assert.equal(result.selectionType, "PARTICIPANT");
-    assert.equal(result.participant?.name, text, `"${text}" must survive completely unmodified`);
-  }
-});
-
-/* -------------------------------------------------------------------------- */
 /* legacySelectionToCanonicalRequest                                          */
 /* -------------------------------------------------------------------------- */
+//
+// Stage BA-2A — the legacySelectionTextToCanonical()-specific unit tests
+// that used to live here now live in lib/odds/shorthandClassifier.test.ts,
+// testing the shared classifier that (now-removed) function was replaced
+// by. What remains below tests legacySelectionToCanonicalRequest() itself.
 
 test("request mapping: football HOME selection", () => {
   const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "Arsenal vs Chelsea", selection: "1", submittedOdds: 2.1 });
@@ -639,83 +551,18 @@ test("result mapping: FAILED round-trips matchedEvent too (event found, selectio
 
 /* ============================================================================
  * Betting Markets V1, Phase 3.2 — Totals (Over/Under) classification.
- * classifyTotalsDirection() is wired into legacySelectionToCanonicalRequest()
- * (see that function's own Phase 3.2 comments), but TheOddsApiProvider's
- * capabilities/market gate is untouched — a TOTALS selection still cannot
- * become VERIFIED end-to-end (that gate is exercised in
- * theOddsApiProvider.test.ts, not here).
+ *
+ * Stage BA-2A — the classifyTotalsDirection()/legacySelectionTextToCanonical()
+ * unit tests that used to live here now live in
+ * lib/odds/shorthandClassifier.test.ts, testing the shared classifier those
+ * two (now-removed) functions were replaced by. What remains below tests
+ * legacySelectionToCanonicalRequest() itself — the full wiring from a legacy
+ * free-text selection to a canonical VerifySelectionRequest — which is a
+ * different, still-real thing to verify independently of the classifier it
+ * calls. TheOddsApiProvider's capabilities/market gate is untouched — a
+ * TOTALS selection still cannot become VERIFIED end-to-end through this file
+ * alone (that gate is exercised in theOddsApiProvider.test.ts, not here).
  * ============================================================================ */
-
-/* -------------------------------------------------------------------------- */
-/* classifyTotalsDirection — every required phrase family                    */
-/* -------------------------------------------------------------------------- */
-
-test("classifyTotalsDirection: every required OVER phrase family is recognized, with the embedded line captured", () => {
-  const overInputs = ["ТБ 2.5", "ТБ2.5", "тотал больше 2.5", "больше 2.5", "Over 2.5", "Over2.5", "O2.5"];
-  for (const selection of overInputs) {
-    const result = classifyTotalsDirection(selection);
-    assert.equal(result?.direction, "OVER", `"${selection}" must classify as OVER`);
-    assert.equal(result?.embeddedLine, "2.5", `"${selection}" must capture embedded line "2.5"`);
-  }
-});
-
-test("classifyTotalsDirection: every required UNDER phrase family is recognized, with the embedded line captured", () => {
-  const underInputs = ["ТМ 2.5", "ТМ2.5", "тотал меньше 2.5", "меньше 2.5", "Under 2.5", "Under2.5", "U2.5"];
-  for (const selection of underInputs) {
-    const result = classifyTotalsDirection(selection);
-    assert.equal(result?.direction, "UNDER", `"${selection}" must classify as UNDER`);
-    assert.equal(result?.embeddedLine, "2.5", `"${selection}" must capture embedded line "2.5"`);
-  }
-});
-
-test("classifyTotalsDirection: case-insensitive and tolerant of whitespace", () => {
-  assert.equal(classifyTotalsDirection("  over 2.5  ")?.direction, "OVER");
-  assert.equal(classifyTotalsDirection("OVER 2.5")?.direction, "OVER");
-  assert.equal(classifyTotalsDirection("тб 2.5")?.direction, "OVER");
-  assert.equal(classifyTotalsDirection("ТБ 2.5")?.direction, "OVER");
-});
-
-test("classifyTotalsDirection: AI shape — bare 'Over'/'Under' with no embedded number (line arrives separately)", () => {
-  const over = classifyTotalsDirection("Over");
-  assert.equal(over?.direction, "OVER");
-  assert.equal(over?.embeddedLine, null);
-
-  const under = classifyTotalsDirection("Under");
-  assert.equal(under?.direction, "UNDER");
-  assert.equal(under?.embeddedLine, null);
-
-  const tb = classifyTotalsDirection("ТБ");
-  assert.equal(tb?.direction, "OVER");
-  assert.equal(tb?.embeddedLine, null);
-});
-
-test("classifyTotalsDirection: a bare single letter 'O'/'U' with NO number is never recognized (too ambiguous without the mandatory attached number)", () => {
-  assert.equal(classifyTotalsDirection("O"), null);
-  assert.equal(classifyTotalsDirection("U"), null);
-});
-
-test("classifyTotalsDirection: ordinary team-win text is never classified as Totals", () => {
-  const moneylineInputs = ["1", "X", "2", "Real Madrid Win", "Arsenal", "Home", "Away", "Draw"];
-  for (const selection of moneylineInputs) {
-    assert.equal(classifyTotalsDirection(selection), null, `"${selection}" must not classify as Totals`);
-  }
-});
-
-test("classifyTotalsDirection: ambiguous text containing both Over and Under is rejected (never guesses a direction)", () => {
-  assert.equal(classifyTotalsDirection("Over Under 2.5"), null);
-  assert.equal(classifyTotalsDirection("Over/Under 2.5"), null);
-});
-
-test("classifyTotalsDirection: team totals are not classified yet (a participant name prefix breaks the anchor)", () => {
-  assert.equal(classifyTotalsDirection("Arsenal Over 1.5"), null);
-  assert.equal(classifyTotalsDirection("Arsenal Team Total Over 1.5"), null);
-});
-
-test("classifyTotalsDirection: spreads/handicaps are not classified yet", () => {
-  assert.equal(classifyTotalsDirection("-1.5"), null);
-  assert.equal(classifyTotalsDirection("+1.5"), null);
-  assert.equal(classifyTotalsDirection("Arsenal -1.5"), null);
-});
 
 /* -------------------------------------------------------------------------- */
 /* legacySelectionToCanonicalRequest — full wiring, required canonical output */
@@ -822,6 +669,58 @@ test("request mapping: spreads/handicaps ('-1.5') are not classified as TOTALS y
 
   assert.notEqual(request.selection.marketType, "TOTALS");
   assert.equal(request.selection.selectionType, "PARTICIPANT");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Stage BA-2A — TEAM_TOTAL (ИТБ/ИТМ) and SPREAD (Ф1/Ф2, attributed signed    */
+/* line) now classify honestly instead of falling back to PARTICIPANT. No    */
+/* provider adapter supports verifying either yet — see                      */
+/* theOddsApiProvider.test.ts's MARKET_NOT_SUPPORTED coverage for the        */
+/* end-to-end safety proof that follows from this correct classification.    */
+/* -------------------------------------------------------------------------- */
+
+test("request mapping: 'Арсенал ИТБ 1.5' classifies as TEAM_TOTAL/OVER with participant + line — never MONEYLINE", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "Арсенал vs Челси", selection: "Арсенал ИТБ 1.5", submittedOdds: 1.9 });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.selectionType, "OVER");
+  assert.equal(request.selection.participant?.name, "Арсенал");
+  assert.equal(request.selection.line, "1.5");
+});
+
+test("request mapping: 'Арсенал ИТМ 1.5' classifies as TEAM_TOTAL/UNDER — never MONEYLINE", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "Арсенал vs Челси", selection: "Арсенал ИТМ 1.5", submittedOdds: 1.9 });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.selectionType, "UNDER");
+  assert.equal(request.selection.participant?.name, "Арсенал");
+  assert.equal(request.selection.line, "1.5");
+});
+
+test("request mapping: 'Арсенал Ф1(-1.5)' classifies as SPREAD with participant + line — never MONEYLINE", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "Арсенал vs Челси", selection: "Арсенал Ф1(-1.5)", submittedOdds: 1.9 });
+
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Арсенал");
+  assert.equal(request.selection.line, "-1.5");
+});
+
+test("request mapping: a shorthand token concatenated with a team name (no separate event/selection split) still classifies correctly via the event's own split participants — the exact production regression case", () => {
+  // The event string is split into participants by legacyEventToCanonical
+  // BEFORE classification, so "Арсенал" is already a knownParticipantName
+  // by the time the selection text is classified — closing the anchor gap
+  // that let "Арсенал ТБ 2.5" (arriving as one concatenated field) fall
+  // back to a fabricated MONEYLINE PARTICIPANT guess.
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Челси",
+    selection: "Арсенал ТБ 2.5",
+    submittedOdds: 1.9,
+  });
+
+  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.selectionType, "OVER");
+  assert.equal(request.selection.line, "2.5");
 });
 
 test("request mapping: SINGLE and EXPRESS selections classify identically — legacySelectionToCanonicalRequest is a pure, per-selection function with no shared state across calls", () => {

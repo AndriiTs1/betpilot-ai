@@ -364,6 +364,30 @@ test("normalizeDraftSelection: over/under tokens classify correctly", () => {
   assert.equal(normalizeDraftSelection("Under", "TOTALS", []).selectionType.value, "UNDER");
 });
 
+// Stage BA-2A — the shared classifier's Cyrillic/Ukrainian vocabulary is
+// now recognized at the draft layer too, closing the asymmetry where
+// UniversalBetDraft's own classification used to be narrower than
+// lib/odds/legacyOddsBridge.ts's (English-only OVER_TOKENS/UNDER_TOKENS,
+// no ТБ/ТМ, no нічия/победа/выиграет/перемога).
+test("normalizeDraftSelection: Cyrillic/Ukrainian totals shorthand (ТБ/ТМ) classify as OVER/UNDER (new in this stage)", () => {
+  assert.equal(normalizeDraftSelection("ТБ 2.5", "TOTALS", []).selectionType.value, "OVER");
+  assert.equal(normalizeDraftSelection("ТМ 2.5", "TOTALS", []).selectionType.value, "UNDER");
+  assert.equal(normalizeDraftSelection("тотал больше 2.5", "TOTALS", []).selectionType.value, "OVER");
+});
+
+test("normalizeDraftSelection: Ukrainian 'нічия' classifies as DRAW (new in this stage)", () => {
+  assert.equal(normalizeDraftSelection("нічия", "MONEYLINE_3WAY", []).selectionType.value, "DRAW");
+});
+
+test("normalizeDraftSelection: a shorthand token concatenated with a known participant name still classifies via the participants list — draft-layer parity with legacyOddsBridge.ts", () => {
+  const participants = [
+    { index: 0, rawName: "Арсенал" },
+    { index: 1, rawName: "Челси" },
+  ];
+  const result = normalizeDraftSelection("Арсенал ТБ 2.5", "TOTALS", participants);
+  assert.equal(result.selectionType.value, "OVER");
+});
+
 test("normalizeDraftSelection: double-chance tokens classify correctly", () => {
   assert.equal(normalizeDraftSelection("1X", "DOUBLE_CHANCE", []).selectionType.value, "HOME_OR_DRAW");
   assert.equal(normalizeDraftSelection("X2", "DOUBLE_CHANCE", []).selectionType.value, "DRAW_OR_AWAY");

@@ -4,6 +4,7 @@ import { TheOddsApiProvider } from "./theOddsApiProvider";
 import type { CanonicalEvent, CanonicalSelection } from "./domain";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import type { OddsVerificationInput, TotalsVerificationInput } from "./oddsVerifier";
+import { legacySelectionToCanonicalRequest } from "./legacyOddsBridge";
 
 const FOOTBALL_EVENT: CanonicalEvent = {
   sport: "FOOTBALL",
@@ -410,6 +411,53 @@ test("adapter mapping: TOTALS for a non-football sport is not yet supported — 
   assert.equal(result.status, "FAILED");
   assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED");
   assert.equal(calls.length, 0);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Stage BA-2A — end-to-end proof: a shorthand TEAM_TOTAL/SPREAD message,     */
+/* once correctly classified by lib/odds/legacyOddsBridge.ts (which now      */
+/* delegates to lib/odds/shorthandClassifier.ts), is safely rejected as      */
+/* MARKET_NOT_SUPPORTED by this adapter's existing allowlist gate — never    */
+/* silently verified as MONEYLINE, and no provider support was added for     */
+/* either market to make this pass.                                         */
+/* -------------------------------------------------------------------------- */
+
+test("end-to-end: 'Арсенал ИТБ 1.5' (TEAM_TOTAL shorthand) is classified correctly and safely rejected as MARKET_NOT_SUPPORTED — never becomes a MONEYLINE bet", async () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Челси",
+    selection: "Арсенал ИТБ 1.5",
+    submittedOdds: 1.9,
+  });
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+
+  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({}));
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: request.selection });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED");
+  assert.equal(calls.length, 0, "the h2h verifier must never be called for an unsupported market");
+});
+
+test("end-to-end: 'Арсенал Ф1(-1.5)' (SPREAD shorthand) is classified correctly and safely rejected as MARKET_NOT_SUPPORTED — never becomes a MONEYLINE bet", async () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Челси",
+    selection: "Арсенал Ф1(-1.5)",
+    submittedOdds: 1.9,
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+
+  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({}));
+  const provider = new TheOddsApiProvider(fn);
+
+  const result = await provider.verifySelection({ selection: request.selection });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED");
+  assert.equal(calls.length, 0, "the h2h verifier must never be called for an unsupported market");
 });
 
 test("adapter mapping: sport UNKNOWN never reaches the legacy verifier — FAILED/SPORT_NOT_SUPPORTED", async () => {

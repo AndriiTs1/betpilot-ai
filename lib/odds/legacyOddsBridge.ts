@@ -8,18 +8,28 @@
 // so lib/bets/buildBetSlipPreview.ts's orchestration logic can stay a thin,
 // reviewable diff (see docs/ODDS_PROVIDER_DESIGN.md Section 18 Phase E).
 //
-// Only MONEYLINE_2WAY/MONEYLINE_3WAY are ever produced here — the current
-// legacy pipeline only ever verifies match-winner/moneyline selections
-// (lib/odds/oddsVerifier.ts requests `markets=h2h` exclusively); this
-// bridge does not, and must not, extend into Totals, Spread, BTTS, Double
-// Chance, Team Totals, or player props (docs/ODDS_SUPPORT_MATRIX.md
-// Section 5 — those remain deferred until a later step).
+// Stage BA-2A — selection-text classification (which market/selection a
+// free-text string like "ТБ 2.5"/"Арсенал ИТБ 1.5"/"1" means) now lives
+// entirely in lib/odds/shorthandClassifier.ts, the one deterministic
+// classifier this file and lib/bets/draft/normalize.ts both call, instead
+// of this file maintaining its own independent token tables. This file's
+// own job stays: legacy free-text shape -> canonical VerifySelectionRequest,
+// and VerificationResult -> legacy OddsCheckResult, in both directions.
+//
+// MONEYLINE_2WAY/MONEYLINE_3WAY/TOTALS/TEAM_TOTAL/SPREAD can all be
+// produced here (via the shared classifier) — but only MONEYLINE_2WAY/
+// MONEYLINE_3WAY/TOTALS are actually verifiable by any provider adapter
+// today (TheOddsApiProvider's own supportedMarketTypes allowlist rejects
+// TEAM_TOTAL/SPREAD as MARKET_NOT_SUPPORTED before any provider call —
+// classifying a market correctly and a provider being able to verify it
+// are two different questions; docs/ODDS_SUPPORT_MATRIX.md Section 5).
 
-import { normalizeLineString, type CanonicalEvent, type CanonicalLeague, type CanonicalParticipant, type Sport } from "./domain";
+import { normalizeLineString, type CanonicalEvent, type CanonicalLeague, type Sport } from "./domain";
 import type { VerifySelectionRequest } from "./oddsProvider";
 import type { VerificationResult } from "./verification";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { resolveFootballLeague } from "./footballLeagues";
+import { classifyBettingSelectionText } from "./shorthandClassifier";
 
 /* -------------------------------------------------------------------------- */
 /* Legacy sport string -> canonical Sport                                     */
@@ -79,138 +89,6 @@ export function legacySportToCanonical(sport: string): Sport {
 export function legacyFootballLeagueFromSportString(sport: string): CanonicalLeague | undefined {
   const resolved = resolveFootballLeague(sport);
   return resolved ? { name: resolved.displayName } : undefined;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Legacy selection text -> canonical market/selection classification         */
-/* -------------------------------------------------------------------------- */
-
-interface ClassifiedSelection {
-  readonly marketType: "MONEYLINE_2WAY" | "MONEYLINE_3WAY" | "TOTALS";
-  readonly selectionType: "HOME" | "DRAW" | "AWAY" | "PARTICIPANT" | "OVER" | "UNDER";
-  readonly participant?: CanonicalParticipant;
-}
-
-// Same closed token set oddsVerifier.ts's private classifySingleSelection
-// recognizes (FIRST_TEAM_TOKENS/DRAW_TOKENS/SECOND_TEAM_TOKENS) — chosen
-// so a "1"/"X"/"2"/"П1"/etc. selection is classified structurally honestly
-// as HOME/DRAW/AWAY rather than opaque PARTICIPANT text. This choice does
-// not change legacy behavior even if it were skipped entirely:
-// TheOddsApiProvider's selectionToLegacyText() re-expands HOME/DRAW/AWAY
-// into the literal strings "home"/"draw"/"away", which are THEMSELVES
-// members of oddsVerifier.ts's own recognized token sets — so either path
-// reaches the identical legacy classification. Anything not in these three
-// sets (full team names, "Over 2.5", OCR garbage, anything) falls back to
-// PARTICIPANT with the ORIGINAL, UNMODIFIED text preserved as the
-// participant name — TheOddsApiProvider passes that name straight through
-// as the legacy `selection` string, so this fallback is a lossless,
-// byte-for-byte-equivalent pass-through of exactly what legacy receives
-// today, not an interpretation of what the text means.
-const HOME_TOKENS: ReadonlySet<string> = new Set(["1", "п1", "p1", "home"]);
-const DRAW_TOKENS: ReadonlySet<string> = new Set(["x", "х", "draw", "ничья"]);
-const AWAY_TOKENS: ReadonlySet<string> = new Set(["2", "п2", "p2", "away"]);
-
-// Step 16A — natural winner phrases ("Inter Win", "Inter to win", "Inter
-// wins", "Home win", "away team wins", ...). Only a recognized TRAILING
-// winner-intent suffix is ever stripped, anchored to the end of the string
-// via `$` and requiring a preceding word boundary/whitespace — so a real
-// participant name that merely contains a similar-looking substring with
-// no actual separating space before it (there is no realistic team name
-// this could misfire on; the anchor makes that structurally true, not just
-// empirically) is never damaged, and the strip never fires more than once
-// per selection. This never hardcodes any team/club name — it recognizes
-// only the phrasing pattern, exactly like HOME/DRAW/AWAY_TOKENS above.
-const WINNER_SUFFIX_REGEX = /\s+(?:to\s+win|wins|win)$/i;
-
-// "home"/"home team" and "away"/"away team" — recognized only AFTER a
-// winner suffix was actually stripped (a bare "home"/"away" is already
-// handled by HOME_TOKENS/AWAY_TOKENS above); this only extends recognition
-// to the "<side> team wins" phrasing, never a different token set.
-const HOME_TEAM_PHRASES: ReadonlySet<string> = new Set(["home", "home team"]);
-const AWAY_TEAM_PHRASES: ReadonlySet<string> = new Set(["away", "away team"]);
-
-export function legacySelectionTextToCanonical(raw: string): ClassifiedSelection {
-  const trimmed = raw.trim();
-  const key = trimmed.toLowerCase();
-  if (HOME_TOKENS.has(key)) return { marketType: "MONEYLINE_3WAY", selectionType: "HOME" };
-  if (DRAW_TOKENS.has(key)) return { marketType: "MONEYLINE_3WAY", selectionType: "DRAW" };
-  if (AWAY_TOKENS.has(key)) return { marketType: "MONEYLINE_3WAY", selectionType: "AWAY" };
-
-  const withoutWinnerSuffix = trimmed.replace(WINNER_SUFFIX_REGEX, "").trim();
-
-  if (withoutWinnerSuffix.length > 0 && withoutWinnerSuffix.length !== trimmed.length) {
-    const strippedKey = withoutWinnerSuffix.toLowerCase();
-    if (HOME_TEAM_PHRASES.has(strippedKey)) return { marketType: "MONEYLINE_3WAY", selectionType: "HOME" };
-    if (AWAY_TEAM_PHRASES.has(strippedKey)) return { marketType: "MONEYLINE_3WAY", selectionType: "AWAY" };
-    // A genuine participant candidate — the winner-intent suffix stripped,
-    // the remainder (e.g. "Inter") is what's actually searchable against
-    // provider outcome names. The ORIGINAL raw text is never lost: it stays
-    // available to the caller via BetSlipSelectionInput.selection, which
-    // this function does not read from or write back to.
-    return { marketType: "MONEYLINE_2WAY", selectionType: "PARTICIPANT", participant: { name: withoutWinnerSuffix } };
-  }
-
-  return { marketType: "MONEYLINE_2WAY", selectionType: "PARTICIPANT", participant: { name: raw } };
-}
-
-/* -------------------------------------------------------------------------- */
-/* Betting Markets V1, Phase 3.2 — Totals (Over/Under) direction              */
-/* classification. This is the one place a selection is ever recognized as   */
-/* TOTALS — legacySelectionTextToCanonical() above is completely unchanged   */
-/* and still only ever produces MONEYLINE_2WAY/MONEYLINE_3WAY.               */
-/* -------------------------------------------------------------------------- */
-
-const TOTAL_LINE_NUMBER = "(\\d+(?:\\.\\d+)?)";
-
-// "Distinctive" direction tokens — safe to recognize even with NO trailing
-// number, because the token itself is already strong, unambiguous evidence
-// of a Totals bet (mirrors HOME_TOKENS/DRAW_TOKENS/AWAY_TOKENS's own
-// closed-token-set philosophy above). This is what supports the AI-shape
-// case where `selection` is bare "Over"/"Under" and the numeric line arrives
-// separately via BetSlipSelectionInput.line — as well as "ТБ"/"тотал
-// больше"/"больше" etc. with no number, for the same reason.
-const OVER_WORD_PATTERN = new RegExp(`^(?:тб|тотал\\s+больше|больше|over)(?:\\s*${TOTAL_LINE_NUMBER})?$`, "i");
-const UNDER_WORD_PATTERN = new RegExp(`^(?:тм|тотал\\s+меньше|меньше|under)(?:\\s*${TOTAL_LINE_NUMBER})?$`, "i");
-
-// Bare single-letter shorthand ("O2.5"/"U2.5") — a real, common bookmaker-
-// slip abbreviation, but a single letter alone is far too ambiguous to
-// recognize without an attached number (unlike "Over"/"ТБ", a bare "O" or
-// "U" selection is not itself evidence of a Totals bet) — the number is
-// mandatory for this pair only.
-const OVER_LETTER_PATTERN = new RegExp(`^o${TOTAL_LINE_NUMBER}$`, "i");
-const UNDER_LETTER_PATTERN = new RegExp(`^u${TOTAL_LINE_NUMBER}$`, "i");
-
-export interface TotalsDirectionMatch {
-  readonly direction: "OVER" | "UNDER";
-  // The numeric line embedded directly in the selection text (e.g. "2.5"
-  // from "ТБ 2.5"), when present — null when the direction token appeared
-  // alone (e.g. bare "Over"/"ТБ"). Always an already dot-decimal, sign-free
-  // string when non-null (the regex captures nothing else), so it is always
-  // isDecimalString-shaped without any further massaging.
-  readonly embeddedLine: string | null;
-}
-
-// Pure text classification only — never decides which of this and
-// BetSlipSelectionInput.line wins (that precedence lives in
-// legacySelectionToCanonicalRequest below, per this phase's explicit "line
-// is authoritative, free text is only a backward-compatible fallback"
-// instruction). OVER/UNDER are mutually exclusive, disjoint token
-// vocabularies checked against the FULL, anchored (^...$) selection string,
-// so a string can never match both directions, and text that merely
-// contains a direction word as a substring (e.g. a team name, "Arsenal Over
-// 1.5", a team-total or handicap phrase) never matches at all — it falls
-// through to null and is classified by the existing MONEYLINE path exactly
-// as it is today.
-export function classifyTotalsDirection(selectionText: string): TotalsDirectionMatch | null {
-  const trimmed = selectionText.trim();
-
-  const overMatch = OVER_WORD_PATTERN.exec(trimmed) ?? OVER_LETTER_PATTERN.exec(trimmed);
-  if (overMatch) return { direction: "OVER", embeddedLine: overMatch[1] ?? null };
-
-  const underMatch = UNDER_WORD_PATTERN.exec(trimmed) ?? UNDER_LETTER_PATTERN.exec(trimmed);
-  if (underMatch) return { direction: "UNDER", embeddedLine: underMatch[1] ?? null };
-
-  return null;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -315,30 +193,33 @@ export function legacySelectionToCanonicalRequest(selection: LegacyVerifiableSel
     : legacyFootballLeagueFromSportString(selection.sport);
   const event = legacyEventToCanonical(sport, selection.event, league);
 
-  // Betting Markets V1, Phase 3.2 — Totals is tried FIRST; only a selection
-  // whose text is unambiguously an Over/Under direction token is ever
-  // classified as TOTALS. Every other selection (team names, 1X2 shorthand,
-  // winner phrases, team-total/handicap text, anything unrecognized) falls
-  // through to the completely unchanged legacySelectionTextToCanonical()
-  // path exactly as it did before this phase — existing MONEYLINE/DRAW
-  // behavior is byte-for-byte unaffected.
-  const totalsDirection = classifyTotalsDirection(selection.selection);
-  const classified: ClassifiedSelection = totalsDirection
-    ? { marketType: "TOTALS", selectionType: totalsDirection.direction }
-    : legacySelectionTextToCanonical(selection.selection);
+  // Stage BA-2A — the one deterministic shorthand classifier
+  // (lib/odds/shorthandClassifier.ts), replacing this function's own
+  // former separate classifyTotalsDirection()/legacySelectionTextToCanonical()
+  // composition. Behavior for every previously-recognized token is
+  // preserved byte-for-byte (see shorthandClassifier.test.ts's parity
+  // tests); new in this stage: TEAM_TOTAL (ИТБ/ИТМ) and SPREAD (Ф1/Ф2, a
+  // participant-attributed signed line) are now classified honestly
+  // instead of silently falling back to MONEYLINE_2WAY/PARTICIPANT.
+  //
+  // event.participants (already split above) is passed through as
+  // knownParticipantNames so a shorthand token concatenated with a team
+  // name in a single selection string (e.g. "Арсенал ТБ 2.5" arriving as
+  // one field rather than a separately-stated event/selection split) can
+  // still be recognized — closing the exact gap the BA-1 acceptance audit
+  // traced this production bug to.
+  const knownParticipantNames = event.participants.map((participant) => participant.name);
+  const classified = classifyBettingSelectionText(selection.selection, knownParticipantNames);
 
   // Line precedence: BetSlipSelectionInput.line (Phase 2's already-threaded
   // field — the AI's own dedicated "line" tool-schema value) is always
-  // authoritative when present. The Totals classifier's embeddedLine (a
-  // number scraped out of the free-text selection, e.g. "2.5" from "ТБ
-  // 2.5") is used ONLY as a backward-compatible fallback when no separate
-  // line was ever stated at all — it never overwrites a real, separately-
-  // submitted line, per this phase's explicit instruction. For every
-  // non-Totals selection this is byte-for-byte the same value
-  // selection.line already was (totalsDirection is null, so the fallback
-  // branch is never reached) — moneyline/DRAW's own line handling (always
-  // null in practice) is completely unchanged.
-  const rawLine = selection.line ?? totalsDirection?.embeddedLine ?? null;
+  // authoritative when present. The classifier's embeddedLine (a number
+  // scraped out of the free-text selection, e.g. "2.5" from "ТБ 2.5") is
+  // used ONLY as a backward-compatible fallback when no separate line was
+  // ever stated at all — it never overwrites a real, separately-submitted
+  // line, per this phase's explicit instruction (unchanged from before this
+  // stage).
+  const rawLine = selection.line ?? classified.embeddedLine ?? null;
 
   return {
     context: "PREVIEW",
@@ -349,7 +230,7 @@ export function legacySelectionToCanonicalRequest(selection: LegacyVerifiableSel
       marketType: classified.marketType,
       period: "FULL_GAME",
       selectionType: classified.selectionType,
-      participant: classified.participant,
+      participant: classified.participantName !== null ? { name: classified.participantName } : undefined,
       // Step 15H — omitted (undefined) rather than serialized as the
       // literal string "null" when nothing was submitted. No unsafe
       // assertion: a plain, real null check, matching

@@ -4,14 +4,12 @@
 // Every alias table here is closed and exact (trim + lowercase + collapse
 // whitespace) — never fuzzy or substring matching.
 //
-// This file mirrors (never imports) the same small, stable vocabularies
-// already proven in lib/odds/legacyOddsBridge.ts (Step 7A) — the same
-// convention that file itself uses for oddsVerifier.ts's private token
-// sets. The two tables are intentionally independent: this one governs
-// how a UniversalBetDraft's own fields normalize; legacyOddsBridge.ts's
-// governs how a legacy ParsedBetSlip selection maps to a provider request.
-// A future Step 8B integration is expected to keep them in sync by hand,
-// not by importing across module boundaries that were never asked for.
+// Stage BA-2A — betting-shorthand token classification (HOME/DRAW/AWAY,
+// TOTALS/TEAM_TOTAL OVER/UNDER) no longer mirrors lib/odds/legacyOddsBridge.ts's
+// own token tables independently; both files now call the one shared
+// classifier, lib/odds/shorthandClassifier.ts — see normalizeDraftSelection's
+// own call site below for exactly which part of its result this function
+// consumes (its own PARTICIPANT resolution stays local and untouched).
 
 import type { MarketType, Period, SelectionType, Sport } from "@/lib/odds/domain";
 import {
@@ -25,6 +23,7 @@ import {
   type BetDraftParticipant,
   type BetDraftParticipantRef,
 } from "./domain";
+import { classifyBettingSelectionText } from "@/lib/odds/shorthandClassifier";
 
 function normalizeLookupKey(text: string): string {
   return text.trim().toLowerCase().replace(/\s+/g, " ");
@@ -350,17 +349,20 @@ export function normalizeDraftMarket(rawText: string | null | undefined): BetDra
 /* Selection                                                                   */
 /* -------------------------------------------------------------------------- */
 
-// Same closed token sets already proven in legacyOddsBridge.ts (mirrored,
-// not imported — see this file's header comment), plus the additional
-// YES/NO/OVER/UNDER/double-chance tokens this step's richer market model
-// now needs.
-const HOME_TOKENS: ReadonlySet<string> = new Set(["1", "п1", "p1", "home"]);
-const DRAW_TOKENS: ReadonlySet<string> = new Set(["x", "х", "draw", "ничья"]);
-const AWAY_TOKENS: ReadonlySet<string> = new Set(["2", "п2", "p2", "away"]);
+// Stage BA-2A — HOME/DRAW/AWAY and TOTALS/TEAM_TOTAL OVER/UNDER token
+// recognition now comes from the one shared classifier
+// (lib/odds/shorthandClassifier.ts), the same one lib/odds/legacyOddsBridge.ts
+// calls, instead of this file's own, previously-narrower, independently-
+// maintained token sets (see classifyBettingSelectionText's own call site
+// below for exactly which part of its result this function consumes).
+//
+// YES/NO and double-chance (1X/X2/12) recognition stays local — these were
+// never part of legacyOddsBridge.ts's vocabulary either (BTTS/double-chance
+// verification isn't supported by any provider adapter yet), so keeping
+// them here is not a second copy of the SAME vocabulary, just this file's
+// own, still out-of-scope-for-BA-2A addition.
 const YES_TOKENS: ReadonlySet<string> = new Set(["yes", "да"]);
 const NO_TOKENS: ReadonlySet<string> = new Set(["no", "нет"]);
-const OVER_TOKENS: ReadonlySet<string> = new Set(["over"]);
-const UNDER_TOKENS: ReadonlySet<string> = new Set(["under"]);
 const HOME_OR_DRAW_TOKENS: ReadonlySet<string> = new Set(["1x", "1х"]);
 const DRAW_OR_AWAY_TOKENS: ReadonlySet<string> = new Set(["x2", "х2"]);
 const HOME_OR_AWAY_TOKENS: ReadonlySet<string> = new Set(["12"]);
@@ -385,13 +387,27 @@ export function normalizeDraftSelection(
   const trimmed = rawText.trim();
   const key = normalizeLookupKey(trimmed);
 
-  if (HOME_TOKENS.has(key)) return { selectionType: extractedField("HOME", trimmed), participant: null };
-  if (DRAW_TOKENS.has(key)) return { selectionType: extractedField("DRAW", trimmed), participant: null };
-  if (AWAY_TOKENS.has(key)) return { selectionType: extractedField("AWAY", trimmed), participant: null };
+  // Closed-token recognition via the one shared classifier — but ONLY its
+  // MONEYLINE_3WAY (HOME/DRAW/AWAY) and TOTALS/TEAM_TOTAL (OVER/UNDER)
+  // results are ever consumed here. Its own PARTICIPANT/SPREAD fallback
+  // (which includes winner-suffix stripping, e.g. "Real Madrid Win" ->
+  // "Real Madrid") is deliberately NOT taken from it: this function's own
+  // PARTICIPANT resolution below is a distinct, already-tested contract —
+  // exact-match-only INDEX lookup against the UNSTRIPPED original text —
+  // and must stay exactly as it was before this stage.
+  const shorthand = classifyBettingSelectionText(
+    trimmed,
+    participants.map((participant) => participant.rawName),
+  );
+  if (shorthand.marketType === "MONEYLINE_3WAY") {
+    return { selectionType: extractedField(shorthand.selectionType, trimmed), participant: null };
+  }
+  if (shorthand.marketType === "TOTALS" || shorthand.marketType === "TEAM_TOTAL") {
+    return { selectionType: extractedField(shorthand.selectionType, trimmed), participant: null };
+  }
+
   if (YES_TOKENS.has(key)) return { selectionType: extractedField("YES", trimmed), participant: null };
   if (NO_TOKENS.has(key)) return { selectionType: extractedField("NO", trimmed), participant: null };
-  if (OVER_TOKENS.has(key)) return { selectionType: extractedField("OVER", trimmed), participant: null };
-  if (UNDER_TOKENS.has(key)) return { selectionType: extractedField("UNDER", trimmed), participant: null };
   if (HOME_OR_DRAW_TOKENS.has(key)) return { selectionType: extractedField("HOME_OR_DRAW", trimmed), participant: null };
   if (DRAW_OR_AWAY_TOKENS.has(key)) return { selectionType: extractedField("DRAW_OR_AWAY", trimmed), participant: null };
   if (HOME_OR_AWAY_TOKENS.has(key)) return { selectionType: extractedField("HOME_OR_AWAY", trimmed), participant: null };
