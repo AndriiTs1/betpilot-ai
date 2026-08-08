@@ -435,3 +435,89 @@ test("classifyBettingSelectionText: bare Ф1/Ф2 with a garbled remainder still 
     assert.notEqual(result.marketType, "SPREAD", text);
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/* BA-2C, Step 1C — production regression fix: Latin F1/F2 as a canonical    */
+/* alias of Cyrillic Ф1/Ф2. Root cause: a real production message typed in   */
+/* Cyrillic ("Арсенал Ф1(-1.5)") was extracted by the AI with the selection  */
+/* text romanized to Latin ("Arsenal F1"), which this classifier previously  */
+/* never recognized at all — falling to the fabricated MONEYLINE_2WAY/      */
+/* PARTICIPANT fallback and getting priced as a real "Arsenal Win" bet.      */
+/* -------------------------------------------------------------------------- */
+
+test("classifyBettingSelectionText: bare Latin 'F1'/'F2'/'f1'/'f2' -> SPREAD, embeddedLine null", () => {
+  for (const text of ["F1", "F2", "f1", "f2"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.equal(result.marketType, "SPREAD", text);
+    assert.equal(result.selectionType, "PARTICIPANT", text);
+    assert.equal(result.participantName, null, text);
+    assert.equal(result.embeddedLine, null, text);
+  }
+});
+
+test("classifyBettingSelectionText: Latin F1/F2 embedded-line separator tolerance mirrors Cyrillic exactly", () => {
+  for (const [text, expectedLine] of [
+    ["F1(-1.5)", "-1.5"],
+    ["F2(+1.5)", "+1.5"],
+    ["F1 -1.5", "-1.5"],
+    ["F2 +1.5", "+1.5"],
+    ["F1:-1.5", "-1.5"],
+    ["F2:+1.5", "+1.5"],
+  ] as const) {
+    const result = classifyBettingSelectionText(text);
+    assert.equal(result.marketType, "SPREAD", text);
+    assert.equal(result.embeddedLine, expectedLine, text);
+  }
+});
+
+test("classifyBettingSelectionText: participant-prefixed Latin F1/F2 ('Arsenal F1', with and without an embedded line) -> SPREAD, participant attributed correctly", () => {
+  for (const [text, expectedLine] of [
+    ["Arsenal F1", null],
+    ["Arsenal F2", null],
+    ["Arsenal F1(-1.5)", "-1.5"],
+    ["Arsenal F2(+1.5)", "+1.5"],
+    ["Arsenal F1 -1.5", "-1.5"],
+    ["Arsenal F2 +1.5", "+1.5"],
+  ] as const) {
+    const result = classifyBettingSelectionText(text);
+    assert.equal(result.marketType, "SPREAD", text);
+    assert.equal(result.selectionType, "PARTICIPANT", text);
+    assert.equal(result.participantName, "Arsenal", text);
+    assert.equal(result.embeddedLine, expectedLine, text);
+  }
+});
+
+test("classifyBettingSelectionText: Latin F1/F2 with a garbled remainder never becomes SPREAD (same mandatory-content invariant as Cyrillic)", () => {
+  for (const text of ["F1abc-1.5", "F2foo+1", "F1abc", "F2xyz"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.notEqual(result.marketType, "SPREAD", text);
+  }
+});
+
+test("classifyBettingSelectionText: an ordinary word merely CONTAINING 'f1'/'f2' (Latin or Cyrillic) is never accidentally recognized as SPREAD", () => {
+  // The letter-boundary guard added alongside the Latin widening also closes
+  // a latent pre-existing gap: "шкаф1" ("cabinet" + "1") could previously
+  // lazily match participant="шка", token="ф1" — now rejected for both
+  // scripts uniformly.
+  for (const text of ["off1", "Buff2", "Staff1", "Sheff2", "шкаф1", "Штраф1"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.notEqual(result.marketType, "SPREAD", text);
+    assert.equal(result.participantName, text, text);
+  }
+});
+
+test("classifyBettingSelectionText: Cyrillic SPREAD forms are completely unaffected by the Latin widening", () => {
+  const cyrillicCases: Array<[string, string | null, string | null]> = [
+    ["Ф1", null, null],
+    ["Ф2", null, null],
+    ["Ф1(-1.5)", null, "-1.5"],
+    ["Ф2(+1.5)", null, "+1.5"],
+    ["Арсенал Ф1(-1.5)", "Арсенал", "-1.5"],
+  ];
+  for (const [text, expectedParticipant, expectedLine] of cyrillicCases) {
+    const result = classifyBettingSelectionText(text);
+    assert.equal(result.marketType, "SPREAD", text);
+    assert.equal(result.participantName, expectedParticipant, text);
+    assert.equal(result.embeddedLine, expectedLine, text);
+  }
+});

@@ -209,16 +209,43 @@ function matchTeamTotal(text: string): TeamTotalMatch | null {
 // parenthesized forms. The sign ("+"/"-") is always captured as part of the
 // number itself, never treated as a separator, so it can never be dropped
 // or flipped by this widening.
-const SPREAD_TOKEN_PARTICIPANT_PATTERN = /^(.+?)\s*ф[12](.*)$/i;
-// Bare form — no participant name before the token (e.g. "Ф1(-1.5)" alone).
-// Discovered during BA-2C Step 1's empirical audit: this form did NOT
-// classify as SPREAD before that change (it fell through to the generic
-// PARTICIPANT fallback, since SPREAD_TOKEN_PARTICIPANT_PATTERN requires at
-// least one character before the token). Added to satisfy Step 1's rule 9
-// ("Ф1(-1.5) -> SPREAD, must NEVER fall back to a fabricated PARTICIPANT
-// selection") and its REQUIRED TESTS list, which both name this exact bare
-// form.
-const SPREAD_TOKEN_BARE_PATTERN = /^ф[12](.*)$/i;
+//
+// BA-2C, Step 1C (production fix) — the token character class now accepts
+// Latin "f" as a canonical alias of Cyrillic "ф" ([фf]), case-insensitive.
+// Root cause: a real production message typed in Cyrillic ("Арсенал
+// Ф1(-1.5)") was extracted by the AI with the selection text romanized to
+// Latin ("Arsenal F1") — nothing in this codebase performs that
+// transliteration (confirmed by reading lib/ai/betParser.ts's raw-output
+// mapping, which copies the AI's selection string verbatim); it is the
+// LLM's own behavior, which this deterministic classifier cannot control
+// but must be robust to regardless. Before this fix, Latin "F1"/"F2" never
+// matched here at all and fell to the same fabricated MONEYLINE_2WAY/
+// PARTICIPANT fallback Step 1B fixed for the lineless-Cyrillic case — this
+// widening closes the Latin half of that same hole.
+//
+// A letter-boundary guard ((?<![a-zа-яё]), case-insensitive) is required on
+// the participant-prefixed form specifically because of this widening:
+// without it, the previously Cyrillic-only "ф[12]" already had a latent
+// substring-match risk inside an ordinary Cyrillic word (e.g. "шкаф1" —
+// "cabinet" + "1" — lazily matches participant="шка", token="ф1"); adding
+// Latin "f" would newly expose the identical risk for ordinary English
+// words (e.g. "off1", "Sheff2"). The guard requires the character
+// immediately before the token to NOT be a letter (Latin or Cyrillic) —
+// still permits zero literal whitespace when nothing but non-letter
+// characters precede the token, exactly preserving every already-tested
+// "team name, then optional space, then token" shape. The bare form
+// (SPREAD_TOKEN_BARE_PATTERN) needs no such guard — it is anchored at the
+// very start of the string (^), so nothing can ever precede the token.
+const SPREAD_TOKEN_PARTICIPANT_PATTERN = /^(.+?)\s*(?<![a-zа-яё])[фf][12](.*)$/i;
+// Bare form — no participant name before the token (e.g. "Ф1(-1.5)"/
+// "F1(-1.5)" alone). Discovered during BA-2C Step 1's empirical audit: this
+// form did NOT classify as SPREAD before that change (it fell through to
+// the generic PARTICIPANT fallback, since SPREAD_TOKEN_PARTICIPANT_PATTERN
+// requires at least one character before the token). Added to satisfy Step
+// 1's rule 9 ("Ф1(-1.5) -> SPREAD, must NEVER fall back to a fabricated
+// PARTICIPANT selection") and its REQUIRED TESTS list, which both name this
+// exact bare form.
+const SPREAD_TOKEN_BARE_PATTERN = /^[фf][12](.*)$/i;
 const SIGNED_LINE_NUMBER = "([+-]\\d+(?:\\.\\d+)?)";
 const SIGNED_LINE_SUFFIX_PATTERN = new RegExp(
   `^(?:\\s*\\(\\s*${SIGNED_LINE_NUMBER}\\s*\\)|\\s+${SIGNED_LINE_NUMBER}|\\s*:\\s*${SIGNED_LINE_NUMBER})$`,
