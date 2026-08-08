@@ -272,3 +272,124 @@ test("classifyBettingSelectionText: knownParticipantNames does not falsely strip
   assert.equal(result.marketType, "MONEYLINE_2WAY");
   assert.equal(result.selectionType, "PARTICIPANT");
 });
+
+/* -------------------------------------------------------------------------- */
+/* BA-2C, Step 1 — safe market-token separator tolerance                      */
+/* -------------------------------------------------------------------------- */
+//
+// Widens the token<->number separator accepted for ТБ/ТМ/ИТБ/ИТМ/Ф1/Ф2 from
+// whitespace-only to also include a colon and a fully parenthesized number
+// — nothing else. Every case here is bare (no participant prefix), matching
+// this stage's own REQUIRED TESTS list verbatim.
+
+test("classifyBettingSelectionText: TOTALS separator tolerance (ТБ)", () => {
+  for (const text of ["ТБ2.5", "ТБ 2.5", "ТБ:2.5", "ТБ: 2.5", "ТБ(2.5)", "ТБ (2.5)"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.equal(result.marketType, "TOTALS", text);
+    assert.equal(result.selectionType, "OVER", text);
+    assert.equal(result.embeddedLine, "2.5", text);
+  }
+});
+
+test("classifyBettingSelectionText: TOTALS separator tolerance (ТМ)", () => {
+  for (const text of ["ТМ3", "ТМ 3", "ТМ:3", "ТМ(3)"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.equal(result.marketType, "TOTALS", text);
+    assert.equal(result.selectionType, "UNDER", text);
+    assert.equal(result.embeddedLine, "3", text);
+  }
+});
+
+test("classifyBettingSelectionText: TEAM_TOTAL separator tolerance (ИТБ)", () => {
+  for (const text of ["ИТБ1.5", "ИТБ 1.5", "ИТБ:1.5", "ИТБ(1.5)"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.equal(result.marketType, "TEAM_TOTAL", text);
+    assert.equal(result.selectionType, "OVER", text);
+    assert.equal(result.participantName, null, text);
+    assert.equal(result.embeddedLine, "1.5", text);
+  }
+});
+
+test("classifyBettingSelectionText: TEAM_TOTAL separator tolerance (ИТМ)", () => {
+  for (const text of ["ИТМ1.5", "ИТМ 1.5", "ИТМ:1.5", "ИТМ(1.5)"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.equal(result.marketType, "TEAM_TOTAL", text);
+    assert.equal(result.selectionType, "UNDER", text);
+    assert.equal(result.participantName, null, text);
+    assert.equal(result.embeddedLine, "1.5", text);
+  }
+});
+
+test("classifyBettingSelectionText: SPREAD separator tolerance (Ф1, negative line) — bare, no participant", () => {
+  for (const text of ["Ф1(-1.5)", "Ф1 (-1.5)", "Ф1 -1.5", "Ф1:-1.5", "Ф1: -1.5"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.equal(result.marketType, "SPREAD", text);
+    assert.equal(result.selectionType, "PARTICIPANT", text);
+    assert.equal(result.participantName, null, text);
+    assert.equal(result.embeddedLine, "-1.5", text);
+  }
+});
+
+test("classifyBettingSelectionText: SPREAD separator tolerance (Ф2, positive line) — bare, no participant", () => {
+  for (const text of ["Ф2(+1.5)", "Ф2 (+1.5)", "Ф2 +1.5", "Ф2:+1.5"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.equal(result.marketType, "SPREAD", text);
+    assert.equal(result.selectionType, "PARTICIPANT", text);
+    assert.equal(result.participantName, null, text);
+    assert.equal(result.embeddedLine, "+1.5", text);
+  }
+});
+
+test("classifyBettingSelectionText: SPREAD separator tolerance with a real participant prefix — sign is never dropped or flipped", () => {
+  for (const [text, expectedLine] of [
+    ["Арсенал Ф1(-1.5)", "-1.5"],
+    ["Арсенал Ф1 (-1.5)", "-1.5"],
+    ["Арсенал Ф1:-1.5", "-1.5"],
+    ["Арсенал Ф1: -1.5", "-1.5"],
+    ["Челси Ф2(+1.5)", "+1.5"],
+    ["Челси Ф2 (+1.5)", "+1.5"],
+    ["Челси Ф2:+1.5", "+1.5"],
+  ] as const) {
+    const result = classifyBettingSelectionText(text);
+    assert.equal(result.marketType, "SPREAD", text);
+    assert.equal(result.embeddedLine, expectedLine, text);
+  }
+});
+
+test("classifyBettingSelectionText: separator tolerance is case-insensitive with extra whitespace", () => {
+  assert.deepEqual(classifyBettingSelectionText("тб:2.5"), classifyBettingSelectionText("ТБ:2.5"));
+  assert.deepEqual(classifyBettingSelectionText("итб(1.5)"), classifyBettingSelectionText("ИТБ(1.5)"));
+  const spaced = classifyBettingSelectionText("ТБ  :   2.5");
+  assert.equal(spaced.marketType, "TOTALS");
+  assert.equal(spaced.embeddedLine, "2.5");
+  const spacedColon = classifyBettingSelectionText("Ф1   :   -1.5");
+  assert.equal(spacedColon.marketType, "SPREAD");
+  assert.equal(spacedColon.embeddedLine, "-1.5");
+  const spacedParen = classifyBettingSelectionText("ф1  (  -1.5  )");
+  assert.equal(spacedParen.marketType, "SPREAD");
+  assert.equal(spacedParen.embeddedLine, "-1.5");
+});
+
+test("classifyBettingSelectionText: negative/adversarial separator forms never become the intended canonical market", () => {
+  for (const text of ["ТБ::2.5", "ТБ((2.5))", "ТБabc2.5"]) {
+    assert.notEqual(classifyBettingSelectionText(text).marketType, "TOTALS", text);
+  }
+  assert.notEqual(classifyBettingSelectionText("ИТБabc1.5").marketType, "TEAM_TOTAL");
+  assert.notEqual(classifyBettingSelectionText("Ф1abc-1.5").marketType, "SPREAD");
+});
+
+test("classifyBettingSelectionText: adversarial forms still lose nothing — they fall to the lossless PARTICIPANT fallback, never an empty/fabricated result", () => {
+  for (const text of ["ТБ::2.5", "ТБ((2.5))", "ТБabc2.5", "ИТБabc1.5", "Ф1abc-1.5"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.equal(result.marketType, "MONEYLINE_2WAY", text);
+    assert.equal(result.selectionType, "PARTICIPANT", text);
+    assert.equal(result.participantName, text, text);
+  }
+});
+
+test("classifyBettingSelectionText: BA-2A concatenated-string production regression is unaffected by the widened separator grammar", () => {
+  const result = classifyBettingSelectionText("Арсенал ТБ 2.5", ["Арсенал"]);
+  assert.equal(result.marketType, "TOTALS");
+  assert.equal(result.selectionType, "OVER");
+  assert.equal(result.embeddedLine, "2.5");
+});

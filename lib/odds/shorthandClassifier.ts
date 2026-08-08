@@ -77,8 +77,42 @@ const AWAY_TEAM_PHRASES: ReadonlySet<string> = new Set(["away", "away team"]);
 /* -------------------------------------------------------------------------- */
 
 const LINE_NUMBER = "(\\d+(?:\\.\\d+)?)";
-const OVER_WORD_PATTERN = new RegExp(`^(?:тб|тотал\\s+больше|больше|over)(?:\\s*${LINE_NUMBER})?$`, "i");
-const UNDER_WORD_PATTERN = new RegExp(`^(?:тм|тотал\\s+меньше|меньше|under)(?:\\s*${LINE_NUMBER})?$`, "i");
+
+// BA-2C, Step 1 — narrow, explicit separator grammar accepted between a
+// numeric-line-bearing shorthand token (ТБ/ТМ/ИТБ/ИТМ) and its embedded
+// line: nothing/whitespace ("ТБ2.5"/"ТБ 2.5"), a colon ("ТБ:2.5"/
+// "ТБ: 2.5"), or a fully parenthesized number ("ТБ(2.5)"/"ТБ (2.5)").
+// Deliberately NOT a generic separator class (no \W*, no [^\d]*): a bare
+// comma is never accepted here (comma is contextually either punctuation
+// or a decimal separator — that ambiguity is already resolved upstream,
+// ephemerally, by numericRoleEvidence.ts's own
+// normalizeDecimalCommaForClassification, never duplicated here), a bare
+// hyphen is never accepted as a generic separator (would collide with
+// SPREAD's sign), and unbalanced/doubled punctuation (ТБ::2.5,
+// ТБ((2.5))) is rejected outright rather than silently tolerated.
+const LINE_SUFFIX_PATTERN = new RegExp(`^(?:\\s*${LINE_NUMBER}|\\s*:\\s*${LINE_NUMBER}|\\s*\\(\\s*${LINE_NUMBER}\\s*\\))$`);
+
+interface LineSuffixResult {
+  readonly ok: boolean;
+  readonly value: string | null;
+}
+
+// `remainder` is everything captured after a market token matched. An empty
+// remainder is always valid (no embedded line at all — e.g. bare "ТБ").
+// A non-empty remainder must fully match one of LINE_SUFFIX_PATTERN's three
+// separator forms; anything else (unbalanced parens, stray letters, a
+// doubled colon) is rejected outright (ok: false) so the caller falls
+// through to the generic PARTICIPANT fallback instead of silently
+// discarding the garbage and reporting a line-less match.
+function parseLineSuffix(remainder: string): LineSuffixResult {
+  if (remainder.length === 0) return { ok: true, value: null };
+  const match = LINE_SUFFIX_PATTERN.exec(remainder);
+  if (!match) return { ok: false, value: null };
+  return { ok: true, value: match[1] ?? match[2] ?? match[3] ?? null };
+}
+
+const OVER_WORD_PATTERN = new RegExp(`^(?:тб|тотал\\s+больше|больше|over)(.*)$`, "i");
+const UNDER_WORD_PATTERN = new RegExp(`^(?:тм|тотал\\s+меньше|меньше|under)(.*)$`, "i");
 const OVER_LETTER_PATTERN = new RegExp(`^o${LINE_NUMBER}$`, "i");
 const UNDER_LETTER_PATTERN = new RegExp(`^u${LINE_NUMBER}$`, "i");
 
@@ -88,11 +122,21 @@ interface TotalsMatch {
 }
 
 function matchTotals(text: string): TotalsMatch | null {
-  const over = OVER_WORD_PATTERN.exec(text) ?? OVER_LETTER_PATTERN.exec(text);
-  if (over) return { direction: "OVER", embeddedLine: over[1] ?? null };
+  const overWord = OVER_WORD_PATTERN.exec(text);
+  if (overWord) {
+    const suffix = parseLineSuffix(overWord[1]);
+    return suffix.ok ? { direction: "OVER", embeddedLine: suffix.value } : null;
+  }
+  const overLetter = OVER_LETTER_PATTERN.exec(text);
+  if (overLetter) return { direction: "OVER", embeddedLine: overLetter[1] ?? null };
 
-  const under = UNDER_WORD_PATTERN.exec(text) ?? UNDER_LETTER_PATTERN.exec(text);
-  if (under) return { direction: "UNDER", embeddedLine: under[1] ?? null };
+  const underWord = UNDER_WORD_PATTERN.exec(text);
+  if (underWord) {
+    const suffix = parseLineSuffix(underWord[1]);
+    return suffix.ok ? { direction: "UNDER", embeddedLine: suffix.value } : null;
+  }
+  const underLetter = UNDER_LETTER_PATTERN.exec(text);
+  if (underLetter) return { direction: "UNDER", embeddedLine: underLetter[1] ?? null };
 
   return null;
 }
@@ -107,9 +151,13 @@ function matchTotals(text: string): TotalsMatch | null {
 //   "ИТБ 1.5" / "ИТБ"  -> bare token, no participant embedded in this string
 //                          at all (resolved from context by the caller, if
 //                          at all — this function never guesses one)
-const TEAM_TOTAL_SUFFIX_PATTERN = new RegExp(`^(.+?)\\s+(итб|итм)(?:\\s*${LINE_NUMBER})?$`, "i");
+const TEAM_TOTAL_SUFFIX_PATTERN = new RegExp(`^(.+?)\\s+(итб|итм)(.*)$`, "i");
+// Prefix form ("ИТБ Арсенал 1.5") is unchanged by BA-2C Step 1 — none of the
+// requested punctuation variants involve a participant name embedded
+// between the token and its number, so widening this one would be scope
+// creep beyond what was asked and tested.
 const TEAM_TOTAL_PREFIX_PATTERN = new RegExp(`^(итб|итм)\\s+(.+?)\\s+${LINE_NUMBER}$`, "i");
-const TEAM_TOTAL_BARE_PATTERN = new RegExp(`^(итб|итм)(?:\\s*${LINE_NUMBER})?$`, "i");
+const TEAM_TOTAL_BARE_PATTERN = new RegExp(`^(итб|итм)(.*)$`, "i");
 
 interface TeamTotalMatch {
   readonly direction: "OVER" | "UNDER";
@@ -124,7 +172,10 @@ function directionFromToken(token: string): "OVER" | "UNDER" {
 function matchTeamTotal(text: string): TeamTotalMatch | null {
   const suffix = TEAM_TOTAL_SUFFIX_PATTERN.exec(text);
   if (suffix) {
-    return { direction: directionFromToken(suffix[2]), participantName: suffix[1].trim(), embeddedLine: suffix[3] ?? null };
+    const parsed = parseLineSuffix(suffix[3]);
+    if (parsed.ok) {
+      return { direction: directionFromToken(suffix[2]), participantName: suffix[1].trim(), embeddedLine: parsed.value };
+    }
   }
 
   const prefix = TEAM_TOTAL_PREFIX_PATTERN.exec(text);
@@ -134,7 +185,10 @@ function matchTeamTotal(text: string): TeamTotalMatch | null {
 
   const bare = TEAM_TOTAL_BARE_PATTERN.exec(text);
   if (bare) {
-    return { direction: directionFromToken(bare[1]), participantName: null, embeddedLine: bare[2] ?? null };
+    const parsed = parseLineSuffix(bare[2]);
+    if (parsed.ok) {
+      return { direction: directionFromToken(bare[1]), participantName: null, embeddedLine: parsed.value };
+    }
   }
 
   return null;
@@ -149,7 +203,35 @@ function matchTeamTotal(text: string): TeamTotalMatch | null {
 // participant" (both forms are written directly against a single named
 // team in every example this stage's contract requires) — the parenthesized
 // (or bare) signed number is always the actual line.
-const SPREAD_HANDICAP_SUFFIX_PATTERN = /^(.+?)\s*ф[12]\s*\(?\s*([+-]\d+(?:\.\d+)?)\s*\)?$/i;
+//
+// BA-2C, Step 1 — the token/number separator now also accepts a colon
+// ("Ф1:-1.5", "Ф1: -1.5"), on top of the pre-existing whitespace and
+// parenthesized forms. The sign ("+"/"-") is always captured as part of the
+// number itself, never treated as a separator, so it can never be dropped
+// or flipped by this widening.
+const SPREAD_TOKEN_PARTICIPANT_PATTERN = /^(.+?)\s*ф[12](.*)$/i;
+// Bare form — no participant name before the token (e.g. "Ф1(-1.5)" alone).
+// Discovered during BA-2C Step 1's empirical audit: this form did NOT
+// classify as SPREAD before this change (it fell through to the generic
+// PARTICIPANT fallback, since SPREAD_TOKEN_PARTICIPANT_PATTERN requires at
+// least one character before the token). Added specifically to satisfy this
+// stage's own rule 9 ("Ф1(-1.5) -> SPREAD, must NEVER fall back to a
+// fabricated PARTICIPANT selection") and its REQUIRED TESTS list, which
+// both name this exact bare form. The number is mandatory here (unlike
+// TEAM_TOTAL's bare form) — a spread with no line at all identifies nothing
+// concrete, so it is never fabricated.
+const SPREAD_TOKEN_BARE_PATTERN = /^ф[12](.*)$/i;
+const SIGNED_LINE_NUMBER = "([+-]\\d+(?:\\.\\d+)?)";
+const SIGNED_LINE_SUFFIX_PATTERN = new RegExp(
+  `^(?:\\s*\\(\\s*${SIGNED_LINE_NUMBER}\\s*\\)|\\s+${SIGNED_LINE_NUMBER}|\\s*:\\s*${SIGNED_LINE_NUMBER})$`,
+);
+
+function parseSignedLineSuffix(remainder: string): string | null {
+  const match = SIGNED_LINE_SUFFIX_PATTERN.exec(remainder);
+  if (!match) return null;
+  return match[1] ?? match[2] ?? match[3] ?? null;
+}
+
 // "Арсенал -1.5" — a bare signed number is only ever attributed to a
 // participant when one is actually named immediately before it in the SAME
 // string; an unattributed bare "-1.5" alone is deliberately never matched
@@ -159,13 +241,22 @@ const SPREAD_HANDICAP_SUFFIX_PATTERN = /^(.+?)\s*ф[12]\s*\(?\s*([+-]\d+(?:\.\d+
 const SPREAD_BARE_SIGNED_PATTERN = /^(.+?)\s+([+-]\d+(?:\.\d+)?)$/;
 
 interface SpreadMatch {
-  readonly participantName: string;
+  readonly participantName: string | null;
   readonly embeddedLine: string;
 }
 
 function matchSpread(text: string): SpreadMatch | null {
-  const handicap = SPREAD_HANDICAP_SUFFIX_PATTERN.exec(text);
-  if (handicap) return { participantName: handicap[1].trim(), embeddedLine: handicap[2] };
+  const prefixed = SPREAD_TOKEN_PARTICIPANT_PATTERN.exec(text);
+  if (prefixed) {
+    const value = parseSignedLineSuffix(prefixed[2]);
+    if (value !== null) return { participantName: prefixed[1].trim(), embeddedLine: value };
+  }
+
+  const bareToken = SPREAD_TOKEN_BARE_PATTERN.exec(text);
+  if (bareToken) {
+    const value = parseSignedLineSuffix(bareToken[1]);
+    if (value !== null) return { participantName: null, embeddedLine: value };
+  }
 
   const bareSigned = SPREAD_BARE_SIGNED_PATTERN.exec(text);
   if (bareSigned) return { participantName: bareSigned[1].trim(), embeddedLine: bareSigned[2] };
