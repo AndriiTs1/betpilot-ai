@@ -393,3 +393,45 @@ test("classifyBettingSelectionText: BA-2A concatenated-string production regress
   assert.equal(result.selectionType, "OVER");
   assert.equal(result.embeddedLine, "2.5");
 });
+
+/* -------------------------------------------------------------------------- */
+/* BA-2C Step 1B — production regression fix: a bare/prefixed Ф1/Ф2 token    */
+/* with NO embedded number (the AI's own dedicated `line` field carries it   */
+/* instead) must still classify as SPREAD, exactly mirroring TEAM_TOTAL's    */
+/* existing bare-token precedent — never fall through to the lossless        */
+/* PARTICIPANT fallback, which is what let a real production message reach  */
+/* the odds provider as a fabricated, verifiable "Arsenal Win" moneyline    */
+/* selection.                                                                */
+/* -------------------------------------------------------------------------- */
+
+test("classifyBettingSelectionText: bare 'Ф1'/'Ф2' with no embedded number -> SPREAD, embeddedLine null (never PARTICIPANT)", () => {
+  for (const text of ["Ф1", "Ф2", "ф1", "ф2"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.equal(result.marketType, "SPREAD", text);
+    assert.equal(result.selectionType, "PARTICIPANT", text);
+    assert.equal(result.participantName, null, text);
+    assert.equal(result.embeddedLine, null, text);
+  }
+});
+
+test("classifyBettingSelectionText: 'Арсенал Ф1' (participant + bare token, no embedded number) -> SPREAD, participant attributed, embeddedLine null", () => {
+  const result = classifyBettingSelectionText("Арсенал Ф1");
+  assert.equal(result.marketType, "SPREAD");
+  assert.equal(result.selectionType, "PARTICIPANT");
+  assert.equal(result.participantName, "Арсенал");
+  assert.equal(result.embeddedLine, null);
+});
+
+test("classifyBettingSelectionText: 'Челси Ф2' (participant + bare token, no embedded number) -> SPREAD, participant attributed, embeddedLine null", () => {
+  const result = classifyBettingSelectionText("Челси Ф2");
+  assert.equal(result.marketType, "SPREAD");
+  assert.equal(result.participantName, "Челси");
+  assert.equal(result.embeddedLine, null);
+});
+
+test("classifyBettingSelectionText: bare Ф1/Ф2 with a garbled remainder still never becomes SPREAD (mandatory-content invariant is preserved for non-empty remainders)", () => {
+  for (const text of ["Ф1abc-1.5", "Ф1abc", "Ф2xyz+1"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.notEqual(result.marketType, "SPREAD", text);
+  }
+});

@@ -212,24 +212,44 @@ function matchTeamTotal(text: string): TeamTotalMatch | null {
 const SPREAD_TOKEN_PARTICIPANT_PATTERN = /^(.+?)\s*ф[12](.*)$/i;
 // Bare form — no participant name before the token (e.g. "Ф1(-1.5)" alone).
 // Discovered during BA-2C Step 1's empirical audit: this form did NOT
-// classify as SPREAD before this change (it fell through to the generic
+// classify as SPREAD before that change (it fell through to the generic
 // PARTICIPANT fallback, since SPREAD_TOKEN_PARTICIPANT_PATTERN requires at
-// least one character before the token). Added specifically to satisfy this
-// stage's own rule 9 ("Ф1(-1.5) -> SPREAD, must NEVER fall back to a
-// fabricated PARTICIPANT selection") and its REQUIRED TESTS list, which
-// both name this exact bare form. The number is mandatory here (unlike
-// TEAM_TOTAL's bare form) — a spread with no line at all identifies nothing
-// concrete, so it is never fabricated.
+// least one character before the token). Added to satisfy Step 1's rule 9
+// ("Ф1(-1.5) -> SPREAD, must NEVER fall back to a fabricated PARTICIPANT
+// selection") and its REQUIRED TESTS list, which both name this exact bare
+// form.
 const SPREAD_TOKEN_BARE_PATTERN = /^ф[12](.*)$/i;
 const SIGNED_LINE_NUMBER = "([+-]\\d+(?:\\.\\d+)?)";
 const SIGNED_LINE_SUFFIX_PATTERN = new RegExp(
   `^(?:\\s*\\(\\s*${SIGNED_LINE_NUMBER}\\s*\\)|\\s+${SIGNED_LINE_NUMBER}|\\s*:\\s*${SIGNED_LINE_NUMBER})$`,
 );
 
-function parseSignedLineSuffix(remainder: string): string | null {
+interface SignedLineSuffixResult {
+  readonly ok: boolean;
+  readonly value: string | null;
+}
+
+// BA-2C Step 1B (production fix) — an empty remainder is valid (no embedded
+// line at all — e.g. bare "Ф1", or "Арсенал Ф1" with no number in the
+// selection text itself), exactly mirroring parseLineSuffix's existing
+// TEAM_TOTAL precedent. This matters in production because the AI's own
+// tool schema carries the numeric line in its OWN dedicated `line` field
+// (BetSlipSelectionInput.line) as well as, redundantly, sometimes inside
+// the free-text selection — when it chooses the former and leaves the
+// selection text as a bare token, this file must still recognize the
+// market honestly as SPREAD (embeddedLine: null) rather than silently
+// falling through to the lossless PARTICIPANT fallback, which is what
+// let "Арсенал Ф1" (line stated separately) reach the odds provider as a
+// MONEYLINE_2WAY selection and get fuzzy-matched to a real "Arsenal to
+// win" price — the exact production regression this fixes. A non-empty
+// remainder must still fully match one of SIGNED_LINE_SUFFIX_PATTERN's
+// forms, or the whole match is rejected (ok: false) — "Ф1abc-1.5" must
+// never become SPREAD with a garbled/absent line.
+function parseSignedLineSuffix(remainder: string): SignedLineSuffixResult {
+  if (remainder.length === 0) return { ok: true, value: null };
   const match = SIGNED_LINE_SUFFIX_PATTERN.exec(remainder);
-  if (!match) return null;
-  return match[1] ?? match[2] ?? match[3] ?? null;
+  if (!match) return { ok: false, value: null };
+  return { ok: true, value: match[1] ?? match[2] ?? match[3] ?? null };
 }
 
 // "Арсенал -1.5" — a bare signed number is only ever attributed to a
@@ -242,20 +262,20 @@ const SPREAD_BARE_SIGNED_PATTERN = /^(.+?)\s+([+-]\d+(?:\.\d+)?)$/;
 
 interface SpreadMatch {
   readonly participantName: string | null;
-  readonly embeddedLine: string;
+  readonly embeddedLine: string | null;
 }
 
 function matchSpread(text: string): SpreadMatch | null {
   const prefixed = SPREAD_TOKEN_PARTICIPANT_PATTERN.exec(text);
   if (prefixed) {
-    const value = parseSignedLineSuffix(prefixed[2]);
-    if (value !== null) return { participantName: prefixed[1].trim(), embeddedLine: value };
+    const suffix = parseSignedLineSuffix(prefixed[2]);
+    if (suffix.ok) return { participantName: prefixed[1].trim(), embeddedLine: suffix.value };
   }
 
   const bareToken = SPREAD_TOKEN_BARE_PATTERN.exec(text);
   if (bareToken) {
-    const value = parseSignedLineSuffix(bareToken[1]);
-    if (value !== null) return { participantName: null, embeddedLine: value };
+    const suffix = parseSignedLineSuffix(bareToken[1]);
+    if (suffix.ok) return { participantName: null, embeddedLine: suffix.value };
   }
 
   const bareSigned = SPREAD_BARE_SIGNED_PATTERN.exec(text);
