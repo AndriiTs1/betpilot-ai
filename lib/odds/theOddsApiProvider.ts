@@ -12,9 +12,9 @@
 // buildBetSlipPreview.ts is expected to start depending on this instead of
 // calling verifyOdds() directly.
 
-import { verifyOdds, verifyTotalsOdds, type OddsVerificationInput, type TotalsVerificationInput } from "./oddsVerifier";
+import { verifyOdds, verifyTotalsOdds, verifySpreadOdds, type OddsVerificationInput, type TotalsVerificationInput, type SpreadVerificationInput } from "./oddsVerifier";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
-import { validateCanonicalSelection, type CanonicalSelection, type Sport } from "./domain";
+import { validateCanonicalSelection, type CanonicalParticipant, type CanonicalSelection, type Sport } from "./domain";
 import { resolveFootballLeague } from "./footballLeagues";
 import {
   createFailedResult,
@@ -100,20 +100,22 @@ function buildMatchedEvent(legacyResult: OddsCheckResult, selection: CanonicalSe
 function buildMatchedOutcome(legacyResult: OddsCheckResult, selection: CanonicalSelection): ProviderOutcome | undefined {
   if (legacyResult.sourceOdds === null || legacyResult.sourceOdds === undefined) return undefined;
 
-  // Betting Markets V1, Phase 3.3 — the only two market keys this adapter
-  // ever actually requests (oddsVerifier.ts's verifyOdds()/verifyTotalsOdds()
+  // Betting Markets V1, Phase 3.3 — the only market keys this adapter ever
+  // actually requests (oddsVerifier.ts's verifyOdds()/verifyTotalsOdds()
   // hardcode "h2h"/"totals" respectively) — not synthesized, not guessed.
-  const marketKey = selection.marketType === "TOTALS" ? "totals" : "h2h";
+  // Handicap Stage H1 — verifySpreadOdds() hardcodes "spreads" the same way.
+  const marketKey = selection.marketType === "TOTALS" ? "totals" : selection.marketType === "SPREAD" ? "spreads" : "h2h";
 
   return {
     marketType: selection.marketType,
     period: selection.period,
     selectionType: selection.selectionType,
     participant: selection.participant,
-    // line is only ever meaningful for TOTALS — the request-side
+    // line is only ever meaningful for TOTALS/SPREAD — the request-side
     // canonicalLine (already exact-match-verified against the provider's
-    // own point by findTotalsOutcome), never re-derived from the response.
-    line: selection.marketType === "TOTALS" ? selection.line : undefined,
+    // own point by findTotalsOutcome/findSpreadOutcome), never re-derived
+    // from the response.
+    line: selection.marketType === "TOTALS" || selection.marketType === "SPREAD" ? selection.line : undefined,
     currentOdds: String(legacyResult.sourceOdds),
     bookmaker: legacyResult.bookmaker ?? undefined,
     marketReference: { provider: PROVIDER_NAME, marketKey },
@@ -137,9 +139,18 @@ const CAPABILITIES: OddsProviderCapabilities = {
   // Betting Markets V1, Phase 3.3 — TOTALS joins MONEYLINE_2WAY/3WAY, but
   // ONLY for football (see the sport gate in verifySelection() below) —
   // oddsVerifier.ts's verifyTotalsOdds() has only ever been built/tested
-  // against football fixtures this phase; Team Totals and Spreads remain
-  // fully out of scope.
-  supportedMarketTypes: ["MONEYLINE_2WAY", "MONEYLINE_3WAY", "TOTALS"],
+  // against football fixtures this phase; Team Totals remain fully out of
+  // scope.
+  // Handicap Stage H1 — SPREAD joins the set, for every currently supported
+  // sport (unlike TOTALS, nothing in findSpreadOutcome()/verifySpreadOdds()
+  // is football-specific — event resolution and outcome lookup are both
+  // fully sport-generic, so no analogous sport gate was needed or added).
+  // STANDARD WHOLE/HALF LINES ONLY this stage — a requested Asian quarter
+  // line (±0.25/±0.75/±1.25/±1.75) is honestly reported as
+  // MARKET_NOT_SUPPORTED by verifySelection()'s own H1 capability gate
+  // below, never rounded/substituted/silently rejected as a different
+  // market. Asian quarter-line support is Handicap Stage H4, not this one.
+  supportedMarketTypes: ["MONEYLINE_2WAY", "MONEYLINE_3WAY", "TOTALS", "SPREAD"],
   // Step 16A — true as of this step: a stated, supported football league
   // (lib/odds/footballLeagues.ts) now actually routes the request to that
   // league's own sport_key, and an unsupported one is honestly reported as
@@ -153,7 +164,7 @@ const CAPABILITIES: OddsProviderCapabilities = {
   notes: [
     "Generic football/soccer with no stated league now merges across every currently supported competition (lib/odds/footballLeagues.ts / oddsVerifier.ts SPORT_KEY_ALIASES), not only the English Premier League. A football selection whose league is one of the supported names (or a recognized alias, e.g. EPL/UCL) resolves to that league's own sport_key alone; an unrecognized league returns LEAGUE_NOT_SUPPORTED rather than querying an unrelated competition.",
     "Tennis coverage is limited to the four Grand Slam tournaments, in-tournament only (oddsVerifier.ts TENNIS_SPORT_KEYS) — no year-round ATP/WTA tour coverage.",
-    "1X2/moneyline selections are verifiable for every supported sport; TOTALS (Over/Under) is verifiable for football only (Betting Markets V1, Phase 3.3) — no spreads, both-teams-to-score, double-chance, or team-totals markets.",
+    "1X2/moneyline selections are verifiable for every supported sport; TOTALS (Over/Under) is verifiable for football only (Betting Markets V1, Phase 3.3); SPREAD (handicap) is verifiable for every supported sport, standard whole/half lines only (Handicap Stage H1) — Asian quarter lines, both-teams-to-score, double-chance, and team-totals markets remain out of scope.",
     "findEvents() and getEventMarkets() are not implemented by this adapter in Step 5 — verifySelection() is the only operational method (see its own code comment below).",
   ],
 };
@@ -201,6 +212,28 @@ function resolveFootballSportResolution(leagueName: string | undefined): Footbal
   const resolved = resolveFootballLeague(leagueName);
   if (!resolved) return { kind: "UNSUPPORTED_LEAGUE" };
   return { kind: "SUPPORTED", legacySport: resolved.legacySportString };
+}
+
+// Handicap Stage H1 — the exact-shape check backing CAPABILITIES' "standard
+// whole/half lines only" restriction. Deliberately string-based, never
+// floating-point arithmetic (no `line * 2` / `Number.isInteger` check) — a
+// safety-critical gate deciding real-money confirmability should never rely
+// on binary floating-point rounding behavior, however unlikely a precision
+// issue would be for these specific small magnitudes. selection.line is
+// always LINE_INPUT_PATTERN-shaped by the time this runs (domain.ts's
+// normalizeLineString has already validated it, upstream) — optional "-",
+// digits, optional ".digits" — so a plain regex capture of the fractional
+// part is sufficient: no fractional part, or exactly one digit that is "0"
+// or "5", is the entire standard grid (0, 0.5, 1, 1.5, 2, ...); anything
+// else (a two-digit fraction like "25"/"75", or a single "1"/"2"/etc. that
+// isn't the theoretically-impossible-post-canonicalization "0"/"5") is a
+// quarter line or otherwise off-grid, and is rejected.
+function isStandardHandicapLine(canonicalLine: string): boolean {
+  const match = /^-?\d+(?:\.(\d+))?$/.exec(canonicalLine);
+  if (!match) return false;
+  const fraction = match[1];
+  if (fraction === undefined) return true;
+  return fraction === "0" || fraction === "5";
 }
 
 // Only the tokens oddsVerifier.ts's classifySingleSelection/fuzzy matching
@@ -322,6 +355,16 @@ function classifyLegacyFailureNote(
   if (totalsMatch) {
     return { reasonCode: "SELECTION_NOT_FOUND", diagnosticCode: `LEGACY_TOTALS_${totalsMatch[1]}` };
   }
+  // Handicap Stage H1 — verifySpreadOdds()'s own note template, covering
+  // every findSpreadOutcome() non-match kind (INVALID_REQUESTED_LINE/
+  // NO_BOOKMAKER/MARKET_ABSENT/PARTICIPANT_NOT_FOUND/MISSING_POINT/
+  // MALFORMED_POINT/LINE_NOT_AVAILABLE). Same SELECTION_NOT_FOUND family as
+  // h2h/totals' own "market/event were found, the specific outcome wasn't"
+  // cases — the captured kind is preserved only in diagnosticCode.
+  const spreadMatch = note.match(/^Could not match spread selection ".*" for ".*" \(([A-Z_]+)\)$/);
+  if (spreadMatch) {
+    return { reasonCode: "SELECTION_NOT_FOUND", diagnosticCode: `LEGACY_SPREAD_${spreadMatch[1]}` };
+  }
 
   // Defensive fallback only — every note template oddsVerifier.ts can
   // currently produce is enumerated above (confirmed by a full read of the
@@ -348,9 +391,12 @@ export class TheOddsApiProvider implements OddsProvider {
   // single-argument `new TheOddsApiProvider(fn)` call site keeps compiling
   // and behaving unchanged, since this is a new parameter with its own
   // default, not a change to the first one).
+  // Handicap Stage H1 — verifySpreadOddsFn added the same way, as a third
+  // independently-injectable seam.
   constructor(
     private readonly verifyOddsFn: typeof verifyOdds = verifyOdds,
     private readonly verifyTotalsOddsFn: typeof verifyTotalsOdds = verifyTotalsOdds,
+    private readonly verifySpreadOddsFn: typeof verifySpreadOdds = verifySpreadOdds,
   ) {}
 
   getCapabilities(): OddsProviderCapabilities {
@@ -433,11 +479,13 @@ export class TheOddsApiProvider implements OddsProvider {
       });
     }
 
-    // Betting Markets V1, Phase 3.3 — TOTALS joins the two MONEYLINE variants.
+    // Betting Markets V1, Phase 3.3 — TOTALS joins the two MONEYLINE
+    // variants. Handicap Stage H1 — SPREAD joins them too.
     if (
       selection.marketType !== "MONEYLINE_2WAY" &&
       selection.marketType !== "MONEYLINE_3WAY" &&
-      selection.marketType !== "TOTALS"
+      selection.marketType !== "TOTALS" &&
+      selection.marketType !== "SPREAD"
     ) {
       return createFailedResult({
         submittedOdds,
@@ -445,6 +493,29 @@ export class TheOddsApiProvider implements OddsProvider {
         checkedAt: checkedAtFor(),
         reasonCode: "MARKET_NOT_SUPPORTED",
         diagnosticCode: "ADAPTER_MARKET_NOT_SUPPORTED",
+      });
+    }
+
+    // Handicap Stage H1 — the standard-whole/half-line capability gate.
+    // selection.line is guaranteed a present, decimal-shaped string here —
+    // validateCanonicalSelection's own SPREAD rule (participant + line both
+    // required) already ran above and would have returned INVALID_INPUT
+    // otherwise. A quarter line (±0.25/±0.75/±1.25/±1.75) is honestly
+    // reported as unsupported by THIS adapter's CURRENT capability — never
+    // rounded to the nearest standard line, never silently reclassified
+    // away from SPREAD (selection.marketType/selectionType/participant/line
+    // are all left completely untouched; only whether to attempt provider
+    // verification is decided here). findSpreadOutcome() itself has no such
+    // restriction — deleting this one gate is the entire scope of a future
+    // Handicap Stage H4 (Asian quarter lines), not a rewrite of the lookup
+    // logic itself.
+    if (selection.marketType === "SPREAD" && !isStandardHandicapLine(selection.line as string)) {
+      return createFailedResult({
+        submittedOdds,
+        provider: PROVIDER_NAME,
+        checkedAt: checkedAtFor(),
+        reasonCode: "MARKET_NOT_SUPPORTED",
+        diagnosticCode: "ADAPTER_SPREAD_QUARTER_LINE_UNSUPPORTED_H1",
       });
     }
 
@@ -543,6 +614,20 @@ export class TheOddsApiProvider implements OddsProvider {
         odds: submittedOddsNumber,
       };
       legacyResult = await this.verifyTotalsOddsFn(totalsInput);
+    } else if (selection.marketType === "SPREAD") {
+      // participant and line are both guaranteed present here —
+      // validateCanonicalSelection's own SPREAD rule already ran above and
+      // would have returned INVALID_INPUT otherwise; the H1 quarter-line
+      // gate above has also already confirmed this line is on the standard
+      // grid.
+      const spreadInput: SpreadVerificationInput = {
+        sport: legacySport,
+        event: legacyEvent,
+        participant: (selection.participant as CanonicalParticipant).name,
+        line: selection.line as string,
+        odds: submittedOddsNumber,
+      };
+      legacyResult = await this.verifySpreadOddsFn(spreadInput);
     } else {
       const legacySelection = selectionToLegacyText(selection);
       if (!legacySelection) {

@@ -558,7 +558,9 @@ const oddsCache = new Map<string, CacheEntry>();
 // (unchanged); "totals" exists for fetchOddsForSport()'s new second caller,
 // not yet wired into verifyOdds() at all (Phase 3.1 scope — see this
 // section's own header comment further down).
-export type OddsApiMarketKey = "h2h" | "totals";
+// Handicap Stage H1 — "spreads" added the same way, for verifySpreadOdds()
+// below.
+export type OddsApiMarketKey = "h2h" | "totals" | "spreads";
 
 // Cache key is sportKey+market, not sportKey alone — an h2h response must
 // never satisfy a totals request or vice versa (they are genuinely
@@ -1176,6 +1178,253 @@ export async function verifyTotalsOdds(bet: TotalsVerificationInput): Promise<Od
   // the provider's own found price is adopted as both sourceOdds and
   // submittedOdds, trivially "within tolerance" of itself. Same convention
   // as verifyOdds()'s own null-odds branch.
+  if (bet.odds === null) {
+    return {
+      matched: true,
+      withinTolerance: true,
+      sourceOdds: price,
+      submittedOdds: price,
+      discrepancyPercent: 0,
+      bookmaker,
+      note: lookup.isFallbackBookmaker ? `Pinnacle odds unavailable — using ${bookmaker} instead` : null,
+      ...providerMetadata,
+    };
+  }
+
+  const discrepancyPercent = Number((((bet.odds - price) / price) * 100).toFixed(2));
+
+  return {
+    matched: true,
+    withinTolerance: Math.abs(discrepancyPercent) <= ODDS_TOLERANCE_PERCENT,
+    sourceOdds: price,
+    submittedOdds: bet.odds,
+    discrepancyPercent,
+    bookmaker,
+    note: lookup.isFallbackBookmaker ? `Pinnacle odds unavailable — using ${bookmaker} instead` : null,
+    ...providerMetadata,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Spread / handicap market — Handicap Stage H1                               */
+/*                                                                             */
+/* Standard whole/half lines ONLY (-2, -1.5, -1, -0.5, 0, +0.5, +1, +1.5, +2   */
+/* and so on). Asian quarter lines (±0.25/±0.75/±1.25/±1.75) are structurally */
+/* supported by findSpreadOutcome() itself (it is a plain exact-line lookup,  */
+/* no grid restriction of its own) — the H1 capability gate that rejects them */
+/* lives one layer up, in TheOddsApiProvider.verifySelection(), NOT here.     */
+/* This keeps a future H4 (Asian quarter lines) a one-line change (delete     */
+/* that one gate) rather than a rewrite of this file.                        */
+/*                                                                             */
+/* Mirrors the Totals section immediately above byte-for-byte in structure:   */
+/* same fetch wrapper shape, same exact-line-only string-equality discipline  */
+/* (never a "closest line" fallback), same resolveMatchedEvent() reuse, same  */
+/* OddsCheckResult shape. The one genuine difference from Totals: a spread    */
+/* outcome must be matched on BOTH the requested participant (fuzzy team-name */
+/* matching, reusing the same normalizeTeamName/overlapScore primitives h2h   */
+/* already uses) AND the exact requested line — a price for the right team   */
+/* on the wrong line, or the right line under the wrong team, is never a      */
+/* match (see findSpreadOutcome's own two-stage filter below).               */
+/* -------------------------------------------------------------------------- */
+
+// Same rationale as fetchTotalsOddsForSport — a thin, explicit wrapper so a
+// future caller can't accidentally omit the market and silently fetch h2h.
+export async function fetchSpreadOddsForSport(sportKey: string): Promise<OddsApiEvent[]> {
+  return fetchOddsForSport(sportKey, "spreads");
+}
+
+export interface SpreadOutcomeMatch {
+  readonly price: number;
+  readonly bookmaker: string;
+  readonly isFallbackBookmaker: boolean;
+  readonly marketKey: "spreads";
+  // Canonical decimal string (e.g. "-1.5"), the provider's own point,
+  // re-expressed through the same canonicalization the request line was
+  // checked against — see findTotalsOutcome's own `point` field for the
+  // identical convention and rationale.
+  readonly point: string;
+  // The provider's own outcome name (its literal home_team/away_team
+  // string) — returned so a caller can log/display exactly which team the
+  // provider itself attributed this line to, distinct from whatever text
+  // the player typed.
+  readonly outcomeName: string;
+}
+
+// Every kind mirrors TotalsOutcomeLookupResult's own reasoning one-for-one,
+// with OUTCOME_ABSENT (Totals: "no Over/Under outcomes at all") replaced by
+// PARTICIPANT_NOT_FOUND (Spread: "no outcome could be confidently attributed
+// to the requested participant") — the two are the same underlying failure
+// shape (the market exists, but nothing in it matches what was asked for),
+// just named for what each market actually asks for.
+export type SpreadOutcomeLookupResult =
+  | ({ readonly kind: "MATCHED" } & SpreadOutcomeMatch)
+  | { readonly kind: "INVALID_REQUESTED_LINE" }
+  | { readonly kind: "NO_BOOKMAKER" }
+  | { readonly kind: "MARKET_ABSENT" }
+  | { readonly kind: "PARTICIPANT_NOT_FOUND" }
+  | { readonly kind: "MISSING_POINT" }
+  | { readonly kind: "MALFORMED_POINT" }
+  | { readonly kind: "LINE_NOT_AVAILABLE" };
+
+// Pure — no I/O, no caching, no mutation. Operates on an already-matched
+// event, reuses pickBookmaker() unchanged (same Pinnacle-preferred/
+// first-bookmaker-fallback policy every other market already has).
+//
+// Two-stage match, deliberately never conflated into one fuzzy score:
+//   1. WHICH TEAM — resolve the requested participant against the matched
+//      event's own home_team/away_team (fuzzy, via normalizeTeamName/
+//      overlapScore — the exact same primitives findOutcomePriceByTeamName
+//      already uses for h2h), then keep only spread outcomes whose own name
+//      is an EXACT match (after normalization) to that resolved team
+//      string. This is what stops "Arsenal" from ever being scored against
+//      Coventry's own outcome entries at all — participant resolution
+//      happens once, up front, never per-candidate-outcome.
+//   2. WHICH LINE — among that team's own outcomes only, exact
+//      canonical-string equality against requestedLine (identical
+//      discipline to findTotalsOutcome — never "closest available").
+export function findSpreadOutcome(
+  event: OddsApiEvent,
+  participantName: string,
+  requestedLine: string,
+): SpreadOutcomeLookupResult {
+  const canonicalRequestedLine = normalizeLineString(requestedLine);
+  if (canonicalRequestedLine === null) {
+    return { kind: "INVALID_REQUESTED_LINE" };
+  }
+
+  const bookmakerPick = pickBookmaker(event);
+  if (!bookmakerPick) {
+    return { kind: "NO_BOOKMAKER" };
+  }
+
+  const market = bookmakerPick.bookmaker.markets.find((m) => m.key === "spreads");
+  if (!market) {
+    return { kind: "MARKET_ABSENT" };
+  }
+
+  const normalizedTarget = normalizeTeamName(participantName);
+  const homeScore = overlapScore(normalizedTarget, normalizeTeamName(event.home_team));
+  const awayScore = overlapScore(normalizedTarget, normalizeTeamName(event.away_team));
+
+  let resolvedTeamName: string | null = null;
+  if (homeScore >= SELECTION_MATCH_THRESHOLD || awayScore >= SELECTION_MATCH_THRESHOLD) {
+    resolvedTeamName = homeScore >= awayScore ? event.home_team : event.away_team;
+  }
+  if (resolvedTeamName === null) {
+    return { kind: "PARTICIPANT_NOT_FOUND" };
+  }
+
+  const normalizedResolvedTeam = normalizeTeamName(resolvedTeamName);
+  const candidates = market.outcomes.filter((outcome) => normalizeTeamName(outcome.name) === normalizedResolvedTeam);
+  if (candidates.length === 0) {
+    return { kind: "PARTICIPANT_NOT_FOUND" };
+  }
+
+  let sawMissingPoint = false;
+  let sawMalformedPoint = false;
+
+  for (const outcome of candidates) {
+    if (outcome.point === undefined || outcome.point === null) {
+      sawMissingPoint = true;
+      continue;
+    }
+
+    const canonicalPoint = canonicalizeProviderPoint(outcome.point);
+    if (canonicalPoint === null) {
+      sawMalformedPoint = true;
+      continue;
+    }
+
+    if (canonicalPoint === canonicalRequestedLine) {
+      return {
+        kind: "MATCHED",
+        price: outcome.price,
+        bookmaker: bookmakerPick.bookmaker.title,
+        isFallbackBookmaker: bookmakerPick.isFallback,
+        marketKey: "spreads",
+        point: canonicalPoint,
+        outcomeName: outcome.name,
+      };
+    }
+  }
+
+  if (sawMissingPoint) return { kind: "MISSING_POINT" };
+  if (sawMalformedPoint) return { kind: "MALFORMED_POINT" };
+  return { kind: "LINE_NOT_AVAILABLE" };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Handicap Stage H1 — Spread verification entry point. Mirrors               */
+/* verifyTotalsOdds()'s own structure and OddsCheckResult shape exactly.      */
+/* Called by TheOddsApiProvider.verifySelection() when                        */
+/* selection.marketType === "SPREAD" AND the requested line is on the        */
+/* standard whole/half grid (that capability gate lives in                   */
+/* theOddsApiProvider.ts, not here — see this section's own header comment). */
+/* -------------------------------------------------------------------------- */
+
+export interface SpreadVerificationInput {
+  sport: string;
+  event: string;
+  // The player's own requested participant name (e.g. "Arsenal") — never a
+  // provider team string. Matched fuzzily against the resolved event's own
+  // home_team/away_team by findSpreadOutcome above.
+  participant: string;
+  // Decimal string, always signed for the underdog's "+"-explicit intent
+  // preserved by domain.ts's normalizeLineString upstream — the caller only
+  // ever supplies this after validateCanonicalSelection has already
+  // confirmed SPREAD has a present, decimal-shaped line.
+  line: string;
+  odds: number | null;
+}
+
+export async function verifySpreadOdds(bet: SpreadVerificationInput): Promise<OddsCheckResult> {
+  const baseResult: OddsCheckResult = {
+    matched: false,
+    withinTolerance: null,
+    sourceOdds: null,
+    submittedOdds: bet.odds,
+    discrepancyPercent: null,
+    bookmaker: null,
+    note: null,
+  };
+
+  const resolved = await resolveMatchedEvent(bet.sport, bet.event, "spreads");
+
+  if (resolved.kind === "NO_SPORT_KEYS") {
+    return { ...baseResult, note: `Sport/league "${bet.sport}" is not mapped to a The Odds API sport_key` };
+  }
+
+  if (resolved.kind === "FETCH_FAILED") {
+    return { ...baseResult, note: resolved.note };
+  }
+
+  if (resolved.kind === "NOT_FOUND") {
+    return { ...baseResult, note: `No matching event found for "${bet.event}" in ${resolved.sportKeys.join(", ")}` };
+  }
+
+  if (resolved.kind === "AMBIGUOUS") {
+    return { ...baseResult, note: `Ambiguous event match for "${bet.event}" across multiple leagues` };
+  }
+
+  const { event, providerMetadata } = resolved;
+
+  const lookup = findSpreadOutcome(event, bet.participant, bet.line);
+
+  if (lookup.kind !== "MATCHED") {
+    // Same single-parseable-note-template convention as Totals — never a
+    // "closest line" fallback, findSpreadOutcome itself already guarantees
+    // that.
+    return {
+      ...baseResult,
+      ...providerMetadata,
+      note: `Could not match spread selection "${bet.participant} ${bet.line}" for "${bet.event}" (${lookup.kind})`,
+    };
+  }
+
+  const price = lookup.price;
+  const bookmaker = lookup.bookmaker;
+
+  // Same null-odds promotion convention as verifyOdds()/verifyTotalsOdds().
   if (bet.odds === null) {
     return {
       matched: true,

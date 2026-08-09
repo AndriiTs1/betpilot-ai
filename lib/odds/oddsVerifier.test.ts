@@ -5,6 +5,9 @@ import {
   fetchTotalsOddsForSport,
   findTotalsOutcome,
   verifyTotalsOdds,
+  fetchSpreadOddsForSport,
+  findSpreadOutcome,
+  verifySpreadOdds,
   type OddsVerificationInput,
   type OddsApiEvent,
   type OddsApiBookmaker,
@@ -1565,6 +1568,402 @@ test("verifyTotalsOdds: provider event metadata (providerEventId/providerSportKe
 
   assert.equal(result.matched, true, result.note ?? "expected a match");
   assert.equal(result.providerEventId, "evt-totals-meta");
+  assert.equal(result.providerSportKey, "soccer_epl");
+  assert.equal(result.eventStartTime, "2026-08-15T18:00:00.000Z");
+});
+
+/* ============================================================================
+ * Handicap Stage H1 — Spread fetch + pure outcome lookup + full verification
+ * entry point. Mirrors the Totals section immediately above one-for-one:
+ * same fetch-stub discipline, same fixture-building style, same test
+ * ordering (fetch -> pure lookup -> full verifySpreadOdds pipeline).
+ * ============================================================================ */
+
+function spreadOutcome(name: string, price: number, point: number | undefined): OddsApiOutcome {
+  return point === undefined ? { name, price } : { name, price, point };
+}
+
+function spreadEvent(homeTeam: string, awayTeam: string, bookmakers: OddsApiBookmaker[]): OddsApiEvent {
+  return { id: "evt-spread-1", home_team: homeTeam, away_team: awayTeam, bookmakers };
+}
+
+function pinnacleSpreadBookmaker(outcomes: OddsApiOutcome[]): OddsApiBookmaker {
+  return { key: "pinnacle", title: "Pinnacle", markets: [{ key: "spreads", outcomes }] };
+}
+
+test("Spread fetch: fetchSpreadOddsForSport requests markets=spreads, not h2h or totals", async () => {
+  let requestedUrl = "";
+  currentHandler = async (url: string) => {
+    requestedUrl = url;
+    return jsonResponse([]);
+  };
+
+  await fetchSpreadOddsForSport("soccer_epl");
+
+  assert.equal(marketsParamFromUrl(requestedUrl), "spreads");
+});
+
+test("Spread cache: an h2h/totals response never satisfies a spreads request for the same sport_key, or vice versa", async () => {
+  let callCount = 0;
+  currentHandler = async (url: string) => {
+    callCount += 1;
+    const market = marketsParamFromUrl(url);
+    return jsonResponse([{ id: `evt-${market}`, home_team: "Arsenal", away_team: "Chelsea", bookmakers: [] }]);
+  };
+
+  await verifyOdds(bet({ sport: "premier league", event: "Arsenal vs Chelsea", selection: "1", odds: 1.9 }));
+  assert.equal(callCount, 1);
+
+  const spreadEvents = await fetchSpreadOddsForSport("soccer_epl");
+  assert.equal(callCount, 2, "a spreads request for the same sport_key must NOT be served from the h2h cache entry — it must be a real second fetch");
+  assert.equal(spreadEvents[0].id, "evt-spreads", "must return the spreads-specific payload, not the h2h one");
+});
+
+/* -------------------------------------------------------------------------- */
+/* findSpreadOutcome — pure lookup, several different teams/events per       */
+/* section 13's mandate: no hardcoded team-specific behavior anywhere in the */
+/* implementation.                                                           */
+/* -------------------------------------------------------------------------- */
+
+test("findSpreadOutcome: favorite negative line exact match (Arsenal -1.5)", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.85, -1.5), spreadOutcome("Coventry City", 1.95, 1.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.price, 1.85);
+  assert.equal(result.point, "-1.5");
+  assert.equal(result.marketKey, "spreads");
+  assert.equal(result.bookmaker, "Pinnacle");
+  assert.equal(result.isFallbackBookmaker, false);
+  assert.equal(result.outcomeName, "Arsenal");
+});
+
+test("findSpreadOutcome: underdog positive line exact match (Coventry City +1.5) — symmetric opposite side of the same test 8's example", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.9, -1.5), spreadOutcome("Coventry City", 1.95, 1.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Coventry City", "+1.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.price, 1.95, "must never use Arsenal's price merely because the absolute line value (1.5) matches");
+  assert.equal(result.point, "1.5", "canonical form is unsigned-positive, matching domain.ts's normalizeLineString convention");
+});
+
+test("findSpreadOutcome: home side (Real Madrid -1)", () => {
+  const event = spreadEvent("Real Madrid", "Barcelona", [
+    pinnacleSpreadBookmaker([spreadOutcome("Real Madrid", 1.9, -1), spreadOutcome("Barcelona", 1.9, 1)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Real Madrid", "-1");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.price, 1.9);
+  assert.equal(result.point, "-1");
+});
+
+test("findSpreadOutcome: away side (Barcelona +1) — same event as the home-side test above", () => {
+  const event = spreadEvent("Real Madrid", "Barcelona", [
+    pinnacleSpreadBookmaker([spreadOutcome("Real Madrid", 1.85, -1), spreadOutcome("Barcelona", 1.98, 1)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Barcelona", "+1");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.price, 1.98);
+  assert.equal(result.point, "1");
+});
+
+test("findSpreadOutcome: multi-word team names (Manchester United -0.5 / Chelsea +0.5)", () => {
+  const event = spreadEvent("Manchester United", "Chelsea", [
+    pinnacleSpreadBookmaker([spreadOutcome("Manchester United", 1.8, -0.5), spreadOutcome("Chelsea", 2.0, 0.5)]),
+  ]);
+
+  const home = findSpreadOutcome(event, "Manchester United", "-0.5");
+  assert.equal(home.kind, "MATCHED");
+  if (home.kind === "MATCHED") assert.equal(home.price, 1.8);
+
+  const away = findSpreadOutcome(event, "Chelsea", "0.5");
+  assert.equal(away.kind, "MATCHED");
+  if (away.kind === "MATCHED") assert.equal(away.price, 2.0);
+});
+
+test("findSpreadOutcome: multiple available lines for the same team — the exact requested line is selected, never the nearest one (mandatory test)", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([
+      spreadOutcome("Arsenal", 1.4, -1),
+      spreadOutcome("Arsenal", 1.85, -1.5),
+      spreadOutcome("Arsenal", 2.3, -2),
+      spreadOutcome("Coventry City", 2.9, 1),
+      spreadOutcome("Coventry City", 1.95, 1.5),
+      spreadOutcome("Coventry City", 1.6, 2),
+    ]),
+  ]);
+
+  const minusOneHalf = findSpreadOutcome(event, "Arsenal", "-1.5");
+  assert.equal(minusOneHalf.kind, "MATCHED");
+  if (minusOneHalf.kind === "MATCHED") assert.equal(minusOneHalf.price, 1.85);
+
+  const minusTwo = findSpreadOutcome(event, "Arsenal", "-2");
+  assert.equal(minusTwo.kind, "MATCHED");
+  if (minusTwo.kind === "MATCHED") assert.equal(minusTwo.price, 2.3);
+
+  // -1.75 is not one of the three lines this bookmaker actually offers
+  // (-1/-1.5/-2) — never substituted for the nearest neighbor.
+  const quarterLine = findSpreadOutcome(event, "Arsenal", "-1.75");
+  assert.equal(quarterLine.kind, "LINE_NOT_AVAILABLE");
+});
+
+test("findSpreadOutcome: requested line absent — LINE_NOT_AVAILABLE, never a nearest-line substitution", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.85, -1), spreadOutcome("Coventry City", 1.95, 1)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.5");
+
+  assert.equal(result.kind, "LINE_NOT_AVAILABLE");
+});
+
+test("findSpreadOutcome: wrong/unrelated participant — PARTICIPANT_NOT_FOUND, never falls back to the other team's price", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.85, -1.5), spreadOutcome("Coventry City", 1.95, 1.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Real Madrid", "-1.5");
+
+  assert.equal(result.kind, "PARTICIPANT_NOT_FOUND");
+});
+
+test("findSpreadOutcome: right team, wrong line is not a match; right line, wrong team is not a match (section 8's exact requirement)", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.9, -1.5), spreadOutcome("Coventry City", 1.95, 1.5)]),
+  ]);
+
+  assert.equal(findSpreadOutcome(event, "Arsenal", "1.5").kind, "LINE_NOT_AVAILABLE", "Arsenal has no +1.5 outcome");
+  assert.equal(findSpreadOutcome(event, "Coventry City", "-1.5").kind, "LINE_NOT_AVAILABLE", "Coventry City has no -1.5 outcome");
+});
+
+test("findSpreadOutcome: no 'spreads' market on the picked bookmaker reports MARKET_ABSENT", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    { key: "pinnacle", title: "Pinnacle", markets: [{ key: "h2h", outcomes: [] }] },
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.5");
+
+  assert.equal(result.kind, "MARKET_ABSENT");
+});
+
+test("findSpreadOutcome: no bookmaker at all on the event reports NO_BOOKMAKER", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", []);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.5");
+
+  assert.equal(result.kind, "NO_BOOKMAKER");
+});
+
+test("findSpreadOutcome: a malformed requestedLine is rejected up front as INVALID_REQUESTED_LINE, before any bookmaker/market work", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.85, -1.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "not-a-number");
+
+  assert.equal(result.kind, "INVALID_REQUESTED_LINE");
+});
+
+test("findSpreadOutcome: signed line is preserved exactly — the sign is never dropped, flipped, or coerced", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.85, -1.5), spreadOutcome("Coventry City", 1.95, 1.5)]),
+  ]);
+
+  const negative = findSpreadOutcome(event, "Arsenal", "-1.5");
+  assert.equal(negative.kind, "MATCHED");
+  if (negative.kind === "MATCHED") assert.equal(negative.point, "-1.5");
+
+  // A "+1.5" REQUEST is accepted and canonicalized (domain-wide convention),
+  // but the underlying outcome's own point is genuinely positive — this
+  // proves the sign itself (not merely the request string) round-trips
+  // correctly, never silently becoming "-1.5" or an unsigned "1.5" meaning
+  // something else.
+  const positive = findSpreadOutcome(event, "Coventry City", "+1.5");
+  assert.equal(positive.kind, "MATCHED");
+  if (positive.kind === "MATCHED") assert.equal(positive.point, "1.5");
+});
+
+test("findSpreadOutcome: an outcome missing `point` entirely reports MISSING_POINT, never crashes or silently matches", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.85, undefined), spreadOutcome("Coventry City", 1.95, 1.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.5");
+
+  assert.equal(result.kind, "MISSING_POINT");
+});
+
+test("findSpreadOutcome: a malformed `point` (non-finite) reports MALFORMED_POINT, never coerced or crashed on", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([{ name: "Arsenal", price: 1.85, point: NaN }, spreadOutcome("Coventry City", 1.95, 1.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.5");
+
+  assert.equal(result.kind, "MALFORMED_POINT");
+});
+
+test("findSpreadOutcome: fallback bookmaker behavior — no Pinnacle present, falls back to the first bookmaker, exactly like h2h/totals", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    { key: "bet365", title: "Bet365", markets: [{ key: "spreads", outcomes: [spreadOutcome("Arsenal", 1.8, -1.5), spreadOutcome("Coventry City", 2.0, 1.5)] }] },
+    { key: "williamhill", title: "William Hill", markets: [{ key: "spreads", outcomes: [spreadOutcome("Arsenal", 1.75, -1.5), spreadOutcome("Coventry City", 2.05, 1.5)] }] },
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.bookmaker, "Bet365");
+  assert.equal(result.price, 1.8);
+  assert.equal(result.isFallbackBookmaker, true);
+});
+
+/* -------------------------------------------------------------------------- */
+/* verifySpreadOdds — the full fetch -> event-match -> findSpreadOutcome     */
+/* pipeline, mirroring verifyTotalsOdds' own end-to-end shape.               */
+/* -------------------------------------------------------------------------- */
+
+function spreadFetchEvent(id: string, homeTeam: string, awayTeam: string, bookmakers: OddsApiBookmaker[]): unknown {
+  return { id, home_team: homeTeam, away_team: awayTeam, bookmakers };
+}
+
+test("verifySpreadOdds: Arsenal -1.5 VERIFIED — submitted odds matches the provider's price within tolerance", async () => {
+  mockEvents([
+    spreadFetchEvent("evt-spread-arsenal", "Arsenal", "Coventry City", [
+      pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.85, -1.5), spreadOutcome("Coventry City", 1.95, 1.5)]),
+    ]),
+  ]);
+
+  const result = await verifySpreadOdds({ sport: "premier league", event: "Arsenal vs Coventry City", participant: "Arsenal", line: "-1.5", odds: 1.85 });
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(result.withinTolerance, true);
+  assert.equal(result.sourceOdds, 1.85);
+  assert.equal(result.discrepancyPercent, 0);
+});
+
+test("verifySpreadOdds: Real Madrid -1 VERIFIED (a second, different event/team pair)", async () => {
+  mockEvents([
+    spreadFetchEvent("evt-spread-real", "Real Madrid", "Barcelona", [
+      pinnacleSpreadBookmaker([spreadOutcome("Real Madrid", 1.9, -1), spreadOutcome("Barcelona", 1.9, 1)]),
+    ]),
+  ]);
+
+  const result = await verifySpreadOdds({ sport: "premier league", event: "Real Madrid vs Barcelona", participant: "Real Madrid", line: "-1", odds: 1.9 });
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(result.sourceOdds, 1.9);
+});
+
+test("verifySpreadOdds: Manchester United -0.5 VERIFIED (a third event/team pair, multi-word name)", async () => {
+  mockEvents([
+    spreadFetchEvent("evt-spread-mufc", "Manchester United", "Chelsea", [
+      pinnacleSpreadBookmaker([spreadOutcome("Manchester United", 1.8, -0.5), spreadOutcome("Chelsea", 2.0, 0.5)]),
+    ]),
+  ]);
+
+  const result = await verifySpreadOdds({ sport: "premier league", event: "Manchester United vs Chelsea", participant: "Manchester United", line: "-0.5", odds: 1.8 });
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(result.sourceOdds, 1.8);
+});
+
+test("verifySpreadOdds: ODDS_CHANGED when submitted odds differ from the provider's price beyond the existing tolerance", async () => {
+  mockEvents([
+    spreadFetchEvent("evt-spread-changed", "Arsenal", "Coventry City", [
+      pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 2.5, -1.5), spreadOutcome("Coventry City", 1.6, 1.5)]),
+    ]),
+  ]);
+
+  const result = await verifySpreadOdds({ sport: "premier league", event: "Arsenal vs Coventry City", participant: "Arsenal", line: "-1.5", odds: 1.9 });
+
+  assert.equal(result.matched, true, result.note ?? "expected a match (matched, just not within tolerance)");
+  assert.equal(result.withinTolerance, false);
+  assert.equal(result.sourceOdds, 2.5);
+  assert.equal(result.submittedOdds, 1.9);
+});
+
+test("verifySpreadOdds: requested -1.5 never matches a bookmaker that only offers -1/-2 — FAILED, never a nearest-line fallback", async () => {
+  mockEvents([
+    spreadFetchEvent("evt-spread-wrongline", "Arsenal", "Coventry City", [
+      pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.4, -1), spreadOutcome("Arsenal", 2.3, -2), spreadOutcome("Coventry City", 2.9, 1), spreadOutcome("Coventry City", 1.6, 2)]),
+    ]),
+  ]);
+
+  const result = await verifySpreadOdds({ sport: "premier league", event: "Arsenal vs Coventry City", participant: "Arsenal", line: "-1.5", odds: 1.9 });
+
+  assert.equal(result.matched, false);
+  assert.ok(result.note?.includes("LINE_NOT_AVAILABLE"), `expected a LINE_NOT_AVAILABLE note, got: ${result.note}`);
+});
+
+test("verifySpreadOdds: wrong participant — FAILED, PARTICIPANT_NOT_FOUND note", async () => {
+  mockEvents([
+    spreadFetchEvent("evt-spread-wrongteam", "Arsenal", "Coventry City", [
+      pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.85, -1.5), spreadOutcome("Coventry City", 1.95, 1.5)]),
+    ]),
+  ]);
+
+  const result = await verifySpreadOdds({ sport: "premier league", event: "Arsenal vs Coventry City", participant: "Real Madrid", line: "-1.5", odds: 1.9 });
+
+  assert.equal(result.matched, false);
+  assert.ok(result.note?.includes("PARTICIPANT_NOT_FOUND"), `expected a PARTICIPANT_NOT_FOUND note, got: ${result.note}`);
+});
+
+test("verifySpreadOdds: missing spreads market on the bookmaker — FAILED, MARKET_ABSENT note", async () => {
+  mockEvents([
+    spreadFetchEvent("evt-spread-nomarket", "Arsenal", "Coventry City", [{ key: "pinnacle", title: "Pinnacle", markets: [{ key: "h2h", outcomes: [] }] }]),
+  ]);
+
+  const result = await verifySpreadOdds({ sport: "premier league", event: "Arsenal vs Coventry City", participant: "Arsenal", line: "-1.5", odds: 1.9 });
+
+  assert.equal(result.matched, false);
+  assert.ok(result.note?.includes("MARKET_ABSENT"), `expected a MARKET_ABSENT note, got: ${result.note}`);
+});
+
+test("verifySpreadOdds: event not found — FAILED, same note template as h2h/totals", async () => {
+  mockEvents([]);
+
+  const result = await verifySpreadOdds({ sport: "premier league", event: "Arsenal vs Coventry City", participant: "Arsenal", line: "-1.5", odds: 1.9 });
+
+  assert.equal(result.matched, false);
+  assert.ok(result.note?.includes("No matching event found"), `expected an event-not-found note, got: ${result.note}`);
+});
+
+test("verifySpreadOdds: provider fetch failure (unavailable) — FAILED, same fetch-error handling as h2h/totals", async () => {
+  currentHandler = async () => new Response("", { status: 500 });
+
+  const result = await verifySpreadOdds({ sport: "premier league", event: "Arsenal vs Coventry City", participant: "Arsenal", line: "-1.5", odds: 1.9 });
+
+  assert.equal(result.matched, false);
+  assert.ok(result.note?.includes("status 500"), `expected an HTTP-failure note, got: ${result.note}`);
+});
+
+test("verifySpreadOdds: provider event metadata (providerEventId/providerSportKey/eventStartTime) round-trips exactly like h2h/totals", async () => {
+  mockEvents([
+    {
+      ...(spreadFetchEvent("evt-spread-meta", "Arsenal", "Coventry City", [pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.85, -1.5), spreadOutcome("Coventry City", 1.95, 1.5)])]) as object),
+      commence_time: "2026-08-15T18:00:00.000Z",
+    },
+  ]);
+
+  const result = await verifySpreadOdds({ sport: "premier league", event: "Arsenal vs Coventry City", participant: "Arsenal", line: "-1.5", odds: 1.9 });
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(result.providerEventId, "evt-spread-meta");
   assert.equal(result.providerSportKey, "soccer_epl");
   assert.equal(result.eventStartTime, "2026-08-15T18:00:00.000Z");
 });

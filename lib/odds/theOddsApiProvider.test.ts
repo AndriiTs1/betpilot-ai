@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { TheOddsApiProvider } from "./theOddsApiProvider";
 import type { CanonicalEvent, CanonicalSelection } from "./domain";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
-import type { OddsVerificationInput, TotalsVerificationInput } from "./oddsVerifier";
+import type { OddsVerificationInput, TotalsVerificationInput, SpreadVerificationInput } from "./oddsVerifier";
 import { legacySelectionToCanonicalRequest } from "./legacyOddsBridge";
 
 const FOOTBALL_EVENT: CanonicalEvent = {
@@ -64,6 +64,19 @@ function throwingVerifyOddsFn(): typeof import("./oddsVerifier").verifyOdds {
   }) as typeof import("./oddsVerifier").verifyOdds;
 }
 
+// Handicap Stage H1 — same capturing-fake shape as capturingVerifyOddsFn/
+// capturingVerifyTotalsOddsFn above, for the new, independently-injected
+// verifySpreadOddsFn constructor parameter.
+function capturingVerifySpreadOddsFn(result: OddsCheckResult) {
+  const calls: SpreadVerificationInput[] = [];
+  const fn = async (input: SpreadVerificationInput): Promise<OddsCheckResult> => {
+    calls.push(input);
+    return result;
+  };
+  return { fn, calls };
+}
+
+
 function baseLegacyResult(overrides: Partial<OddsCheckResult>): OddsCheckResult {
   return {
     matched: false,
@@ -94,12 +107,12 @@ test("capabilities: only the four current MVP sports plus American Football are 
   assert.ok(!capabilities.supportedSports.includes("UNKNOWN"));
 });
 
-test("capabilities: moneyline + totals markets are advertised — spread/BTTS/double-chance are not current (Betting Markets V1, Phase 3.3 — TOTALS now intentionally supported)", () => {
+test("capabilities: moneyline + totals + spread markets are advertised — BTTS/double-chance are not current (Betting Markets V1 Phase 3.3 + Handicap Stage H1 — TOTALS and SPREAD now intentionally supported)", () => {
   const provider = new TheOddsApiProvider();
   const capabilities = provider.getCapabilities();
 
-  assert.deepEqual(capabilities.supportedMarketTypes.slice().sort(), ["MONEYLINE_2WAY", "MONEYLINE_3WAY", "TOTALS"].sort());
-  for (const notCurrent of ["SPREAD", "BOTH_TEAMS_TO_SCORE", "DOUBLE_CHANCE"] as const) {
+  assert.deepEqual(capabilities.supportedMarketTypes.slice().sort(), ["MONEYLINE_2WAY", "MONEYLINE_3WAY", "TOTALS", "SPREAD"].sort());
+  for (const notCurrent of ["BOTH_TEAMS_TO_SCORE", "DOUBLE_CHANCE", "TEAM_TOTAL"] as const) {
     assert.ok(!capabilities.supportedMarketTypes.includes(notCurrent), `${notCurrent} must not be advertised as current`);
   }
 });
@@ -387,12 +400,12 @@ test("adapter mapping: request-level submittedOdds overrides selection.submitted
   assert.equal(calls[0].odds, 3.0);
 });
 
-test("adapter mapping: an unsupported market (SPREAD) never reaches the legacy verifier — FAILED/MARKET_NOT_SUPPORTED", async () => {
+test("adapter mapping: an unsupported market (BOTH_TEAMS_TO_SCORE) never reaches the legacy verifier — FAILED/MARKET_NOT_SUPPORTED (SPREAD moved to its own Handicap Stage H1 tests below — it is no longer unsupported)", async () => {
   const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({}));
   const provider = new TheOddsApiProvider(fn);
 
   const result = await provider.verifySelection({
-    selection: moneyline3Way({ marketType: "SPREAD", selectionType: "HOME", participant: { name: "Manchester United" }, line: "-1.5" }),
+    selection: moneyline3Way({ marketType: "BOTH_TEAMS_TO_SCORE", selectionType: "YES", participant: undefined, line: undefined }),
   });
 
   assert.equal(result.status, "FAILED");
@@ -441,7 +454,7 @@ test("end-to-end: 'Арсенал ИТБ 1.5' (TEAM_TOTAL shorthand) is classifi
   assert.equal(calls.length, 0, "the h2h verifier must never be called for an unsupported market");
 });
 
-test("end-to-end: 'Арсенал Ф1(-1.5)' (SPREAD shorthand) is classified correctly and safely rejected as MARKET_NOT_SUPPORTED — never becomes a MONEYLINE bet", async () => {
+test("end-to-end: 'Арсенал Ф1(-1.5)' (SPREAD shorthand) is classified correctly and routes ONLY to spread verification (Handicap Stage H1) — never becomes a MONEYLINE bet", async () => {
   const request = legacySelectionToCanonicalRequest({
     sport: "Football",
     event: "Арсенал vs Челси",
@@ -450,14 +463,19 @@ test("end-to-end: 'Арсенал Ф1(-1.5)' (SPREAD shorthand) is classified co
   });
   assert.equal(request.selection.marketType, "SPREAD");
 
-  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({}));
-  const provider = new TheOddsApiProvider(fn);
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(baseLegacyResult({}));
+  const { fn: spreadFn, calls: spreadCalls } = capturingVerifySpreadOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9 }),
+  );
+  const provider = new TheOddsApiProvider(h2hFn, undefined, spreadFn);
 
   const result = await provider.verifySelection({ selection: request.selection });
 
-  assert.equal(result.status, "FAILED");
-  assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED");
-  assert.equal(calls.length, 0, "the h2h verifier must never be called for an unsupported market");
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(h2hCalls.length, 0, "the h2h verifier must never be called for a SPREAD selection");
+  assert.equal(spreadCalls.length, 1, "the spread verifier must be called exactly once");
+  assert.equal(spreadCalls[0].participant, "Арсенал");
+  assert.equal(spreadCalls[0].line, "-1.5");
 });
 
 /* -------------------------------------------------------------------------- */
@@ -508,7 +526,7 @@ test("end-to-end: bare 'Ф1' selection with the line stated in the separate `lin
   assert.equal(calls.length, 0, "the h2h verifier must never be called — this must never be priced as a moneyline 'team to win' selection");
 });
 
-test("end-to-end: 'Арсенал Ф1' (participant + bare token, no embedded number) with the line stated separately — SPREAD, participant attributed, never a fabricated 'Arsenal Win'", async () => {
+test("end-to-end: 'Арсенал Ф1' (participant + bare token, no embedded number) with the line stated separately — SPREAD, participant attributed, routes only to spread verification, never a fabricated 'Arsenal Win'", async () => {
   const request = legacySelectionToCanonicalRequest({
     sport: "Football",
     event: "Арсенал vs Челси",
@@ -520,17 +538,22 @@ test("end-to-end: 'Арсенал Ф1' (participant + bare token, no embedded nu
   assert.equal(request.selection.participant?.name, "Арсенал");
   assert.equal(request.selection.line, "-1.5");
 
-  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({}));
-  const provider = new TheOddsApiProvider(fn);
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(baseLegacyResult({}));
+  const { fn: spreadFn, calls: spreadCalls } = capturingVerifySpreadOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9 }),
+  );
+  const provider = new TheOddsApiProvider(h2hFn, undefined, spreadFn);
 
   const result = await provider.verifySelection({ selection: request.selection });
 
-  assert.equal(result.status, "FAILED");
-  assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED");
-  assert.equal(calls.length, 0);
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(h2hCalls.length, 0);
+  assert.equal(spreadCalls.length, 1);
+  assert.equal(spreadCalls[0].participant, "Арсенал");
+  assert.equal(spreadCalls[0].line, "-1.5");
 });
 
-test("end-to-end: 'Арсенал Ф1 -1.5 ставка 10' shape (whitespace-separated embedded line) — SPREAD, never MONEYLINE", async () => {
+test("end-to-end: 'Арсенал Ф1 -1.5 ставка 10' shape (whitespace-separated embedded line) — SPREAD, routes only to spread verification, never MONEYLINE", async () => {
   const request = legacySelectionToCanonicalRequest({
     sport: "Football",
     event: "Арсенал vs Челси",
@@ -540,16 +563,20 @@ test("end-to-end: 'Арсенал Ф1 -1.5 ставка 10' shape (whitespace-se
   assert.equal(request.selection.marketType, "SPREAD");
   assert.equal(request.selection.line, "-1.5");
 
-  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({}));
-  const provider = new TheOddsApiProvider(fn);
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(baseLegacyResult({}));
+  const { fn: spreadFn, calls: spreadCalls } = capturingVerifySpreadOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9 }),
+  );
+  const provider = new TheOddsApiProvider(h2hFn, undefined, spreadFn);
   const result = await provider.verifySelection({ selection: request.selection });
 
-  assert.equal(result.status, "FAILED");
-  assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED");
-  assert.equal(calls.length, 0);
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(h2hCalls.length, 0);
+  assert.equal(spreadCalls.length, 1);
+  assert.equal(spreadCalls[0].line, "-1.5");
 });
 
-test("end-to-end: 'Арсенал Ф1:-1.5 ставка 10' shape (colon-separated embedded line) — SPREAD, never MONEYLINE", async () => {
+test("end-to-end: 'Арсенал Ф1:-1.5 ставка 10' shape (colon-separated embedded line) — SPREAD, routes only to spread verification, never MONEYLINE", async () => {
   const request = legacySelectionToCanonicalRequest({
     sport: "Football",
     event: "Арсенал vs Челси",
@@ -559,16 +586,20 @@ test("end-to-end: 'Арсенал Ф1:-1.5 ставка 10' shape (colon-separat
   assert.equal(request.selection.marketType, "SPREAD");
   assert.equal(request.selection.line, "-1.5");
 
-  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({}));
-  const provider = new TheOddsApiProvider(fn);
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(baseLegacyResult({}));
+  const { fn: spreadFn, calls: spreadCalls } = capturingVerifySpreadOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9 }),
+  );
+  const provider = new TheOddsApiProvider(h2hFn, undefined, spreadFn);
   const result = await provider.verifySelection({ selection: request.selection });
 
-  assert.equal(result.status, "FAILED");
-  assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED");
-  assert.equal(calls.length, 0);
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(h2hCalls.length, 0);
+  assert.equal(spreadCalls.length, 1);
+  assert.equal(spreadCalls[0].line, "-1.5");
 });
 
-test("end-to-end: 'Арсенал Ф2(+1) ставка 10' shape (positive line) — SPREAD, never MONEYLINE", async () => {
+test("end-to-end: 'Арсенал Ф2(+1) ставка 10' shape (positive line) — SPREAD, routes only to spread verification, never MONEYLINE", async () => {
   const request = legacySelectionToCanonicalRequest({
     sport: "Football",
     event: "Арсенал vs Челси",
@@ -578,16 +609,20 @@ test("end-to-end: 'Арсенал Ф2(+1) ставка 10' shape (positive line)
   assert.equal(request.selection.marketType, "SPREAD");
   assert.equal(request.selection.line, "1"); // normalizeLineString strips the redundant "+" (unsigned means positive)
 
-  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({}));
-  const provider = new TheOddsApiProvider(fn);
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(baseLegacyResult({}));
+  const { fn: spreadFn, calls: spreadCalls } = capturingVerifySpreadOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9 }),
+  );
+  const provider = new TheOddsApiProvider(h2hFn, undefined, spreadFn);
   const result = await provider.verifySelection({ selection: request.selection });
 
-  assert.equal(result.status, "FAILED");
-  assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED");
-  assert.equal(calls.length, 0);
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(h2hCalls.length, 0);
+  assert.equal(spreadCalls.length, 1);
+  assert.equal(spreadCalls[0].line, "1");
 });
 
-test("end-to-end: full fixture 'Арсенал — Ковентри' + participant-attributed 'Арсенал Ф1' selection, line stated separately — SPREAD, correct participant, never MONEYLINE (the exact production incident's shape)", async () => {
+test("end-to-end: full fixture 'Арсенал — Ковентри' + participant-attributed 'Арсенал Ф1' selection, line stated separately — SPREAD, correct participant, routes only to spread verification, never MONEYLINE (the exact production incident's shape, now correctly verifiable under Handicap Stage H1)", async () => {
   const request = legacySelectionToCanonicalRequest({
     sport: "Football",
     event: "Арсенал — Ковентри",
@@ -602,13 +637,18 @@ test("end-to-end: full fixture 'Арсенал — Ковентри' + participa
   assert.equal(request.selection.event.participants[0].name, "Арсенал");
   assert.equal(request.selection.event.participants[1].name, "Ковентри");
 
-  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({}));
-  const provider = new TheOddsApiProvider(fn);
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(baseLegacyResult({}));
+  const { fn: spreadFn, calls: spreadCalls } = capturingVerifySpreadOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9 }),
+  );
+  const provider = new TheOddsApiProvider(h2hFn, undefined, spreadFn);
   const result = await provider.verifySelection({ selection: request.selection });
 
-  assert.equal(result.status, "FAILED");
-  assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED");
-  assert.equal(calls.length, 0, "the exact production incident's fixture must never reach the h2h 'team to win' verifier");
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(h2hCalls.length, 0, "the exact production incident's fixture must never reach the h2h 'team to win' verifier");
+  assert.equal(spreadCalls.length, 1);
+  assert.equal(spreadCalls[0].participant, "Арсенал");
+  assert.equal(spreadCalls[0].line, "-1.5");
 });
 
 test("end-to-end: full fixture 'Арсенал — Ковентри' + completely bare 'Ф1' selection (no participant anywhere in the text) — still safely rejected, never a guessed participant, never MONEYLINE", async () => {
@@ -688,7 +728,7 @@ test("end-to-end: the exact production incident's shape — event 'Arsenal — C
   assert.equal(calls.length, 0, "must never reach the h2h verifier — must never be priced as a moneyline 'Arsenal Win' selection");
 });
 
-test("end-to-end: 'Arsenal F1' (participant-attributed Latin token), line stated separately — SPREAD, participant Arsenal, safely rejected as MARKET_NOT_SUPPORTED, never MONEYLINE", async () => {
+test("end-to-end: 'Arsenal F1' (participant-attributed Latin token), line stated separately — SPREAD, participant Arsenal, routes only to spread verification, never MONEYLINE — never priced as 'Arsenal Win'", async () => {
   const request = legacySelectionToCanonicalRequest({
     sport: "Football",
     event: "Arsenal — Coventry City",
@@ -701,16 +741,26 @@ test("end-to-end: 'Arsenal F1' (participant-attributed Latin token), line stated
   assert.equal(request.selection.participant?.name, "Arsenal");
   assert.equal(request.selection.line, "-1.5");
 
-  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.16 }));
-  const provider = new TheOddsApiProvider(fn);
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.16 }));
+  const { fn: spreadFn, calls: spreadCalls } = capturingVerifySpreadOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9 }),
+  );
+  const provider = new TheOddsApiProvider(h2hFn, undefined, spreadFn);
   const result = await provider.verifySelection({ selection: request.selection });
 
-  assert.equal(result.status, "FAILED");
-  assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED");
-  assert.equal(calls.length, 0, "must never reach the h2h verifier — this is the exact production incident's fixture and must never be priced as 'Arsenal Win'");
+  assert.equal(result.status, "VERIFIED");
+  // CRITICAL: the h2h fake is primed to return a plausible "Arsenal Win"
+  // price (1.16, the exact number from the real production incident) —
+  // proving that even though a MONEYLINE-shaped price WAS available, this
+  // SPREAD selection never touched it.
+  assert.equal(h2hCalls.length, 0, "must never reach the h2h verifier — this is the exact production incident's fixture and must never be priced as 'Arsenal Win'");
+  assert.equal(spreadCalls.length, 1);
+  assert.equal(spreadCalls[0].participant, "Arsenal");
+  assert.equal(spreadCalls[0].line, "-1.5");
+  assert.notEqual(result.currentOdds, "1.16", "must never surface the moneyline price as if it were the spread price");
 });
 
-test("end-to-end: 'Arsenal F1(-1.5)' (Latin token with an embedded line, no separate line field) — SPREAD, never MONEYLINE", async () => {
+test("end-to-end: 'Arsenal F1(-1.5)' (Latin token with an embedded line, no separate line field) — SPREAD, routes only to spread verification, never MONEYLINE", async () => {
   const request = legacySelectionToCanonicalRequest({
     sport: "Football",
     event: "Arsenal — Coventry City",
@@ -721,13 +771,18 @@ test("end-to-end: 'Arsenal F1(-1.5)' (Latin token with an embedded line, no sepa
   assert.equal(request.selection.participant?.name, "Arsenal");
   assert.equal(request.selection.line, "-1.5");
 
-  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({}));
-  const provider = new TheOddsApiProvider(fn);
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(baseLegacyResult({}));
+  const { fn: spreadFn, calls: spreadCalls } = capturingVerifySpreadOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9 }),
+  );
+  const provider = new TheOddsApiProvider(h2hFn, undefined, spreadFn);
   const result = await provider.verifySelection({ selection: request.selection });
 
-  assert.equal(result.status, "FAILED");
-  assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED");
-  assert.equal(calls.length, 0);
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(h2hCalls.length, 0);
+  assert.equal(spreadCalls.length, 1);
+  assert.equal(spreadCalls[0].participant, "Arsenal");
+  assert.equal(spreadCalls[0].line, "-1.5");
 });
 
 test("end-to-end sanity check: 'Арсенал победа ставка 10' remains completely unaffected by the Latin F1/F2 widening", async () => {
@@ -746,6 +801,171 @@ test("end-to-end sanity check: 'Арсенал победа ставка 10' rem
 
   assert.equal(result.status, "VERIFIED");
   assert.equal(calls.length, 1, "a real, supported MONEYLINE selection must still reach the h2h verifier exactly once");
+});
+
+/* ============================================================================
+ * Handicap Stage H1 — SPREAD exact-line provider verification.
+ * Standard whole/half lines only; quarter lines remain non-confirmable.
+ * ============================================================================ */
+
+function spreadSelection(overrides: Partial<CanonicalSelection> = {}): CanonicalSelection {
+  return {
+    sport: "FOOTBALL",
+    event: {
+      sport: "FOOTBALL",
+      name: "Arsenal vs Coventry City",
+      participants: [{ name: "Arsenal" }, { name: "Coventry City" }],
+      period: "FULL_GAME",
+      homeParticipantIndex: 0,
+      awayParticipantIndex: 1,
+    },
+    marketType: "SPREAD",
+    period: "FULL_GAME",
+    selectionType: "PARTICIPANT",
+    participant: { name: "Arsenal" },
+    line: "-1.5",
+    submittedOdds: "1.9",
+    ...overrides,
+  };
+}
+
+test("Handicap H1: quarter line -1.25 is non-confirmable — MARKET_NOT_SUPPORTED, and the spread verifier is never even called (capability gate fires first)", async () => {
+  const { fn: spreadFn, calls: spreadCalls } = capturingVerifySpreadOddsFn(baseLegacyResult({}));
+  const provider = new TheOddsApiProvider(undefined, undefined, spreadFn);
+
+  const result = await provider.verifySelection({ selection: spreadSelection({ line: "-1.25" }) });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED");
+  assert.equal(result.diagnosticCode, "ADAPTER_SPREAD_QUARTER_LINE_UNSUPPORTED_H1");
+  assert.equal(spreadCalls.length, 0, "H1's capability gate must reject a quarter line BEFORE any provider call — the market stays SPREAD, only verification is skipped");
+});
+
+test("Handicap H1: every quarter line in the required set (±0.25/±0.75/±1.25/±1.75) is rejected; every standard line in the required set (0/±0.5/±1/±1.5/±2) is routed to the spread verifier", async () => {
+  const quarterLines = ["-1.75", "-1.25", "-0.75", "-0.25", "0.25", "0.75", "1.25", "1.75"];
+  const standardLines = ["-2", "-1.5", "-1", "-0.5", "0", "0.5", "1", "1.5", "2"];
+
+  for (const line of quarterLines) {
+    const { fn: spreadFn, calls } = capturingVerifySpreadOddsFn(baseLegacyResult({}));
+    const provider = new TheOddsApiProvider(undefined, undefined, spreadFn);
+    const result = await provider.verifySelection({ selection: spreadSelection({ line }) });
+    assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED", `expected ${line} to be rejected as a quarter line`);
+    assert.equal(calls.length, 0, `expected ${line} to never reach the spread verifier`);
+  }
+
+  for (const line of standardLines) {
+    const { fn: spreadFn, calls } = capturingVerifySpreadOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9 }));
+    const provider = new TheOddsApiProvider(undefined, undefined, spreadFn);
+    const result = await provider.verifySelection({ selection: spreadSelection({ line }) });
+    assert.equal(result.status, "VERIFIED", `expected ${line} to be routed to and verified by the spread verifier`);
+    assert.equal(calls.length, 1, `expected ${line} to reach the spread verifier exactly once`);
+  }
+});
+
+test("Handicap H1: no MONEYLINE fallback when the spread verifier itself fails to find a price — FAILED, non-confirmable, h2h never attempted", async () => {
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.16 }));
+  const { fn: spreadFn, calls: spreadCalls } = capturingVerifySpreadOddsFn(
+    baseLegacyResult({ note: 'Could not match spread selection "Arsenal -1.5" for "Arsenal vs Coventry City" (LINE_NOT_AVAILABLE)' }),
+  );
+  const provider = new TheOddsApiProvider(h2hFn, undefined, spreadFn);
+
+  const result = await provider.verifySelection({ selection: spreadSelection() });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "SELECTION_NOT_FOUND");
+  assert.equal(result.diagnosticCode, "LEGACY_SPREAD_LINE_NOT_AVAILABLE");
+  assert.equal(h2hCalls.length, 0, "an unavailable spread price must NEVER fall back to h2h/moneyline verification, under any failure condition");
+  assert.equal(spreadCalls.length, 1);
+});
+
+test("Handicap H1: no MONEYLINE fallback when the spread provider itself is unavailable (network/HTTP failure) — FAILED, h2h never attempted", async () => {
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.16 }));
+  const { fn: spreadFn, calls: spreadCalls } = capturingVerifySpreadOddsFn(
+    baseLegacyResult({ note: "The Odds API request failed with status 500" }),
+  );
+  const provider = new TheOddsApiProvider(h2hFn, undefined, spreadFn);
+
+  const result = await provider.verifySelection({ selection: spreadSelection() });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "PROVIDER_UNAVAILABLE");
+  assert.equal(h2hCalls.length, 0);
+  assert.equal(spreadCalls.length, 1);
+});
+
+test("Handicap H1: wrong participant — SELECTION_NOT_FOUND, never falls back to a different market or team", async () => {
+  const { fn: spreadFn, calls } = capturingVerifySpreadOddsFn(
+    baseLegacyResult({ note: 'Could not match spread selection "Arsenal -1.5" for "Arsenal vs Coventry City" (PARTICIPANT_NOT_FOUND)' }),
+  );
+  const provider = new TheOddsApiProvider(undefined, undefined, spreadFn);
+
+  const result = await provider.verifySelection({ selection: spreadSelection() });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "SELECTION_NOT_FOUND");
+  assert.equal(result.diagnosticCode, "LEGACY_SPREAD_PARTICIPANT_NOT_FOUND");
+  assert.equal(calls.length, 1);
+});
+
+test("Handicap H1: spreads market absent on the bookmaker — SELECTION_NOT_FOUND", async () => {
+  const { fn: spreadFn } = capturingVerifySpreadOddsFn(
+    baseLegacyResult({ note: 'Could not match spread selection "Arsenal -1.5" for "Arsenal vs Coventry City" (MARKET_ABSENT)' }),
+  );
+  const provider = new TheOddsApiProvider(undefined, undefined, spreadFn);
+
+  const result = await provider.verifySelection({ selection: spreadSelection() });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.diagnosticCode, "LEGACY_SPREAD_MARKET_ABSENT");
+});
+
+test("Handicap H1: provider reference metadata for a VERIFIED spread — provider/providerEventId/bookmaker/market/line/participant all populated, mirroring MONEYLINE/TOTALS exactly", async () => {
+  const { fn: spreadFn, calls } = capturingVerifySpreadOddsFn({
+    matched: true,
+    withinTolerance: true,
+    sourceOdds: 1.85,
+    submittedOdds: 1.9,
+    discrepancyPercent: -2.63,
+    bookmaker: "Pinnacle",
+    note: null,
+    providerEventId: "evt-spread-meta",
+    providerSportKey: "soccer_epl",
+    eventStartTime: "2026-08-15T18:00:00.000Z",
+    homeTeamName: "Arsenal",
+    awayTeamName: "Coventry City",
+    competitionName: "Premier League",
+  });
+  const provider = new TheOddsApiProvider(undefined, undefined, spreadFn);
+
+  const result = await provider.verifySelection({ selection: spreadSelection() });
+
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(result.provider, "THE_ODDS_API");
+  assert.equal(result.matchedEvent?.reference.eventId, "evt-spread-meta");
+  assert.equal(result.matchedEvent?.reference.sportKey, "soccer_epl");
+  assert.equal(result.matchedEvent?.event.participants[0]?.name, "Arsenal");
+  assert.equal(result.matchedEvent?.event.participants[1]?.name, "Coventry City");
+  assert.equal(result.bookmaker, "Pinnacle");
+  assert.equal(result.matchedOutcome?.marketType, "SPREAD");
+  assert.equal(result.matchedOutcome?.line, "-1.5");
+  assert.equal(result.matchedOutcome?.participant?.name, "Arsenal");
+  assert.equal(result.matchedOutcome?.marketReference?.marketKey, "spreads");
+  assert.equal(result.matchedOutcome?.currentOdds, "1.85");
+  assert.equal(calls.length, 1);
+});
+
+test("Handicap H1: a standard-line SPREAD selection never reaches h2h even when h2h is wired to throw on any call — a stronger proof than a call-count assertion alone", async () => {
+  const { fn: spreadFn } = capturingVerifySpreadOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9 }));
+  const provider = new TheOddsApiProvider(throwingVerifyOddsFn(), undefined, spreadFn);
+
+  const result = await provider.verifySelection({ selection: spreadSelection() });
+
+  assert.equal(result.status, "VERIFIED", "if h2h had been called, throwingVerifyOddsFn would have thrown and this test would fail with an unhandled rejection instead of reaching this assertion");
+});
+
+test("Handicap H1: capabilities advertise SPREAD only now that real routing exists — never advertised without a working verifySpreadOddsFn path", () => {
+  const provider = new TheOddsApiProvider();
+  assert.ok(provider.getCapabilities().supportedMarketTypes.includes("SPREAD"));
 });
 
 test("adapter mapping: sport UNKNOWN never reaches the legacy verifier — FAILED/SPORT_NOT_SUPPORTED", async () => {
