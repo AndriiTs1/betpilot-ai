@@ -486,6 +486,61 @@ test("BA-2B Step 4: a numeric_mismatch parser rejection (lib/ai/betParser.ts's n
   assert.equal(providerCalls, 0, "a rejected numeric claim must never reach odds verification — no provider call, and therefore no previewToken, no Bet, no DB write is possible downstream");
 });
 
+test("BA-2D Step 5: a market_mismatch parser rejection (lib/ai/betParser.ts's new semantic market-intent safety check) returns the exact same generic 422 PARSE_FAILED body as any other parse failure — no new error shape, no client-visible CONTRADICTED/AMBIGUOUS/marketType detail, and NEVER reaches odds verification", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  let providerCalls = 0;
+  const response = await handleTextPreview(
+    // The exact production incident's text: SPREAD in the player's own
+    // words, with a simulated AI claim that lost the spread shape.
+    buildRequest(initData, { message: "Арсенал Ф1(-1.5) ставка 10" }),
+    baseOptions({
+      // Exactly the shape buildParsedBetSlipResult (lib/ai/betParser.ts)
+      // now produces when a market claim is CONTRADICTED/AMBIGUOUS — this
+      // route requires zero changes to handle it correctly, since "code"
+      // other than "timeout" already falls through to the same generic path.
+      parseBetSlip: fakeParseBetSlip({
+        valid: false,
+        error: "Market claim not corroborated by message text (marketType=MONEYLINE_2WAY, selectionType=PARTICIPANT, verdict=CONTRADICTED)",
+        code: "market_mismatch",
+      }),
+      verifyOddsFn: fakeVerifyOddsFn(() => (providerCalls += 1)),
+    }),
+  );
+
+  assert.equal(response.status, 422);
+  const body = await response.json();
+  assert.deepEqual(body, { error: "PARSE_FAILED", detail: "Unable to understand the bet message" });
+  const bodyText = JSON.stringify(body);
+  assert.equal(bodyText.includes("MONEYLINE"), false, "internal claim/verdict detail must never reach the client");
+  assert.equal(bodyText.includes("CONTRADICTED"), false, "internal claim/verdict detail must never reach the client");
+  assert.equal(bodyText.includes("SPREAD"), false, "internal claim/verdict detail must never reach the client");
+  assert.equal(
+    providerCalls,
+    0,
+    "a semantically contradicted market claim must never reach odds verification — no provider call, so a wrong market can never receive a real price, no previewToken, no Bet, no DB write is possible downstream",
+  );
+});
+
+test("BA-2D Step 5: a correctly-classified MONEYLINE parse still reaches odds verification exactly once — the new guard never blocks a genuinely valid claim", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  let providerCalls = 0;
+  const response = await handleTextPreview(
+    buildRequest(initData, { message: "Арсенал победа ставка 10" }),
+    baseOptions({
+      parseBetSlip: fakeParseBetSlip({
+        valid: true,
+        type: "SINGLE",
+        stake: 10,
+        selections: [{ sport: "Football", league: null, event: "Arsenal vs Chelsea", market: null, selection: "Arsenal", submittedOdds: null, line: null }],
+      }),
+      verifyOddsFn: fakeVerifyOddsFn(() => (providerCalls += 1)),
+    }),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(providerCalls, 1, "a genuine CORROBORATED/UNVERIFIED market claim must reach the h2h verifier exactly once, completely unaffected by BA-2D");
+});
+
 test("Step 15J.3 (F): a successful preview is completely unaffected by the new timeout branch", async () => {
   const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
   const response = await handleTextPreview(buildRequest(initData, { message: "Real Madrid win, stake 100, odds 1.90" }), baseOptions());

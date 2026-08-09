@@ -516,7 +516,17 @@ for (const field of NEW_FIELD_NAMES) {
 test("parseBetSlipMessage: extract_bet with all four new fields as explicit strings is accepted", async () => {
   currentHandler = async () => anthropicToolUseResponse("extract_bet", COMPLETE_SINGLE_TOOL_INPUT);
 
-  const result = await parseBetSlipMessage("Arsenal to win, full game, over 2.5, 50 at 1.95", "CHAT");
+  // Stage BA-2D, Step 5 — deliberately no "over 2.5" wording here (even
+  // though the mocked AI response's own `line` field is "2.5"): this
+  // originalText is otherwise unrelated to what the AI is mocked to
+  // return (this test's whole point is verifying the four OPTIONAL
+  // AI-schema fields thread through regardless of originalText), but
+  // "over 2.5" happens to ALSO be real, independent TOTALS evidence next
+  // to "to win"'s MONEYLINE evidence — two distinct strong market signals
+  // in one message is genuinely AMBIGUOUS per BA-2D's own deterministic
+  // reading of the text, and the new market-intent guard correctly
+  // rejects that, unrelated to this test's actual purpose.
+  const result = await parseBetSlipMessage("Arsenal to win, full game, 50 at 1.95", "CHAT");
 
   assert.equal(result.valid, true);
   if (!result.valid) return;
@@ -924,4 +934,323 @@ test("BA-2B Step 4 (18d): a valid OCR-mode parse (mirroring test 1's scenario) s
   const result = await parseBetSlipMessage("Арсенал ТБ 2.5, ставка 10", "OCR");
 
   assert.equal(result.valid, true);
+});
+
+/* ============================================================================
+ * Stage BA-2D, Step 5 — market-intent enforcement (semantic safety).
+ *
+ * Same discipline as BA-2B Step 4 above: CORROBORATED/UNVERIFIED continue,
+ * CONTRADICTED/AMBIGUOUS reject with code "market_mismatch", the AI's own
+ * claim is NEVER read again or corrected — only whether to proceed at all
+ * is decided. singleToolInput()'s defaults (event: "Arsenal", selection:
+ * "Win") already resolve to MONEYLINE_2WAY/PARTICIPANT, so they double as
+ * the "AI dropped the real market shape" fixture for every CONTRADICTED
+ * case below, exactly mirroring how BA-2B Step 4's own fixtures reused the
+ * same default shape for its bad-claim cases.
+ * ============================================================================ */
+
+/* -------------------------------------------------------------------------- */
+/* 1-2. CRITICAL: 'Арсенал Ф1(-1.5) ставка 10'                               */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 5 (1): CRITICAL — AI drops the spread shape (default 'Win'/'Arsenal') against 'Арсенал Ф1(-1.5) ставка 10' -> rejected, market_mismatch, never reaches odds verification", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал Ф1(-1.5) ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+  assert.deepEqual(Object.keys(result).sort(), ["code", "error", "valid"], "no corrected market/selection value exists anywhere in the rejected shape");
+});
+
+test("BA-2D Step 5 (2): correct SPREAD AI output ('Ф1(-1.5)') against the same original text -> CORROBORATED, parsing continues", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ selection: "Ф1(-1.5)", stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал Ф1(-1.5) ставка 10", "CHAT");
+
+  assert.equal(result.valid, true);
+  // BA-2D never adds SPREAD provider support and never duplicates the
+  // capability gate — whether TheOddsApiProvider later rejects this as
+  // MARKET_NOT_SUPPORTED is a completely separate, already-existing layer
+  // this parser-level result says nothing about.
+});
+
+/* -------------------------------------------------------------------------- */
+/* 3. Latin production shape                                                  */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 5 (3): Latin shape — 'Arsenal F1(-1.5) stake 10', AI claims MONEYLINE -> rejected, market_mismatch", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal", stake: 10 }));
+
+  const result = await parseBetSlipMessage("Arsenal F1(-1.5) stake 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+test("BA-2D Step 5 (3b): Latin shape — correct AI output ('F1(-1.5)') -> CORROBORATED, parsing continues", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ selection: "F1(-1.5)", stake: 10 }));
+
+  const result = await parseBetSlipMessage("Arsenal F1(-1.5) stake 10", "CHAT");
+
+  assert.equal(result.valid, true);
+});
+
+/* -------------------------------------------------------------------------- */
+/* 4-7. TOTALS                                                                */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 5 (4): AI drops the totals shape (default 'Win'/'Arsenal') against 'Арсенал ТБ 2.5 ставка 10' -> rejected, market_mismatch", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2.5 ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+test("BA-2D Step 5 (5): correct TOTALS OVER AI output -> CORROBORATED, parsing continues", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ market: "Totals", selection: "Over", line: "2.5", stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2.5 ставка 10", "CHAT");
+
+  assert.equal(result.valid, true);
+});
+
+test("BA-2D Step 5 (6): direction conflict — original says UNDER ('ТМ 3'), AI claims OVER -> rejected, market_mismatch (never silently flipped)", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ market: "Totals", selection: "Over", line: "3", stake: 20 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТМ 3 ставка 20", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+test("BA-2D Step 5 (7): correct UNDER AI output against 'ТМ 3' -> CORROBORATED, parsing continues", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ market: "Totals", selection: "Under", line: "3", stake: 20 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТМ 3 ставка 20", "CHAT");
+
+  assert.equal(result.valid, true);
+});
+
+/* -------------------------------------------------------------------------- */
+/* 8-12. DRAW / 1X2 — RU / UA / EN, and correct winner phrasing              */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 5 (8): RU — AI claims a participant winner (default 'Win'/'Arsenal') against 'ничья ставка 10' -> rejected, market_mismatch", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ stake: 10 }));
+
+  const result = await parseBetSlipMessage("ничья ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+test("BA-2D Step 5 (9): UA — AI claims a participant winner against 'нічия ставка 10' -> rejected, market_mismatch", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ stake: 10 }));
+
+  const result = await parseBetSlipMessage("нічия ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+test("BA-2D Step 5 (10): EN — AI claims a participant winner against 'draw stake 10' -> rejected, market_mismatch", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ stake: 10 }));
+
+  const result = await parseBetSlipMessage("draw stake 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+test("BA-2D Step 5 (11): correct DRAW claims pass for RU/UA/EN", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ selection: "ничья", stake: 10 }));
+  assert.equal((await parseBetSlipMessage("ничья ставка 10", "CHAT")).valid, true);
+
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ selection: "нічия", stake: 10 }));
+  assert.equal((await parseBetSlipMessage("нічия ставка 10", "CHAT")).valid, true);
+
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ selection: "draw", stake: 10 }));
+  assert.equal((await parseBetSlipMessage("draw stake 10", "CHAT")).valid, true);
+});
+
+test("BA-2D Step 5 (12): correct winner phrasing (RU 'победа' / EN 'win') passes", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal", selection: "Win", stake: 10 }));
+  assert.equal((await parseBetSlipMessage("Арсенал победа ставка 10", "CHAT")).valid, true);
+  assert.equal((await parseBetSlipMessage("Arsenal win stake 10", "CHAT")).valid, true);
+});
+
+/* -------------------------------------------------------------------------- */
+/* 13. UNVERIFIED convenience                                                 */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 5 (13): natural inputs with no strong deterministic market evidence are never blocked — UNVERIFIED always continues", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ stake: 10 }));
+  assert.equal((await parseBetSlipMessage("Арсенал 10", "CHAT")).valid, true);
+  assert.equal((await parseBetSlipMessage("ставка 10 на Арсенал", "CHAT")).valid, true);
+});
+
+/* -------------------------------------------------------------------------- */
+/* 14. AMBIGUOUS source                                                       */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 5 (14): 'Арсенал ТБ 2.5 ТМ 3.5 ставка 10' carries two distinct strong signals -> rejected, never guesses one (code is numeric_mismatch here, since BA-2B's own LINE-role ambiguity check for 2.5 vs 3.5 fires first by enforcement order — see test 14b for a market-only isolation of the same AMBIGUOUS policy)", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ market: "Totals", selection: "Over", line: "2.5", stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2.5 ТМ 3.5 ставка 10", "CHAT");
+
+  assert.equal(result.valid, false, "either guard alone is sufficient — this input is genuinely ambiguous for BOTH LINE value and market direction, and must never be silently resolved to one");
+});
+
+test("BA-2D Step 5 (14b): 'ничья Арсенал победа ставка 10' carries two distinct strong market signals with NO competing numeric ambiguity -> rejected, market_mismatch specifically", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal", selection: "Win", stake: 10 }));
+
+  const result = await parseBetSlipMessage("ничья Арсенал победа ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch", "STAKE=10 corroborates cleanly (numeric guard passes), isolating this rejection to the market guard's own AMBIGUOUS policy (DRAW vs MONEYLINE, never guessed)");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 15-16. Independence from BA-2B — either guard alone is sufficient to fail  */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 5 (15): numeric CORROBORATED (stake=10 matches) but market CONTRADICTED (dropped spread shape) -> still rejected, code is market_mismatch specifically", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал Ф1(-1.5) ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch", "numeric passed, so the rejection must be attributed to the market guard, not the numeric one");
+});
+
+test("BA-2D Step 5 (16): market CORROBORATED (correct SPREAD) but numeric CONTRADICTED (wrong stake) -> still rejected, code is numeric_mismatch specifically", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ selection: "Ф1(-1.5)", stake: 999 }));
+
+  const result = await parseBetSlipMessage("Арсенал Ф1(-1.5) ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "numeric_mismatch", "market corroborated, so the rejection must be attributed to the numeric guard, not the market one — neither guard substitutes for the other");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 17-18. CHAT / OCR parity                                                   */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 5 (17): CHAT mode enforcement (explicit, all tests above already use CHAT)", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал Ф1(-1.5) ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+test("BA-2D Step 5 (18): OCR mode enforces the exact same market safety check as CHAT — same rejection for the same contradicted claim, no screenshot-specific logic", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал Ф1(-1.5) ставка 10", "OCR");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 19. EXPRESS unaffected                                                     */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 5 (19): EXPRESS market-intent enforcement stays OFF — a leg whose text would obviously contradict its own event still passes, while BA-2B's own EXPRESS global-stake enforcement remains fully active", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_express_bet", {
+      stake: 20,
+      selections: [
+        // Deliberately a MONEYLINE-shaped claim against a message whose
+        // text contains a real SPREAD signal for the same leg — BA-2D
+        // Step 4's own observation computation already returns zero
+        // observations for EXPRESS (no leg attribution), so this must
+        // never be rejected as market_mismatch, unlike the SINGLE case.
+        { sport: "Football", league: null, event: "Arsenal", market: null, selection: "Win", period: null, line: null, odds: null },
+        { sport: "Football", league: null, event: "Real Madrid", market: null, selection: "Win", period: null, line: null, odds: null },
+      ],
+    });
+
+  const result = await parseBetSlipMessage("Арсенал Ф1(-1.5) + Реал победа, экспресс 20", "CHAT");
+
+  assert.equal(result.valid, true, "EXPRESS market-intent enforcement is deliberately out of scope for BA-2D Step 5 — no leg attribution exists yet");
+});
+
+test("BA-2D Step 5 (19b): EXPRESS global stake CONTRADICTED still rejects — BA-2B's own EXPRESS enforcement is completely unaffected by BA-2D", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_express_bet", {
+      stake: 10, // contradicts "экспресс 20"
+      selections: [
+        { sport: "Football", league: null, event: "Arsenal", market: null, selection: "Win", period: null, line: null, odds: null },
+        { sport: "Football", league: null, event: "Real Madrid", market: null, selection: "Win", period: null, line: null, odds: null },
+      ],
+    });
+
+  const result = await parseBetSlipMessage("Арсенал победа + Реал победа, экспресс 20", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "numeric_mismatch");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 20. No auto-correction                                                     */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 5 (20): no market auto-correction — a rejected result never contains a 'corrected' market/selection anywhere in its shape", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2.5 ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  assert.deepEqual(Object.keys(result).sort(), ["code", "error", "valid"]);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Full existing regression list — every case from the audit's own matrix    */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 5: full existing-valid-flow regression list stays green", async () => {
+  const cases: Array<{ text: string; input: ReturnType<typeof singleToolInput> }> = [
+    { text: "Победа Арсенала, ставка 10", input: singleToolInput({ event: "Arsenal", selection: "Win", stake: 10 }) },
+    { text: "Арсенал победа ставка 25", input: singleToolInput({ event: "Arsenal", selection: "Win", stake: 25 }) },
+    { text: "Арсенал ТБ 2.5 ставка 10", input: singleToolInput({ market: "Totals", selection: "Over", line: "2.5", stake: 10 }) },
+    { text: "Арсенал ТМ 3 ставка 20", input: singleToolInput({ market: "Totals", selection: "Under", line: "3", stake: 20 }) },
+    { text: "Арсенал X 10", input: singleToolInput({ selection: "X", stake: 10 }) },
+    { text: "ничья", input: singleToolInput({ selection: "ничья", stake: 10 }) },
+    { text: "нічия", input: singleToolInput({ selection: "нічия", stake: 10 }) },
+    { text: "Real Madrid to win, stake 10", input: singleToolInput({ event: "Real Madrid", selection: "Real Madrid to win", stake: 10 }) },
+    { text: "Arsenal over 2.5, stake 10", input: singleToolInput({ market: "Totals", selection: "Over", line: "2.5", stake: 10 }) },
+    { text: "Arsenal under 3, stake 20", input: singleToolInput({ market: "Totals", selection: "Under", line: "3", stake: 20 }) },
+    { text: "draw, stake 10", input: singleToolInput({ selection: "draw", stake: 10 }) },
+    // BA-2C punctuation forms.
+    { text: "Арсенал ТБ:2.5 ставка 10", input: singleToolInput({ market: "Totals", selection: "Over", line: "2.5", stake: 10 }) },
+    { text: "Арсенал ТБ(2.5) ставка 10", input: singleToolInput({ market: "Totals", selection: "Over", line: "2.5", stake: 10 }) },
+    { text: "Арсенал F1(-1.5) ставка 10", input: singleToolInput({ selection: "F1(-1.5)", stake: 10 }) },
+    // Decimal-dot forms (never comma — known follow-up, not fixed here).
+    { text: "Арсенал ТБ 2.5 ставка 10.5", input: singleToolInput({ market: "Totals", selection: "Over", line: "2.5", stake: 10.5 }) },
+  ];
+
+  for (const { text, input } of cases) {
+    currentHandler = async () => anthropicToolUseResponse("extract_bet", input);
+    const result = await parseBetSlipMessage(text, "CHAT");
+    assert.equal(result.valid, true, `expected "${text}" to still pass`);
+  }
 });

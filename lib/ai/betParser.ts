@@ -6,7 +6,7 @@ import { z } from "zod";
 // reverse.
 import { normalizeParsedBet, type ParsedBetSlip } from "@/lib/bets/betSlip";
 import { chatPrompt, ocrPrompt } from "./betParserPrompt";
-import { mapRawBetSlipToParsedBetSlip, type RawBetSelectionFields, type NumericRoleObservation } from "./betDraftMapper";
+import { mapRawBetSlipToParsedBetSlip, type RawBetSelectionFields, type NumericRoleObservation, type MarketIntentObservation } from "./betDraftMapper";
 
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "llama3.2";
@@ -373,13 +373,14 @@ const parlayBetFieldsSchema = z.object({
 export type ParseBetSlipResult =
   | ({ valid: true } & ParsedBetSlip)
   // Stage BA-2B, Step 4 — "numeric_mismatch" added alongside the existing
-  // "timeout" code. Purely additive: every existing caller only ever
-  // checks `code === "timeout"` (app/api/miniapp/bets/text/preview/route.ts,
+  // "timeout" code. Stage BA-2D, Step 5 — "market_mismatch" added the same
+  // way. Purely additive: every existing caller only ever checks
+  // `code === "timeout"` (app/api/miniapp/bets/text/preview/route.ts,
   // app/api/miniapp/bets/screenshot/preview/route.ts) and folds every other
   // value, old or new, into the exact same generic PARSE_FAILED/
   // IMAGE_NOT_RECOGNIZED response — so this change requires, and receives,
   // zero route changes.
-  | { valid: false; error: string; code?: "timeout" | "numeric_mismatch" };
+  | { valid: false; error: string; code?: "timeout" | "numeric_mismatch" | "market_mismatch" };
 
 // Stage 14.3 — one parser, two prompts (lib/ai/betParserPrompt.ts), never
 // two parsers. CHAT is a player's own free-form message (unchanged
@@ -490,6 +491,32 @@ function isUnreliableNumericClaim(observation: NumericRoleObservation): boolean 
   return observation.verification.verdict === "CONTRADICTED" || observation.verification.verdict === "AMBIGUOUS";
 }
 
+// Stage BA-2D, Step 5 — the market/selection sibling of
+// isUnreliableNumericClaim immediately above, same CORROBORATED/UNVERIFIED-
+// continue, CONTRADICTED/AMBIGUOUS-reject policy, same reasoning: UNVERIFIED
+// means "no strong market-shape evidence either way" (a short natural
+// message like "Арсенал 10" or "ставка 10 на Арсенал"), never "wrong" — this
+// is what keeps player convenience intact, exactly like BA-2B's own
+// UNVERIFIED handling. CONTRADICTED/AMBIGUOUS both fail closed: real text
+// evidence disagrees with (or cannot be reconciled for) the AI's own
+// derived market/selection claim, so the parse is rejected — the claim
+// itself (and the ParsedBetSlip it would have produced) is NEVER read
+// again or altered anywhere in this function; only whether to proceed at
+// all is decided. This is a completely independent guard from
+// isUnreliableNumericClaim — deliberately not merged into one verifier or
+// one check, so a CORROBORATED market claim can never mask a CONTRADICTED
+// numeric one, or vice versa (see this function's own two separate
+// `.find()` calls below).
+//
+// SINGLE only, same as BA-2D Step 4's own observation computation
+// (computeMarketIntentObservations in betDraftMapper.ts already returns no
+// observations at all for EXPRESS — no leg attribution exists yet — so
+// this check is naturally a no-op for EXPRESS without any bet-type
+// branching needed here).
+function isUnreliableMarketClaim(observation: MarketIntentObservation): boolean {
+  return observation.verification.verdict === "CONTRADICTED" || observation.verification.verdict === "AMBIGUOUS";
+}
+
 // Wraps mapRawBetSlipToParsedBetSlip() so a programmer-error throw (the
 // mapper/adapter only ever throws for a non-finite stake/odds or a sport
 // with no raw text at all — both impossible given betFieldsSchema/
@@ -505,6 +532,7 @@ function buildParsedBetSlipResult(
 ): ParseBetSlipResult {
   try {
     let numericRoleObservations: readonly NumericRoleObservation[] = [];
+    let marketIntentObservations: readonly MarketIntentObservation[] = [];
 
     const parsedSlip = mapRawBetSlipToParsedBetSlip(raw, {
       originalText: text,
@@ -512,8 +540,18 @@ function buildParsedBetSlipResult(
       onNumericRoleObservation: (observations) => {
         numericRoleObservations = observations;
       },
+      onMarketIntentObservation: (observations) => {
+        marketIntentObservations = observations;
+      },
     });
 
+    // Order: numeric safety (BA-2B) is checked before market-intent safety
+    // (BA-2D) — an arbitrary but deterministic choice (both are independent
+    // fail-closed gates; either one alone is sufficient to reject, and
+    // whichever is checked "second" would never even run once the first
+    // already rejected, so the ORDER itself has no effect on final
+    // behavior, only on which `code`/`error` a doubly-invalid message
+    // happens to surface — a detail no caller currently branches on).
     const unreliableClaim = numericRoleObservations.find(isUnreliableNumericClaim);
     if (unreliableClaim) {
       // Internal diagnostic only — never sent to the client. Both preview
@@ -525,6 +563,19 @@ function buildParsedBetSlipResult(
         valid: false,
         error: `Numeric claim not corroborated by message text (role=${unreliableClaim.role}, verdict=${unreliableClaim.verification.verdict})`,
         code: "numeric_mismatch",
+      };
+    }
+
+    const unreliableMarketClaim = marketIntentObservations.find(isUnreliableMarketClaim);
+    if (unreliableMarketClaim) {
+      // Same internal-diagnostic-only discipline as numeric_mismatch above
+      // — never sent to the client, never exposes CONTRADICTED/AMBIGUOUS/
+      // MarketIntentVerdict or the claimed marketType/selectionType to the
+      // player, folded into the same generic PARSE_FAILED response.
+      return {
+        valid: false,
+        error: `Market claim not corroborated by message text (marketType=${unreliableMarketClaim.claim.marketType}, selectionType=${unreliableMarketClaim.claim.selectionType}, verdict=${unreliableMarketClaim.verification.verdict})`,
+        code: "market_mismatch",
       };
     }
 
