@@ -862,6 +862,82 @@ test("Handicap H1: every quarter line in the required set (±0.25/±0.75/±1.25/
   }
 });
 
+/* ============================================================================
+ * Handicap Stage H3 — natural-language RU/UA/EN handicap vocabulary.
+ * Critical full-path proof (Section 13): H3 only widens which WORDS a
+ * player can use to say "SPREAD" — it must have ZERO effect on H1's own
+ * capability gate. A standard-line natural-language selection reaches real
+ * spread verification exactly like Ф1/Ф2 already does; a quarter-line
+ * natural-language selection is classified as SPREAD (H3 works) but is
+ * STILL rejected as MARKET_NOT_SUPPORTED before any provider call (H1's
+ * gate, completely untouched by this stage).
+ * ============================================================================ */
+
+test("Handicap H3 full-path: 'Arsenal handicap -1.5' (natural-language, standard line) classifies as SPREAD and reaches real spread verification, exactly like 'Arsenal F1(-1.5)' already does", async () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal — Coventry City",
+    selection: "Arsenal handicap -1.5",
+    submittedOdds: 1.9,
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Arsenal");
+  assert.equal(request.selection.line, "-1.5");
+
+  const { fn: spreadFn, calls } = capturingVerifySpreadOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9 }));
+  const provider = new TheOddsApiProvider(undefined, undefined, spreadFn);
+  const result = await provider.verifySelection({ selection: request.selection });
+
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(calls.length, 1, "a standard-line natural-language SPREAD selection must reach the real spread verifier exactly once");
+});
+
+test("Handicap H3 full-path: 'Arsenal Asian handicap -1.25' (natural-language, quarter line) classifies as SPREAD but is rejected as MARKET_NOT_SUPPORTED by H1's UNCHANGED capability gate — the spread verifier is never called, and it never becomes confirmable", async () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal — Coventry City",
+    selection: "Arsenal Asian handicap -1.25",
+    submittedOdds: 1.9,
+  });
+  // H3 proof: correctly classified as SPREAD, quarter line preserved
+  // exactly, never rounded or dropped.
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Arsenal");
+  assert.equal(request.selection.line, "-1.25");
+
+  // H1 proof (unchanged): the exact same gate that already blocks
+  // "Арсенал Ф1(-1.25)" blocks this natural-language form too.
+  const { fn: spreadFn, calls } = capturingVerifySpreadOddsFn(baseLegacyResult({}));
+  const provider = new TheOddsApiProvider(undefined, undefined, spreadFn);
+  const result = await provider.verifySelection({ selection: request.selection });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED");
+  assert.equal(result.diagnosticCode, "ADAPTER_SPREAD_QUARTER_LINE_UNSUPPORTED_H1");
+  assert.equal(calls.length, 0, "H3 vocabulary recognition must never bypass H1's quarter-line capability gate");
+});
+
+test("Handicap H3 full-path: RU 'Арсенал азиатская фора -1.25' and UA 'Арсенал азійська фора -1.25' both hit the identical H1 quarter-line gate as the EN form — language never affects capability", async () => {
+  for (const selection of ["Арсенал азиатская фора -1.25", "Арсенал азійська фора -1.25"]) {
+    const request = legacySelectionToCanonicalRequest({
+      sport: "Football",
+      event: "Arsenal — Coventry City",
+      selection,
+      submittedOdds: 1.9,
+    });
+    assert.equal(request.selection.marketType, "SPREAD", selection);
+    assert.equal(request.selection.line, "-1.25", selection);
+
+    const { fn: spreadFn, calls } = capturingVerifySpreadOddsFn(baseLegacyResult({}));
+    const provider = new TheOddsApiProvider(undefined, undefined, spreadFn);
+    const result = await provider.verifySelection({ selection: request.selection });
+
+    assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED", selection);
+    assert.equal(result.diagnosticCode, "ADAPTER_SPREAD_QUARTER_LINE_UNSUPPORTED_H1", selection);
+    assert.equal(calls.length, 0, selection);
+  }
+});
+
 test("Handicap H1: no MONEYLINE fallback when the spread verifier itself fails to find a price — FAILED, non-confirmable, h2h never attempted", async () => {
   const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.16 }));
   const { fn: spreadFn, calls: spreadCalls } = capturingVerifySpreadOddsFn(

@@ -705,6 +705,80 @@ test("request mapping: 'Арсенал Ф1(-1.5)' classifies as SPREAD with part
   assert.equal(request.selection.line, "-1.5");
 });
 
+/* -------------------------------------------------------------------------- */
+/* Handicap Stage H3 — natural-language RU/UA/EN handicap vocabulary, new.   */
+/* This is the REAL, unwindowed production classification path              */
+/* (legacySelectionToCanonicalRequest -> classifyBettingSelectionText on the */
+/* full selection string) — unlike marketIntentEvidence.ts's own 3-token-    */
+/* bounded evidence windowing, this path always sees the ENTIRE selection    */
+/* text at once, so a multi-word participant combined with a multi-word     */
+/* marker (e.g. "Арсенал азійська фора -1.25") is captured correctly here    */
+/* even in the cases marketIntentEvidence.test.ts's own H3 tests disclose    */
+/* as a windowing limitation for THAT file specifically.                     */
+/* -------------------------------------------------------------------------- */
+
+test("H3 request mapping: 'Арсенал фора -1.5' classifies as SPREAD with participant + line — never MONEYLINE", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "Арсенал vs Челси", selection: "Арсенал фора -1.5", submittedOdds: 1.9 });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Арсенал");
+  assert.equal(request.selection.line, "-1.5");
+});
+
+test("H3 request mapping: 'Арсенал азійська фора -1.25' (4-word UA compound marker) — participant correctly captured, unlike the 3-token-windowed evidence extractor", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Челси",
+    selection: "Арсенал азійська фора -1.25",
+    submittedOdds: 1.9,
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Арсенал");
+  assert.equal(request.selection.line, "-1.25");
+});
+
+test("H3 request mapping: 'Real Madrid handicap -2' (multi-word EN participant) classifies as SPREAD with the full participant name — never MONEYLINE", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Real Madrid vs Barcelona",
+    selection: "Real Madrid handicap -2",
+    submittedOdds: 1.9,
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Real Madrid");
+  assert.equal(request.selection.line, "-2");
+});
+
+test("H3 request mapping: prefix form 'handicap Arsenal -1.5' classifies as SPREAD with participant Arsenal", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "Arsenal vs Chelsea", selection: "handicap Arsenal -1.5", submittedOdds: 1.9 });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Arsenal");
+  assert.equal(request.selection.line, "-1.5");
+});
+
+test("H3 request mapping: a shorthand handicap word concatenated with a team name (no separate event/selection split) still classifies correctly via the event's own split participants, mirroring the existing Ф1/ТБ production-regression precedent", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Челси",
+    selection: "Арсенал фора -1.5",
+    submittedOdds: 1.9,
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Арсенал");
+  assert.equal(request.selection.line, "-1.5");
+});
+
+test("H3 request mapping: existing markets (MONEYLINE/TOTALS) and existing Ф1 short form are unaffected by the new handicap vocabulary", () => {
+  const win = legacySelectionToCanonicalRequest({ sport: "Football", event: "Арсенал vs Челси", selection: "Арсенал победа", submittedOdds: 1.9 });
+  assert.equal(win.selection.marketType, "MONEYLINE_2WAY");
+
+  const totals = legacySelectionToCanonicalRequest({ sport: "Football", event: "Арсенал vs Челси", selection: "Арсенал ТБ 2.5", submittedOdds: 1.9 });
+  assert.equal(totals.selection.marketType, "TOTALS");
+
+  const shortForm = legacySelectionToCanonicalRequest({ sport: "Football", event: "Арсенал vs Челси", selection: "Арсенал Ф1(-1.5)", submittedOdds: 1.9 });
+  assert.equal(shortForm.selection.marketType, "SPREAD");
+  assert.equal(shortForm.selection.participant?.name, "Арсенал");
+});
+
 test("request mapping: a shorthand token concatenated with a team name (no separate event/selection split) still classifies correctly via the event's own split participants — the exact production regression case", () => {
   // The event string is split into participants by legacyEventToCanonical
   // BEFORE classification, so "Арсенал" is already a knownParticipantName

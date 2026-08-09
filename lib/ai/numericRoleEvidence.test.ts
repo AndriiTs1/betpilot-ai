@@ -396,3 +396,115 @@ test("comma decimal never rewrites originalText", () => {
   extractNumericRoleEvidence(text);
   assert.equal(text, before);
 });
+
+/* -------------------------------------------------------------------------- */
+/* Handicap Stage H3 — natural-language RU/UA/EN handicap vocabulary, new.   */
+/* No changes to this file's own algorithm — these tests confirm the        */
+/* existing, unmodified LINE-reuse pass already correctly separates LINE    */
+/* from STAKE for the new shorthandClassifier.ts vocabulary, exactly as it  */
+/* already did for ТБ/ТМ/Ф1/Ф2. This file was audited (not modified) per    */
+/* this stage's own instruction — every case below passes unmodified.       */
+/* -------------------------------------------------------------------------- */
+
+test("H3: 'Арсенал фора -1.5 ставка 10' -> LINE -1.5, STAKE 10, no role mix-up", () => {
+  const text = "Арсенал фора -1.5 ставка 10";
+  const evidence = extractNumericRoleEvidence(text);
+  const lines = findByRole(evidence, "LINE");
+  const stakes = findByRole(evidence, "STAKE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].value, "-1.5");
+  assert.equal(lines[0].confidence, "MARKER_HIGH");
+  assert.equal(stakes.length, 1);
+  assert.equal(stakes[0].value, "10");
+  assert.equal(stakes[0].confidence, "MARKER_HIGH");
+});
+
+test("H3: 'Arsenal handicap -1.5 stake 10' -> LINE -1.5, STAKE 10, no role mix-up", () => {
+  const text = "Arsenal handicap -1.5 stake 10";
+  const evidence = extractNumericRoleEvidence(text);
+  const lines = findByRole(evidence, "LINE");
+  const stakes = findByRole(evidence, "STAKE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].value, "-1.5");
+  assert.equal(stakes.length, 1);
+  assert.equal(stakes[0].value, "10");
+});
+
+test("H3: 'Арсенал азійська фора -1.25 ставка 10' -> LINE -1.25, STAKE 10, no role mix-up (the quarter-line digit is correctly identified as a LINE, not left floating for SOLE_CANDIDATE to mistake)", () => {
+  const text = "Арсенал азійська фора -1.25 ставка 10";
+  const evidence = extractNumericRoleEvidence(text);
+  const lines = findByRole(evidence, "LINE");
+  const stakes = findByRole(evidence, "STAKE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].value, "-1.25");
+  assert.equal(stakes.length, 1);
+  assert.equal(stakes[0].value, "10");
+});
+
+test("H3: 'Арсенал с формой -1.5 ставка 10' style RU compound marker ('с форой') still isolates LINE from STAKE correctly", () => {
+  const text = "Арсенал с форой -1.5 ставка 10";
+  const evidence = extractNumericRoleEvidence(text);
+  const lines = findByRole(evidence, "LINE");
+  const stakes = findByRole(evidence, "STAKE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].value, "-1.5");
+  assert.equal(stakes.length, 1);
+  assert.equal(stakes[0].value, "10");
+});
+
+test("H3: UA 'Арсенал з форою -1.5 ставка 10' still isolates LINE from STAKE correctly", () => {
+  const text = "Арсенал з форою -1.5 ставка 10";
+  const evidence = extractNumericRoleEvidence(text);
+  const lines = findByRole(evidence, "LINE");
+  const stakes = findByRole(evidence, "STAKE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].value, "-1.5");
+  assert.equal(stakes.length, 1);
+  assert.equal(stakes[0].value, "10");
+});
+
+test("H3 conflicting lines: 'Арсенал фора -1.5 фора -2 ставка 10' preserves two distinct LINE occurrences, never collapsed by value, same as the existing repeated-Totals-line precedent", () => {
+  const text = "Арсенал фора -1.5 фора -2 ставка 10";
+  const evidence = extractNumericRoleEvidence(text);
+  const lines = findByRole(evidence, "LINE");
+  assert.equal(lines.length, 2);
+  assert.deepEqual(
+    lines.map((l) => l.value),
+    ["-1.5", "-2"],
+  );
+  const stakes = findByRole(evidence, "STAKE");
+  assert.equal(stakes.length, 1);
+  assert.equal(stakes[0].value, "10");
+});
+
+test("H3: equal STAKE and LINE values are never rejected or swapped for the new vocabulary either ('Арсенал фора -10 ставка 10')", () => {
+  const text = "Арсенал фора -10 ставка 10";
+  const evidence = extractNumericRoleEvidence(text);
+  const lines = findByRole(evidence, "LINE");
+  const stakes = findByRole(evidence, "STAKE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].value, "-10");
+  assert.equal(stakes.length, 1);
+  assert.equal(stakes[0].value, "10");
+});
+
+test("H3: comma-decimal line still degrades the same documented way for the new vocabulary as it already does for Ф1/ТБ ('Арсенал фора -1,5 ставка 10')", () => {
+  // Consistent with this file's own pre-existing "decimal comma finding"
+  // tests above (not a new gap introduced by H3): shorthandClassifier.ts's
+  // LINE_NUMBER/SIGNED_LINE_NUMBER grammar is dot-only, unchanged by this
+  // stage. A comma-decimal line is not claimed as LINE evidence here; it
+  // remains available as a potential SOLE_CANDIDATE if nothing else claims
+  // it, exactly as already true for "Арсенал Ф1(-1,5)".
+  const text = "Арсенал фора -1,5 ставка 10";
+  const evidence = extractNumericRoleEvidence(text);
+  const stakes = findByRole(evidence, "STAKE");
+  assert.equal(stakes.length, 1);
+  assert.equal(stakes[0].value, "10");
+});
+
+test("H3: does not mutate originalText", () => {
+  const text = "Арсенал фора -1.5 ставка 10";
+  const before = text.slice();
+  extractNumericRoleEvidence(text);
+  assert.equal(text, before);
+});

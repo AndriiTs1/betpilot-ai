@@ -320,3 +320,123 @@ test("originalText is never touched: evidence spans slice back to the exact orig
     }
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/* Handicap Stage H3 — natural-language RU/UA/EN handicap vocabulary, new.   */
+/* No changes to this file's own algorithm — these tests confirm the        */
+/* existing, unmodified windowing already produces strong SPREAD evidence   */
+/* for the new shorthandClassifier.ts vocabulary, exactly as it already did */
+/* for Ф1/Ф2.                                                                */
+/* -------------------------------------------------------------------------- */
+
+test("H3 required example 1: 'Арсенал фора -1.5 ставка 10' -> strong SPREAD evidence, participant Arsenal, line -1.5", () => {
+  const text = "Арсенал фора -1.5 ставка 10";
+  const evidence = extractMarketIntentEvidence(text);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].classification.marketType, "SPREAD");
+  assert.equal(evidence[0].classification.selectionType, "PARTICIPANT");
+  assert.equal(evidence[0].classification.participantName, "Арсенал");
+  assert.equal(evidence[0].classification.embeddedLine, "-1.5");
+  assert.equal(spanText(text, evidence[0]), "Арсенал фора -1.5");
+});
+
+test("H3 required example 2: 'Arsenal handicap -1.5 stake 10' -> strong SPREAD evidence, participant Arsenal, line -1.5", () => {
+  const text = "Arsenal handicap -1.5 stake 10";
+  const evidence = extractMarketIntentEvidence(text);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].classification.marketType, "SPREAD");
+  assert.equal(evidence[0].classification.participantName, "Arsenal");
+  assert.equal(evidence[0].classification.embeddedLine, "-1.5");
+  assert.equal(spanText(text, evidence[0]), "Arsenal handicap -1.5");
+});
+
+// KNOWN, DISCLOSED LIMITATION (not fixed here, per this stage's explicit
+// "do not modify marketIntentEvidence.ts / do not expand scope automatically"
+// instruction): this file's own window is bounded at MAX_WINDOW_TOKENS (3),
+// anchored backward from the number. "Арсенал азійська фора -1.25" is 4
+// tokens (Арсенал/азійська/фора/-1.25) — one more than the window can ever
+// span in a single pass. The classifier's own bare-marker form (see
+// shorthandClassifier.ts's HANDICAP_BARE_PATTERN, tried first specifically
+// so it never misattributes "азійська" as a fake participant — see that
+// file's own tests) still lets Pass 1 recognize the 3-token tail window
+// ("азійська фора -1.25") as SPREAD evidence — market intent IS still
+// correctly and strongly detected — but participantName is null here
+// (deferred, not fabricated), NOT "Арсенал", because "Арсенал" itself falls
+// outside the 3-token window and consumed span. This does not weaken BA-2D:
+// marketIntentVerifier.ts's own claim shape is (marketType, selectionType)
+// ONLY — participantName is explicitly never part of what it compares (see
+// that file's own header comment) — so this limitation has zero effect on
+// the actual ambiguity/ verification layer. The REAL canonical
+// classification path (legacyOddsBridge.ts, unwindowed — see that file's
+// own H3 tests) correctly captures participantName "Арсенал" for this exact
+// text, since it is never subject to this 3-token window at all.
+test("H3 required example 3: 'Арсенал азійська фора -1.25 ставка 10' -> strong SPREAD evidence (participant lost to the pre-existing 3-token window bound — disclosed, not fixed; see comment above)", () => {
+  const text = "Арсенал азійська фора -1.25 ставка 10";
+  const evidence = extractMarketIntentEvidence(text);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].classification.marketType, "SPREAD");
+  assert.equal(evidence[0].classification.selectionType, "PARTICIPANT");
+  assert.equal(evidence[0].classification.embeddedLine, "-1.25");
+  assert.equal(spanText(text, evidence[0]), "азійська фора -1.25");
+});
+
+test("H3: a second team/EN mix still produces exactly one strong SPREAD entry, participant and line both captured when the window fits (single-word participant + single-word marker + line = 3 tokens)", () => {
+  const text = "Barcelona handicap -2 stake 10";
+  const evidence = extractMarketIntentEvidence(text);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].classification.marketType, "SPREAD");
+  assert.equal(evidence[0].classification.participantName, "Barcelona");
+  assert.equal(evidence[0].classification.embeddedLine, "-2");
+});
+
+// Same disclosed 3-token window limitation as required example 3 above —
+// a MULTI-WORD participant ("Real Madrid", 2 tokens) plus a 1-word marker
+// plus the line is already 4 tokens, one more than MAX_WINDOW_TOKENS can
+// span in a single pass. Market intent is still correctly and strongly
+// detected as SPREAD; participantName is null here (deferred, not
+// fabricated) rather than "Real Madrid", for the identical reason as the
+// azійська/asian-modifier case. legacyOddsBridge.ts's own H3 tests (the
+// real, unwindowed canonical classification path) confirm the multi-word
+// participant IS correctly captured there.
+test("H3 disclosed limitation: a multi-word participant ('Real Madrid') combined with a 1-word marker still produces strong SPREAD evidence, but the window bound loses the participant (null, not fabricated)", () => {
+  const text = "Real Madrid handicap -2 stake 10";
+  const evidence = extractMarketIntentEvidence(text);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].classification.marketType, "SPREAD");
+  assert.equal(evidence[0].classification.embeddedLine, "-2");
+});
+
+test("H3 conflicting signals: 'Арсенал фора -1.5 фора -2 ставка 10' preserves BOTH SPREAD signals independently — never collapsed or averaged, matching the same 'two independent strong signals' rule proven above for TOTALS/DRAW", () => {
+  const text = "Арсенал фора -1.5 фора -2 ставка 10";
+  const evidence = extractMarketIntentEvidence(text);
+  assert.equal(evidence.length, 2);
+  assert.equal(evidence[0].classification.marketType, "SPREAD");
+  assert.equal(evidence[0].classification.participantName, "Арсенал");
+  assert.equal(evidence[0].classification.embeddedLine, "-1.5");
+  assert.equal(evidence[1].classification.marketType, "SPREAD");
+  assert.equal(evidence[1].classification.embeddedLine, "-2");
+});
+
+test("H3 negative: no false evidence for the new vocabulary's own adversarial strings", () => {
+  for (const text of ["handicapper stake 10", "spreadsheet stake 10", "transformer stake 10"]) {
+    const evidence = extractMarketIntentEvidence(text);
+    for (const entry of evidence) {
+      assert.notEqual(entry.classification.marketType, "SPREAD", text);
+    }
+  }
+});
+
+test("H3: existing MONEYLINE/TOTALS/Ф1 evidence is unaffected by the new handicap vocabulary", () => {
+  const winner = extractMarketIntentEvidence("Арсенал победа ставка 10");
+  assert.equal(winner.length, 1);
+  assert.equal(winner[0].classification.marketType, "MONEYLINE_2WAY");
+
+  const totals = extractMarketIntentEvidence("Арсенал ТБ 2.5 ставка 10");
+  assert.equal(totals.length, 1);
+  assert.equal(totals[0].classification.marketType, "TOTALS");
+
+  const shortForm = extractMarketIntentEvidence("Арсенал Ф1(-1.5) ставка 10");
+  assert.equal(shortForm.length, 1);
+  assert.equal(shortForm[0].classification.marketType, "SPREAD");
+  assert.equal(shortForm[0].classification.participantName, "Арсенал");
+});

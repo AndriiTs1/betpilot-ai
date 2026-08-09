@@ -24,6 +24,16 @@
 // different questions; TheOddsApiProvider's own existing supportedMarketTypes
 // allowlist (lib/odds/theOddsApiProvider.ts) is what turns a correctly
 // classified TEAM_TOTAL/SPREAD into a safe MARKET_NOT_SUPPORTED rejection.
+//
+// Handicap Stage H3 — natural-language RU/UA/EN aliases for the SAME SPREAD
+// market Ф1/Ф2 already represents (фора/с формой/з формою/handicap/spread,
+// optionally prefixed by азиатская/азійська/asian) — vocabulary only, see
+// matchSpread's own comment below. Still produces the exact same
+// {marketType: "SPREAD", selectionType: "PARTICIPANT"} shape, still no
+// rounding/normalization of the line, and a quarter line (e.g. "-1.25")
+// still classifies as SPREAD here — TheOddsApiProvider's own H1
+// isStandardHandicapLine gate (unchanged by this stage) is what keeps a
+// quarter line non-confirmable, exactly as it already does for Ф1(-1.25).
 
 import type { MarketType, SelectionType } from "./domain";
 
@@ -287,6 +297,48 @@ function parseSignedLineSuffix(remainder: string): SignedLineSuffixResult {
 // fabrication this file must never make.
 const SPREAD_BARE_SIGNED_PATTERN = /^(.+?)\s+([+-]\d+(?:\.\d+)?)$/;
 
+/* -------------------------------------------------------------------------- */
+/* Handicap Stage H3 — natural-language RU/UA/EN handicap vocabulary, new.   */
+/* Same canonical result as Ф1/Ф2 (marketType SPREAD, selectionType         */
+/* PARTICIPANT) — this only widens which WORDS a player can use to say it.  */
+/*                                                                            */
+/* Unlike Ф1/Ф2 (which encode "side 1" vs "side 2" even without a named     */
+/* participant), none of фора/handicap/spread encode a side on their own —  */
+/* so, mirroring TEAM_TOTAL's ИТБ/ИТМ precedent exactly, three shapes are   */
+/* supported: participant-suffix ("Арсенал фора -1.5"), marker-prefix       */
+/* ("фора Арсенал -1.5"), and bare/unattributed ("фора -1.5",               */
+/* participantName: null, resolved from context by the caller if at all —  */
+/* same contract as TEAM_TOTAL_BARE_PATTERN).                               */
+/*                                                                            */
+/* The азиатская/азійська/asian modifier is folded into the SAME regex      */
+/* group as the base marker (never a separate alternative) specifically so  */
+/* it can never be mistakenly captured as part of the participant name by   */
+/* the non-greedy prefix group in SUFFIX_PATTERN below — "Арсенал азиатская */
+/* фора -1.25" must never split as participant "Арсенал азиатская".        */
+/*                                                                            */
+/* All natural-language markers require REAL whitespace (\s+, never \s*)    */
+/* between participant and marker — unlike Ф1/Ф2's glued-shorthand-tolerant */
+/* \s*, there is no legitimate zero-space form of "Арсенал фора" a player   */
+/* would ever type, so \s+ alone (with no letter-boundary lookbehind needed)*/
+/* already rules out a token boundary falling inside an unrelated single    */
+/* word (e.g. "семафора" can never split into "сема" + "фора": there is no  */
+/* space to match against inside one word).                                 */
+/*                                                                            */
+/* No new lookahead/word-boundary guard is added after the marker either —  */
+/* parseSignedLineSuffix (reused unmodified from the Ф1/Ф2 code above)      */
+/* already rejects any remainder that isn't empty or a well-formed signed-  */
+/* line suffix, which is exactly what keeps "handicapper"/"spreadsheet"     */
+/* safe: matching "handicap"/"spread" as a literal prefix of those words    */
+/* leaves a remainder ("per"/"sheet") that parseSignedLineSuffix rejects     */
+/* outright (starts with a letter, not paren/colon/whitespace+digit) — the  */
+/* whole match attempt is then abandoned, exactly the same safety net       */
+/* already proven for "Ф1abc-1.5"/"F1abc" above.                            */
+const HANDICAP_MARKER_SOURCE =
+  "(?:(?:азиатская|азійська|asian)\\s+)?(?:с\\s+форой|з\\s+форою|фора|форой|форою|handicap|spread)";
+const HANDICAP_SUFFIX_PATTERN = new RegExp(`^(.+?)\\s+${HANDICAP_MARKER_SOURCE}(.*)$`, "i");
+const HANDICAP_PREFIX_PATTERN = new RegExp(`^${HANDICAP_MARKER_SOURCE}\\s+(.+?)\\s+${SIGNED_LINE_NUMBER}$`, "i");
+const HANDICAP_BARE_PATTERN = new RegExp(`^${HANDICAP_MARKER_SOURCE}(.*)$`, "i");
+
 interface SpreadMatch {
   readonly participantName: string | null;
   readonly embeddedLine: string | null;
@@ -303,6 +355,44 @@ function matchSpread(text: string): SpreadMatch | null {
   if (bareToken) {
     const suffix = parseSignedLineSuffix(bareToken[1]);
     if (suffix.ok) return { participantName: null, embeddedLine: suffix.value };
+  }
+
+  // BARE is tried FIRST among the three handicap shapes, before SUFFIX/
+  // PREFIX — both of which have an outer, generic non-greedy capture group
+  // (participant) immediately adjacent to the marker. BARE is anchored at
+  // the very start of the string (^), so it can only ever match when the
+  // marker (optionally modifier-prefixed) is the very FIRST thing in the
+  // text — exactly the situation where there is no real participant text at
+  // all to confuse it with. Concretely: for a standalone "азійська фора
+  // -1.25" (no participant present), trying SUFFIX first would let its
+  // non-greedy `(.+?)` capture "азійська" as if it were a team name (since
+  // "фора" alone, without the modifier, is ALSO a valid bare marker later
+  // in that same string) — checking BARE first resolves this correctly to
+  // participantName: null instead. This never steals a legitimate SUFFIX
+  // match: whenever real participant text actually precedes the marker
+  // (e.g. "Арсенал азійська фора -1.25"), BARE's ^-anchor fails outright
+  // (the string does not START with a marker), so it always falls through
+  // to SUFFIX untouched.
+  const handicapBare = HANDICAP_BARE_PATTERN.exec(text);
+  if (handicapBare) {
+    const suffix = parseSignedLineSuffix(handicapBare[1]);
+    if (suffix.ok) return { participantName: null, embeddedLine: suffix.value };
+  }
+
+  const handicapPrefix = HANDICAP_PREFIX_PATTERN.exec(text);
+  if (handicapPrefix) return { participantName: handicapPrefix[1].trim(), embeddedLine: handicapPrefix[2] };
+
+  // Tried BEFORE SPREAD_BARE_SIGNED_PATTERN below: that pattern's own
+  // participant capture is a bare `(.+?)\s+SIGNED_NUMBER` with no marker
+  // requirement at all, so for "Арсенал фора -1.5" it would otherwise match
+  // FIRST and greedily swallow "фора" itself into the participant name
+  // ("Арсенал фора" instead of "Арсенал") — checking the marker-aware
+  // pattern first ensures the natural-language marker is always stripped
+  // out, never absorbed as if it were part of a team name.
+  const handicapSuffix = HANDICAP_SUFFIX_PATTERN.exec(text);
+  if (handicapSuffix) {
+    const suffix = parseSignedLineSuffix(handicapSuffix[2]);
+    if (suffix.ok) return { participantName: handicapSuffix[1].trim(), embeddedLine: suffix.value };
   }
 
   const bareSigned = SPREAD_BARE_SIGNED_PATTERN.exec(text);

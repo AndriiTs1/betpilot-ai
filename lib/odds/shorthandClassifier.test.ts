@@ -521,3 +521,356 @@ test("classifyBettingSelectionText: Cyrillic SPREAD forms are completely unaffec
     assert.equal(result.embeddedLine, expectedLine, text);
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/* Handicap Stage H3 — natural-language RU/UA/EN handicap vocabulary, new.    */
+/* Same canonical result as Ф1/Ф2: marketType SPREAD, selectionType          */
+/* PARTICIPANT. Vocabulary only — no new market type, no rounding, no sign   */
+/* changes.                                                                   */
+/* -------------------------------------------------------------------------- */
+
+function assertSpread(text: string, expectedParticipant: string | null, expectedLine: string | null): void {
+  const result = classifyBettingSelectionText(text);
+  assert.equal(result.marketType, "SPREAD", text);
+  assert.equal(result.selectionType, "PARTICIPANT", text);
+  assert.equal(result.participantName, expectedParticipant, text);
+  assert.equal(result.embeddedLine, expectedLine, text);
+}
+
+// ---------------------------------------------------------------------
+// RU forms
+// ---------------------------------------------------------------------
+
+test("RU: 'Арсенал фора -1.5' -> SPREAD, participant Arsenal, line -1.5", () => {
+  assertSpread("Арсенал фора -1.5", "Арсенал", "-1.5");
+});
+
+test("RU: 'Арсенал с форой -1.5' -> SPREAD, participant Arsenal, line -1.5", () => {
+  assertSpread("Арсенал с форой -1.5", "Арсенал", "-1.5");
+});
+
+test("RU: 'фора Арсенал -1.5' (prefix form) -> SPREAD, participant Arsenal, line -1.5", () => {
+  assertSpread("фора Арсенал -1.5", "Арсенал", "-1.5");
+});
+
+test("RU: 'Арсенал фора +1.5' -> SPREAD, participant Arsenal, positive line +1.5", () => {
+  assertSpread("Арсенал фора +1.5", "Арсенал", "+1.5");
+});
+
+test("RU: 'Арсенал с форой +1.5' -> SPREAD, participant Arsenal, positive line +1.5", () => {
+  assertSpread("Арсенал с форой +1.5", "Арсенал", "+1.5");
+});
+
+test("RU: 'Арсенал азиатская фора -1.25' -> SPREAD, participant Arsenal, quarter line -1.25 (recognition only — H1 gate still blocks confirmability elsewhere)", () => {
+  assertSpread("Арсенал азиатская фора -1.25", "Арсенал", "-1.25");
+});
+
+test("RU: 'азиатская фора Арсенал -1.25' (prefix form) -> SPREAD, participant Arsenal, quarter line -1.25", () => {
+  assertSpread("азиатская фора Арсенал -1.25", "Арсенал", "-1.25");
+});
+
+// ---------------------------------------------------------------------
+// UA forms
+// ---------------------------------------------------------------------
+
+test("UA: 'Арсенал з форою -1.5' -> SPREAD, participant Arsenal, line -1.5", () => {
+  assertSpread("Арсенал з форою -1.5", "Арсенал", "-1.5");
+});
+
+test("UA: 'Арсенал фора -1.5' (UA player using the RU-shared base word) -> SPREAD, participant Arsenal, line -1.5", () => {
+  assertSpread("Арсенал фора -1.5", "Арсенал", "-1.5");
+});
+
+test("UA: 'фора Арсенал -1.5' (prefix form) -> SPREAD, participant Arsenal, line -1.5", () => {
+  assertSpread("фора Арсенал -1.5", "Арсенал", "-1.5");
+});
+
+test("UA: 'Арсенал азійська фора -1.25' -> SPREAD, participant Arsenal, quarter line -1.25", () => {
+  assertSpread("Арсенал азійська фора -1.25", "Арсенал", "-1.25");
+});
+
+test("UA: 'азійська фора Арсенал -1.25' (prefix form) -> SPREAD, participant Arsenal, quarter line -1.25", () => {
+  assertSpread("азійська фора Арсенал -1.25", "Арсенал", "-1.25");
+});
+
+// ---------------------------------------------------------------------
+// EN forms
+// ---------------------------------------------------------------------
+
+test("EN: 'Arsenal handicap -1.5' -> SPREAD, participant Arsenal, line -1.5", () => {
+  assertSpread("Arsenal handicap -1.5", "Arsenal", "-1.5");
+});
+
+test("EN: 'Arsenal spread -1.5' -> SPREAD, participant Arsenal, line -1.5", () => {
+  assertSpread("Arsenal spread -1.5", "Arsenal", "-1.5");
+});
+
+test("EN: 'handicap Arsenal -1.5' (prefix form) -> SPREAD, participant Arsenal, line -1.5", () => {
+  assertSpread("handicap Arsenal -1.5", "Arsenal", "-1.5");
+});
+
+test("EN: 'spread Arsenal -1.5' (prefix form) -> SPREAD, participant Arsenal, line -1.5", () => {
+  assertSpread("spread Arsenal -1.5", "Arsenal", "-1.5");
+});
+
+test("EN: 'Arsenal Asian handicap -1.25' -> SPREAD, participant Arsenal, quarter line -1.25", () => {
+  assertSpread("Arsenal Asian handicap -1.25", "Arsenal", "-1.25");
+});
+
+test("EN: 'Asian handicap Arsenal -1.25' (prefix form) -> SPREAD, participant Arsenal, quarter line -1.25", () => {
+  assertSpread("Asian handicap Arsenal -1.25", "Arsenal", "-1.25");
+});
+
+test("EN: no separate ASIAN_HANDICAP marketType is ever produced — 'Arsenal Asian handicap -1.25' classifies as exactly the same marketType string as 'Arsenal handicap -1.5'", () => {
+  const asian = classifyBettingSelectionText("Arsenal Asian handicap -1.25");
+  const plain = classifyBettingSelectionText("Arsenal handicap -1.5");
+  assert.equal(asian.marketType, plain.marketType);
+  assert.equal(asian.marketType, "SPREAD");
+});
+
+// ---------------------------------------------------------------------
+// Participant extraction — no hardcoded team names, multi-word names
+// ---------------------------------------------------------------------
+
+test("participant extraction: 'Manchester United handicap -0.5' -> participant 'Manchester United' (multi-word, negative half-line)", () => {
+  assertSpread("Manchester United handicap -0.5", "Manchester United", "-0.5");
+});
+
+test("participant extraction: 'Real Madrid spread -1' -> participant 'Real Madrid' (multi-word, negative whole-line)", () => {
+  assertSpread("Real Madrid spread -1", "Real Madrid", "-1");
+});
+
+test("participant extraction: 'Coventry City handicap +1.5' -> participant 'Coventry City' (multi-word, positive half-line)", () => {
+  assertSpread("Coventry City handicap +1.5", "Coventry City", "+1.5");
+});
+
+test("participant extraction: 'Chelsea spread +0.5' -> participant Chelsea", () => {
+  assertSpread("Chelsea spread +0.5", "Chelsea", "+0.5");
+});
+
+test("participant extraction: 'Barcelona handicap +1' -> participant Barcelona", () => {
+  assertSpread("Barcelona handicap +1", "Barcelona", "+1");
+});
+
+// ---------------------------------------------------------------------
+// Sign / line safety — exact preservation, no rounding, no sign removal
+// ---------------------------------------------------------------------
+
+test("sign/line safety: every required line shape is preserved byte-for-byte", () => {
+  const cases: Array<[string, string]> = [
+    ["Arsenal handicap -1.5", "-1.5"],
+    ["Arsenal handicap +1.5", "+1.5"],
+    ["Arsenal handicap -1", "-1"],
+    ["Arsenal handicap +1", "+1"],
+    ["Arsenal handicap -0.5", "-0.5"],
+    ["Arsenal handicap +0.5", "+0.5"],
+    ["Arsenal Asian handicap -1.25", "-1.25"],
+    ["Arsenal Asian handicap +0.75", "+0.75"],
+  ];
+  for (const [text, expectedLine] of cases) {
+    const result = classifyBettingSelectionText(text);
+    assert.equal(result.marketType, "SPREAD", text);
+    assert.equal(result.embeddedLine, expectedLine, text);
+  }
+});
+
+test("sign/line safety: a quarter line is never rounded or normalized to the nearest half line", () => {
+  const result = classifyBettingSelectionText("Arsenal handicap -1.25");
+  assert.equal(result.embeddedLine, "-1.25");
+  assert.notEqual(result.embeddedLine, "-1.5");
+  assert.notEqual(result.embeddedLine, "-1");
+});
+
+// ---------------------------------------------------------------------
+// No semantic substitution — distinct lines/handicap mentions in ONE
+// selection string are never collapsed; the classifier picks whichever the
+// text's own grammar resolves to, never silently averaging/choosing.
+// Multi-signal AMBIGUITY across an entire raw message is a separate
+// concern (BA-2D/BA-2B, proven via marketIntentEvidence.test.ts below) —
+// this classifier only ever receives one resolved selection string.
+// ---------------------------------------------------------------------
+
+test("no substitution: 'Arsenal handicap -1.5' and 'Arsenal handicap -2' remain distinct, never collapsed to the same line", () => {
+  const a = classifyBettingSelectionText("Arsenal handicap -1.5");
+  const b = classifyBettingSelectionText("Arsenal handicap -2");
+  assert.equal(a.embeddedLine, "-1.5");
+  assert.equal(b.embeddedLine, "-2");
+  assert.notEqual(a.embeddedLine, b.embeddedLine);
+});
+
+// ---------------------------------------------------------------------
+// Existing short-form regression — byte-for-byte unchanged
+// ---------------------------------------------------------------------
+
+test("regression: existing Ф1/Ф2/F1/F2 short forms are completely unaffected by the new natural-language vocabulary", () => {
+  const cases: Array<[string, string | null, string | null]> = [
+    ["Ф1(-1.5)", null, "-1.5"],
+    ["Ф2(+1.5)", null, "+1.5"],
+    ["F1(-1.5)", null, "-1.5"],
+    ["F2(+1.5)", null, "+1.5"],
+    ["Арсенал Ф1:-1.5", "Арсенал", "-1.5"],
+    ["Арсенал Ф1(-1.5)", "Арсенал", "-1.5"],
+    ["Arsenal -1.5", "Arsenal", "-1.5"],
+  ];
+  for (const [text, expectedParticipant, expectedLine] of cases) {
+    assertSpread(text, expectedParticipant, expectedLine);
+  }
+});
+
+// ---------------------------------------------------------------------
+// Bare / unattributed handicap forms — participantName null, resolved from
+// context by the caller if at all (same contract as TEAM_TOTAL_BARE_PATTERN)
+// ---------------------------------------------------------------------
+
+test("bare handicap forms: marker + line alone (no participant in the string) -> SPREAD, participantName null", () => {
+  const cases: Array<[string, string]> = [
+    ["фора -1.5", "-1.5"],
+    ["handicap -1.5", "-1.5"],
+    ["spread -1.5", "-1.5"],
+    ["азиатская фора -1.25", "-1.25"],
+    ["азійська фора -1.25", "-1.25"],
+    ["asian handicap -1.25", "-1.25"],
+  ];
+  for (const [text, expectedLine] of cases) {
+    assertSpread(text, null, expectedLine);
+  }
+});
+
+test("bare marker with no line at all -> SPREAD, both participantName and embeddedLine null", () => {
+  assertSpread("фора", null, null);
+  assertSpread("handicap", null, null);
+});
+
+// ---------------------------------------------------------------------
+// Punctuation — reuses the existing signed-line-suffix grammar (colon,
+// parens, whitespace) already proven for Ф1/Ф2; no new punctuation rules.
+// ---------------------------------------------------------------------
+
+test("punctuation: colon separator ('Arsenal handicap: -1.5', 'Арсенал фора: -1.5') is accepted, same as the existing Ф1/Ф2 grammar", () => {
+  assertSpread("Arsenal handicap: -1.5", "Arsenal", "-1.5");
+  assertSpread("Арсенал фора: -1.5", "Арсенал", "-1.5");
+});
+
+test("punctuation: a doubled/malformed separator with no cleanly-trailing signed number is rejected, not silently tolerated", () => {
+  // Deliberately excludes a case like "Arsenal handicap:: -1.5" here: that
+  // text DOES still classify as SPREAD, but via the separate, pre-existing,
+  // unrelated-to-H3 SPREAD_BARE_SIGNED_PATTERN fallback ("Participant
+  // <anything> -N" — already true before this stage, exactly as true for
+  // "Arsenal !!! -1.5" or "Arsenal xyz garbage -1.5") — not because the new
+  // marker-aware parsing tolerated the malformed "::" punctuation. These
+  // cases below have no cleanly-trailing signed number at the string's very
+  // end at all, so that pre-existing fallback cannot rescue them either —
+  // isolating what the new marker-specific remainder validation itself
+  // actually rejects.
+  for (const text of ["Arsenal handicap((-1.5))", "Arsenal handicap::", "Arsenal handicap(-1.5", "Arsenal handicap: abc"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.notEqual(result.marketType, "SPREAD", text);
+  }
+});
+
+// ---------------------------------------------------------------------
+// Adversarial / false positives — narrow word boundaries, no substring
+// collisions with unrelated words
+// ---------------------------------------------------------------------
+
+test("adversarial: 'handicapper' alone is never classified as SPREAD (не a truncated 'handicap' match)", () => {
+  const result = classifyBettingSelectionText("handicapper");
+  assert.notEqual(result.marketType, "SPREAD");
+  assert.equal(result.participantName, "handicapper");
+});
+
+test("adversarial: 'spreadsheet' alone is never classified as SPREAD", () => {
+  const result = classifyBettingSelectionText("spreadsheet");
+  assert.notEqual(result.marketType, "SPREAD");
+  assert.equal(result.participantName, "spreadsheet");
+});
+
+test("adversarial: 'transformer' alone is never classified as SPREAD (unrelated word, sanity check)", () => {
+  const result = classifyBettingSelectionText("transformer");
+  assert.notEqual(result.marketType, "SPREAD");
+  assert.equal(result.participantName, "transformer");
+});
+
+test("adversarial: a multi-word phrase containing 'handicapper'/'spreadsheet' (no trailing line) never gets truncated into a fabricated SPREAD marker match", () => {
+  // No trailing signed number here deliberately — with one present (e.g.
+  // "Manchester handicapper -1.5"), the result WOULD be SPREAD, but via the
+  // separate, pre-existing, unrelated-to-H3 SPREAD_BARE_SIGNED_PATTERN
+  // fallback (see the punctuation test above's own comment for the same
+  // "Arsenal !!! -1.5"-style precedent) — not because "handicapper" was
+  // mistaken for the "handicap" marker. These cases isolate that specific
+  // question: does the marker-aware parsing itself ever strip "handicap"/
+  // "spread" out of a longer word as if it were the real marker.
+  for (const text of ["Manchester handicapper", "Arsenal spreadsheet", "Manchester handicapper club"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.notEqual(result.marketType, "SPREAD", text);
+  }
+});
+
+test("adversarial: 'фора' embedded inside an unrelated Cyrillic word is never accidentally recognized as a handicap MARKER (the pre-existing bare-signed 'Participant -N' form is a separate, unrelated concern already covered elsewhere)", () => {
+  // "семафора" ("semaphore") and "платформа" ("platform") both contain the
+  // literal substring "фора"/"форма" but have no space before it — the
+  // natural-language handicap patterns require real whitespace (\s+)
+  // between participant and marker, so a single glued word can never be
+  // split by THEM. Neither word carries a trailing signed number here, so
+  // the pre-existing (unrelated to H3) bare-signed "Participant -N" pattern
+  // never enters into it either — both simply fall to the generic
+  // PARTICIPANT fallback.
+  for (const text of ["семафора", "платформа"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.notEqual(result.marketType, "SPREAD", text);
+    assert.equal(result.participantName, text, text);
+  }
+});
+
+test("adversarial: an ordinary sentence merely containing the substrings 'handicap'/'spread'/'фора' as part of a longer unrelated word is never recognized", () => {
+  for (const text of ["handicapping", "widespread", "спреды"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.notEqual(result.marketType, "SPREAD", text);
+  }
+});
+
+// ---------------------------------------------------------------------
+// Generic multi-team coverage — several teams, RU/UA/EN, positive and
+// negative lines, no team-specific logic anywhere in the classifier
+// ---------------------------------------------------------------------
+
+test("generic multi-team coverage: several teams across RU/UA/EN forms, positive and negative lines, all resolve correctly with no team-specific code", () => {
+  const cases: Array<[string, string, string]> = [
+    ["Arsenal handicap -1.5", "Arsenal", "-1.5"],
+    ["Coventry City handicap +1.5", "Coventry City", "+1.5"],
+    ["Real Madrid spread -1", "Real Madrid", "-1"],
+    ["Barcelona spread +1", "Barcelona", "+1"],
+    ["Manchester United handicap -0.5", "Manchester United", "-0.5"],
+    ["Chelsea handicap +0.5", "Chelsea", "+0.5"],
+    ["Реал Мадрид фора -1", "Реал Мадрид", "-1"],
+    ["Барселона фора +1", "Барселона", "+1"],
+    ["Челсі фора -0.5", "Челсі", "-0.5"],
+  ];
+  for (const [text, expectedParticipant, expectedLine] of cases) {
+    assertSpread(text, expectedParticipant, expectedLine);
+  }
+});
+
+// ---------------------------------------------------------------------
+// Existing markets — MONEYLINE/TOTALS unaffected by the new vocabulary
+// ---------------------------------------------------------------------
+
+test("existing markets regression: MONEYLINE and TOTALS classification is completely unaffected by the new handicap vocabulary", () => {
+  const winner = classifyBettingSelectionText("Арсенал победа");
+  assert.equal(winner.marketType, "MONEYLINE_2WAY");
+  assert.equal(winner.participantName, "Арсенал");
+
+  const draw = classifyBettingSelectionText("ничья");
+  assert.equal(draw.marketType, "MONEYLINE_3WAY");
+  assert.equal(draw.selectionType, "DRAW");
+
+  const over = classifyBettingSelectionText("ТБ 2.5");
+  assert.equal(over.marketType, "TOTALS");
+  assert.equal(over.selectionType, "OVER");
+  assert.equal(over.embeddedLine, "2.5");
+
+  const under = classifyBettingSelectionText("ТМ 3");
+  assert.equal(under.marketType, "TOTALS");
+  assert.equal(under.selectionType, "UNDER");
+  assert.equal(under.embeddedLine, "3");
+});
