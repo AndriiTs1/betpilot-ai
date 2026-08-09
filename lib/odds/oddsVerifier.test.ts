@@ -1967,3 +1967,280 @@ test("verifySpreadOdds: provider event metadata (providerEventId/providerSportKe
   assert.equal(result.providerSportKey, "soccer_epl");
   assert.equal(result.eventStartTime, "2026-08-15T18:00:00.000Z");
 });
+
+/* ============================================================================
+ * Handicap Stage H1.1 — exact-market bookmaker fallback.
+ *
+ * H1's findSpreadOutcome() committed to a single bookmaker (pickBookmaker())
+ * BEFORE checking whether it actually had the requested line — a real,
+ * already-fetched exact match on a non-preferred bookmaker was invisible.
+ * H1.1 tries every bookmaker in deterministic preference order (Pinnacle
+ * first, then provider-response order), stopping at the FIRST one with the
+ * exact market+participant+line — never price-shopping, never weakening the
+ * exact-match discipline.
+ * ============================================================================ */
+
+function spreadBookmaker(key: string, title: string, outcomes: OddsApiOutcome[]): OddsApiBookmaker {
+  return { key, title, markets: [{ key: "spreads", outcomes }] };
+}
+
+/* -------------------------------------------------------------------------- */
+/* 16. Mandatory production regression fixture — Arsenal — Coventry City     */
+/* -------------------------------------------------------------------------- */
+
+test("Handicap H1.1 PRODUCTION REGRESSION: Arsenal — Coventry City — Pinnacle only has -2, MyBookie.ag has the exact -1.5 the player requested -> MyBookie.ag is selected, never Pinnacle, never a failure", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    spreadBookmaker("pinnacle", "Pinnacle", [spreadOutcome("Arsenal", 1.93, -2), spreadOutcome("Coventry City", 1.93, 2)]),
+    spreadBookmaker("mybookieag", "MyBookie.ag", [spreadOutcome("Arsenal", 1.53, -1.5), spreadOutcome("Coventry City", 2.34, 1.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.bookmaker, "MyBookie.ag");
+  assert.equal(result.price, 1.53);
+  assert.equal(result.point, "-1.5");
+  assert.equal(result.isFallbackBookmaker, true);
+});
+
+test("Handicap H1.1 PRODUCTION REGRESSION, full pipeline: verifySpreadOdds end-to-end reproduces the same exact result via the fetch layer", async () => {
+  mockEvents([
+    spreadFetchEvent("evt-arsenal-coventry", "Arsenal", "Coventry City", [
+      spreadBookmaker("pinnacle", "Pinnacle", [spreadOutcome("Arsenal", 1.93, -2), spreadOutcome("Coventry City", 1.93, 2)]),
+      spreadBookmaker("mybookieag", "MyBookie.ag", [spreadOutcome("Arsenal", 1.53, -1.5), spreadOutcome("Coventry City", 2.34, 1.5)]),
+    ]),
+  ]);
+
+  const result = await verifySpreadOdds({ sport: "premier league", event: "Arsenal vs Coventry City", participant: "Arsenal", line: "-1.5", odds: null });
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(result.sourceOdds, 1.53);
+  assert.equal(result.bookmaker, "MyBookie.ag");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 1-3. Preferred-first / fallback / deterministic-order-among-fallbacks     */
+/* -------------------------------------------------------------------------- */
+
+test("H1.1 (1): preferred bookmaker (Pinnacle) has the exact line -> Pinnacle wins, no fallback needed", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    spreadBookmaker("pinnacle", "Pinnacle", [spreadOutcome("Arsenal", 1.9, -1.5), spreadOutcome("Coventry City", 1.95, 1.5)]),
+    spreadBookmaker("mybookieag", "MyBookie.ag", [spreadOutcome("Arsenal", 1.95, -1.5), spreadOutcome("Coventry City", 1.9, 1.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.bookmaker, "Pinnacle", "H1.1 (6): preferred bookmaker must win when it has the exact line, even though MyBookie.ag's price (1.95) is HIGHER — this is availability fallback, not best-price shopping");
+  assert.equal(result.price, 1.9);
+  assert.equal(result.isFallbackBookmaker, false);
+});
+
+test("H1.1 (2): preferred bookmaker lacks the exact line, second bookmaker has it -> fallback succeeds", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    spreadBookmaker("pinnacle", "Pinnacle", [spreadOutcome("Arsenal", 1.93, -2), spreadOutcome("Coventry City", 1.93, 2)]),
+    spreadBookmaker("mybookieag", "MyBookie.ag", [spreadOutcome("Arsenal", 1.53, -1.5), spreadOutcome("Coventry City", 2.34, 1.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.bookmaker, "MyBookie.ag");
+  assert.equal(result.isFallbackBookmaker, true);
+});
+
+test("H1.1 (3): several fallback bookmakers have the exact line -> the FIRST one in deterministic provider order wins, never the best price", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    spreadBookmaker("pinnacle", "Pinnacle", [spreadOutcome("Arsenal", 1.93, -2), spreadOutcome("Coventry City", 1.93, 2)]),
+    spreadBookmaker("bookmaker-a", "Bookmaker A", [spreadOutcome("Arsenal", 1.8, -1.5), spreadOutcome("Coventry City", 2.0, 1.5)]),
+    spreadBookmaker("bookmaker-b", "Bookmaker B", [spreadOutcome("Arsenal", 1.95, -1.5), spreadOutcome("Coventry City", 1.85, 1.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.bookmaker, "Bookmaker A", "must select the first eligible bookmaker in provider response order, never the higher-priced Bookmaker B");
+  assert.equal(result.price, 1.8);
+});
+
+/* -------------------------------------------------------------------------- */
+/* 4. No bookmaker has the exact line                                        */
+/* -------------------------------------------------------------------------- */
+
+test("H1.1 (4): no bookmaker (preferred or fallback) has the exact requested line -> LINE_NOT_AVAILABLE, no substitute chosen", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    spreadBookmaker("pinnacle", "Pinnacle", [spreadOutcome("Arsenal", 1.93, -2), spreadOutcome("Coventry City", 1.93, 2)]),
+    spreadBookmaker("bookmaker-a", "Bookmaker A", [spreadOutcome("Arsenal", 1.4, -1), spreadOutcome("Coventry City", 2.9, 1)]),
+    spreadBookmaker("bookmaker-b", "Bookmaker B", [spreadOutcome("Arsenal", 2.49, -2.5), spreadOutcome("Coventry City", 1.63, 2.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.5");
+
+  assert.equal(result.kind, "LINE_NOT_AVAILABLE");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 5. Participant safety across bookmakers                                   */
+/* -------------------------------------------------------------------------- */
+
+test("H1.1 (5): wrong participant, same absolute line, on a fallback bookmaker -> never satisfies the request (Coventry +1.5 must never satisfy Arsenal -1.5)", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    spreadBookmaker("pinnacle", "Pinnacle", [spreadOutcome("Arsenal", 1.93, -2), spreadOutcome("Coventry City", 1.93, 2)]),
+    spreadBookmaker("other", "Other Bookmaker", [spreadOutcome("Arsenal", 1.9, -2), spreadOutcome("Coventry City", 1.95, 1.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.5");
+
+  assert.notEqual(result.kind, "MATCHED", "Coventry City's +1.5 outcome must never be used to satisfy an Arsenal -1.5 request, on any bookmaker");
+  assert.equal(result.kind, "LINE_NOT_AVAILABLE");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 6. Market safety — h2h on another bookmaker is never a spread fallback    */
+/* -------------------------------------------------------------------------- */
+
+test("H1.1 (6/9): another bookmaker has an h2h Arsenal price but no spreads market at all -> FAILED, never used as a market substitute", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    { key: "pinnacle", title: "Pinnacle", markets: [{ key: "h2h", outcomes: [] }] },
+    { key: "other", title: "Other Bookmaker", markets: [{ key: "h2h", outcomes: [{ name: "Arsenal", price: 1.5 }] }] },
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.5");
+
+  assert.equal(result.kind, "MARKET_ABSENT");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 7-8. Sign preservation across fallback                                    */
+/* -------------------------------------------------------------------------- */
+
+test("H1.1 (7): negative sign preserved through fallback", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    spreadBookmaker("pinnacle", "Pinnacle", [spreadOutcome("Arsenal", 1.93, -2), spreadOutcome("Coventry City", 1.93, 2)]),
+    spreadBookmaker("other", "Other Bookmaker", [spreadOutcome("Arsenal", 1.53, -1.5), spreadOutcome("Coventry City", 2.34, 1.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.5");
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind === "MATCHED") assert.equal(result.point, "-1.5");
+});
+
+test("H1.1 (8): positive sign preserved through fallback", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    spreadBookmaker("pinnacle", "Pinnacle", [spreadOutcome("Arsenal", 1.93, -2), spreadOutcome("Coventry City", 1.93, 2)]),
+    spreadBookmaker("other", "Other Bookmaker", [spreadOutcome("Arsenal", 1.53, -1.5), spreadOutcome("Coventry City", 2.34, 1.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Coventry City", "+1.5");
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind === "MATCHED") assert.equal(result.point, "1.5");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 9-11. Generic team support — home/away/multi-word, several event pairs   */
+/* -------------------------------------------------------------------------- */
+
+test("H1.1 (9): home participant fallback (Real Madrid)", () => {
+  const event = spreadEvent("Real Madrid", "Barcelona", [
+    spreadBookmaker("pinnacle", "Pinnacle", [spreadOutcome("Real Madrid", 1.93, -2), spreadOutcome("Barcelona", 1.93, 2)]),
+    spreadBookmaker("other", "Other Bookmaker", [spreadOutcome("Real Madrid", 1.9, -1), spreadOutcome("Barcelona", 1.9, 1)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Real Madrid", "-1");
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind === "MATCHED") {
+    assert.equal(result.bookmaker, "Other Bookmaker");
+    assert.equal(result.price, 1.9);
+  }
+});
+
+test("H1.1 (10): away participant fallback (Barcelona), same event as the home-side test above", () => {
+  const event = spreadEvent("Real Madrid", "Barcelona", [
+    spreadBookmaker("pinnacle", "Pinnacle", [spreadOutcome("Real Madrid", 1.93, -2), spreadOutcome("Barcelona", 1.93, 2)]),
+    spreadBookmaker("other", "Other Bookmaker", [spreadOutcome("Real Madrid", 1.85, -1), spreadOutcome("Barcelona", 1.98, 1)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Barcelona", "1");
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind === "MATCHED") assert.equal(result.price, 1.98);
+});
+
+test("H1.1 (11): multi-word team fallback (Manchester United)", () => {
+  const event = spreadEvent("Manchester United", "Chelsea", [
+    spreadBookmaker("pinnacle", "Pinnacle", [spreadOutcome("Manchester United", 1.93, -1), spreadOutcome("Chelsea", 1.93, 1)]),
+    spreadBookmaker("other", "Other Bookmaker", [spreadOutcome("Manchester United", 1.8, -0.5), spreadOutcome("Chelsea", 2.0, 0.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Manchester United", "-0.5");
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind === "MATCHED") {
+    assert.equal(result.bookmaker, "Other Bookmaker");
+    assert.equal(result.price, 1.8);
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* 12. Fallback bookmaker metadata                                           */
+/* -------------------------------------------------------------------------- */
+
+test("H1.1 (12): full metadata for a fallback match describes the ACTUAL bookmaker used, never Pinnacle", async () => {
+  mockEvents([
+    spreadFetchEvent("evt-h11-meta", "Arsenal", "Coventry City", [
+      spreadBookmaker("pinnacle", "Pinnacle", [spreadOutcome("Arsenal", 1.93, -2), spreadOutcome("Coventry City", 1.93, 2)]),
+      spreadBookmaker("mybookieag", "MyBookie.ag", [spreadOutcome("Arsenal", 1.53, -1.5), spreadOutcome("Coventry City", 2.34, 1.5)]),
+    ]),
+  ]);
+
+  const result = await verifySpreadOdds({ sport: "premier league", event: "Arsenal vs Coventry City", participant: "Arsenal", line: "-1.5", odds: 1.53 });
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(result.bookmaker, "MyBookie.ag");
+  assert.equal(result.sourceOdds, 1.53);
+  assert.notEqual(result.bookmaker, "Pinnacle");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 13. No best-price selection (explicit, separate from test 3's coverage)   */
+/* -------------------------------------------------------------------------- */
+
+test("H1.1 (13): explicit no-best-price proof — a later, higher-priced fallback bookmaker never overrides an earlier, lower-priced eligible one", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    spreadBookmaker("pinnacle", "Pinnacle", [spreadOutcome("Arsenal", 1.93, -2), spreadOutcome("Coventry City", 1.93, 2)]),
+    spreadBookmaker("cheap-first", "Cheap First", [spreadOutcome("Arsenal", 1.5, -1.5), spreadOutcome("Coventry City", 2.5, 1.5)]),
+    spreadBookmaker("expensive-second", "Expensive Second", [spreadOutcome("Arsenal", 2.5, -1.5), spreadOutcome("Coventry City", 1.5, 1.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.5");
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind === "MATCHED") {
+    assert.equal(result.bookmaker, "Cheap First");
+    assert.equal(result.price, 1.5, "the FIRST eligible fallback bookmaker wins regardless of a later one offering better odds");
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* 20. Only one provider fetch, never one per bookmaker                      */
+/* -------------------------------------------------------------------------- */
+
+test("H1.1 (20): fallback across bookmakers happens entirely within the ALREADY-fetched event — verifySpreadOdds still makes exactly one HTTP request", async () => {
+  let fetchCount = 0;
+  currentHandler = async () => {
+    fetchCount += 1;
+    return jsonResponse([
+      spreadFetchEvent("evt-h11-onefetch", "Arsenal", "Coventry City", [
+        spreadBookmaker("pinnacle", "Pinnacle", [spreadOutcome("Arsenal", 1.93, -2), spreadOutcome("Coventry City", 1.93, 2)]),
+        spreadBookmaker("a", "A", [spreadOutcome("Arsenal", 1.9, -2), spreadOutcome("Coventry City", 1.9, 2)]),
+        spreadBookmaker("b", "B", [spreadOutcome("Arsenal", 1.53, -1.5), spreadOutcome("Coventry City", 2.34, 1.5)]),
+      ]),
+    ]);
+  };
+
+  const result = await verifySpreadOdds({ sport: "premier league", event: "Arsenal vs Coventry City", participant: "Arsenal", line: "-1.5", odds: null });
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(fetchCount, 1, "inspecting multiple bookmakers must never trigger additional HTTP requests — the provider response already contains all bookmakers");
+});

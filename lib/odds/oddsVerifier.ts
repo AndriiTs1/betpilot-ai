@@ -1266,20 +1266,54 @@ export type SpreadOutcomeLookupResult =
   | { readonly kind: "MALFORMED_POINT" }
   | { readonly kind: "LINE_NOT_AVAILABLE" };
 
-// Pure — no I/O, no caching, no mutation. Operates on an already-matched
-// event, reuses pickBookmaker() unchanged (same Pinnacle-preferred/
-// first-bookmaker-fallback policy every other market already has).
+// Handicap Stage H1.1 — deterministic bookmaker ORDER for exact-outcome
+// fallback: Pinnacle first when present (same top preference pickBookmaker()
+// already has), then every OTHER bookmaker in exactly the order the
+// provider returned them — never re-sorted by price/odds. This is
+// availability fallback, not best-price shopping (see findSpreadOutcome's
+// own header comment for the full policy). Deliberately a small, separate,
+// reusable primitive rather than a change to pickBookmaker() itself:
+// pickBookmaker() still means exactly what it always has ("the single
+// preferred bookmaker for a market with no per-outcome availability
+// concept," e.g. h2h/totals, both left unchanged this stage — see this
+// file's own H1.1 report for why a broader rollout is deliberately not
+// applied here) — this is a distinct concept ("every bookmaker, in
+// preference order, for a caller that needs to try more than one").
+function orderedBookmakersForFallback(event: OddsApiEvent): readonly OddsApiBookmaker[] {
+  const pinnacle = event.bookmakers.find((b) => b.key === "pinnacle");
+  if (!pinnacle) return event.bookmakers;
+  return [pinnacle, ...event.bookmakers.filter((b) => b !== pinnacle)];
+}
+
+// Pure — no I/O, no caching, no mutation, no extra network calls: operates
+// entirely on the ALREADY-FETCHED event.bookmakers array from the one
+// provider response findSpreadOutcome's caller already has.
 //
-// Two-stage match, deliberately never conflated into one fuzzy score:
+// Handicap Stage H1.1 — production regression fix. H1's original version of
+// this function committed to a single bookmaker (pickBookmaker()) BEFORE
+// ever checking whether it actually had the requested line, so a real,
+// already-fetched exact match on a non-preferred bookmaker (e.g. MyBookie.ag
+// offering the exact -1.5 line Pinnacle didn't) was invisible — reported
+// LINE_NOT_AVAILABLE even though the line genuinely existed in the same
+// response. Now: try bookmakers in orderedBookmakersForFallback()'s
+// deterministic order (preferred first), stop at the FIRST one that
+// satisfies the market/participant/exact-line requirement, exactly as it
+// always has. Never price-compares across bookmakers to pick the "best"
+// one — the first bookmaker (in preference order) that has the EXACT
+// requested outcome wins, whatever its price.
+//
+// Two-stage match per bookmaker, deliberately never conflated into one
+// fuzzy score (unchanged from H1):
 //   1. WHICH TEAM — resolve the requested participant against the matched
-//      event's own home_team/away_team (fuzzy, via normalizeTeamName/
+//      EVENT's own home_team/away_team (fuzzy, via normalizeTeamName/
 //      overlapScore — the exact same primitives findOutcomePriceByTeamName
-//      already uses for h2h), then keep only spread outcomes whose own name
-//      is an EXACT match (after normalization) to that resolved team
-//      string. This is what stops "Arsenal" from ever being scored against
-//      Coventry's own outcome entries at all — participant resolution
-//      happens once, up front, never per-candidate-outcome.
-//   2. WHICH LINE — among that team's own outcomes only, exact
+//      already uses for h2h). This is event-level, not bookmaker-specific,
+//      so it only ever needs to happen once, before the bookmaker loop —
+//      it is what stops "Coventry +1.5" on ANY bookmaker from ever being
+//      considered for an "Arsenal -1.5" request, regardless of which
+//      bookmaker offers it.
+//   2. WHICH LINE — for each bookmaker in order, only its OWN outcomes
+//      whose name exactly matches the resolved team are considered; exact
 //      canonical-string equality against requestedLine (identical
 //      discipline to findTotalsOutcome — never "closest available").
 export function findSpreadOutcome(
@@ -1292,16 +1326,13 @@ export function findSpreadOutcome(
     return { kind: "INVALID_REQUESTED_LINE" };
   }
 
-  const bookmakerPick = pickBookmaker(event);
-  if (!bookmakerPick) {
+  if (event.bookmakers.length === 0) {
     return { kind: "NO_BOOKMAKER" };
   }
 
-  const market = bookmakerPick.bookmaker.markets.find((m) => m.key === "spreads");
-  if (!market) {
-    return { kind: "MARKET_ABSENT" };
-  }
-
+  // Event-level participant resolution — unchanged from H1, computed once,
+  // never re-derived per bookmaker (the event's own home_team/away_team
+  // strings are the same regardless of which bookmaker is being inspected).
   const normalizedTarget = normalizeTeamName(participantName);
   const homeScore = overlapScore(normalizedTarget, normalizeTeamName(event.home_team));
   const awayScore = overlapScore(normalizedTarget, normalizeTeamName(event.away_team));
@@ -1313,41 +1344,56 @@ export function findSpreadOutcome(
   if (resolvedTeamName === null) {
     return { kind: "PARTICIPANT_NOT_FOUND" };
   }
-
   const normalizedResolvedTeam = normalizeTeamName(resolvedTeamName);
-  const candidates = market.outcomes.filter((outcome) => normalizeTeamName(outcome.name) === normalizedResolvedTeam);
-  if (candidates.length === 0) {
-    return { kind: "PARTICIPANT_NOT_FOUND" };
-  }
 
+  let sawMarket = false;
+  let sawParticipantCandidates = false;
   let sawMissingPoint = false;
   let sawMalformedPoint = false;
 
-  for (const outcome of candidates) {
-    if (outcome.point === undefined || outcome.point === null) {
-      sawMissingPoint = true;
-      continue;
-    }
+  for (const bookmaker of orderedBookmakersForFallback(event)) {
+    const market = bookmaker.markets.find((m) => m.key === "spreads");
+    if (!market) continue;
+    sawMarket = true;
 
-    const canonicalPoint = canonicalizeProviderPoint(outcome.point);
-    if (canonicalPoint === null) {
-      sawMalformedPoint = true;
-      continue;
-    }
+    const candidates = market.outcomes.filter((outcome) => normalizeTeamName(outcome.name) === normalizedResolvedTeam);
+    if (candidates.length === 0) continue;
+    sawParticipantCandidates = true;
 
-    if (canonicalPoint === canonicalRequestedLine) {
-      return {
-        kind: "MATCHED",
-        price: outcome.price,
-        bookmaker: bookmakerPick.bookmaker.title,
-        isFallbackBookmaker: bookmakerPick.isFallback,
-        marketKey: "spreads",
-        point: canonicalPoint,
-        outcomeName: outcome.name,
-      };
+    for (const outcome of candidates) {
+      if (outcome.point === undefined || outcome.point === null) {
+        sawMissingPoint = true;
+        continue;
+      }
+
+      const canonicalPoint = canonicalizeProviderPoint(outcome.point);
+      if (canonicalPoint === null) {
+        sawMalformedPoint = true;
+        continue;
+      }
+
+      if (canonicalPoint === canonicalRequestedLine) {
+        return {
+          kind: "MATCHED",
+          price: outcome.price,
+          bookmaker: bookmaker.title,
+          // "Fallback" now honestly reflects the bookmaker ACTUALLY used
+          // (not pinnacle), whether that's because pinnacle was absent
+          // entirely (H1's original meaning) or because pinnacle was
+          // present but lacked this exact outcome (H1.1's new case) — both
+          // are the same fact from a caller's perspective: this price did
+          // not come from the top-preference bookmaker.
+          isFallbackBookmaker: bookmaker.key !== "pinnacle",
+          marketKey: "spreads",
+          point: canonicalPoint,
+          outcomeName: outcome.name,
+        };
+      }
     }
   }
 
+  if (!sawMarket) return { kind: "MARKET_ABSENT" };
+  if (!sawParticipantCandidates) return { kind: "PARTICIPANT_NOT_FOUND" };
   if (sawMissingPoint) return { kind: "MISSING_POINT" };
   if (sawMalformedPoint) return { kind: "MALFORMED_POINT" };
   return { kind: "LINE_NOT_AVAILABLE" };
