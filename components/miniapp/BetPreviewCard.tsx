@@ -96,6 +96,9 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
             sport: selection.sport,
             event: selection.event,
             market: selection.market,
+            marketType: selection.marketType,
+            participant: selection.participant,
+            line: selection.line,
           })}
           wrap
         />
@@ -129,6 +132,9 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
       sport: selection.sport,
       event: selection.event,
       market: selection.market,
+      marketType: selection.marketType,
+      participant: selection.participant,
+      line: selection.line,
     }),
     market: selection.market,
     odds: selection.submittedOdds !== null ? String(selection.submittedOdds) : null,

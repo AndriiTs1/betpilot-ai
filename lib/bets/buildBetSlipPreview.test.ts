@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildBetSlipPreview, BetSlipValidationError, BuildBetSlipPreviewConfigError } from "./buildBetSlipPreview";
+import { normalizeSelectionToEnglish } from "./normalizeSelectionToEnglish";
 import type { ParsedBetSlip } from "./betSlip";
 import type { OddsVerificationInput, TotalsVerificationInput } from "@/lib/odds/oddsVerifier";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
@@ -1524,4 +1525,176 @@ test("buildBetSlipPreview: Totals FAILED (line not offered) never becomes a misl
 
   assert.notEqual(result.preview.selections[0].oddsStatus, "VERIFIED");
   assert.equal(result.preview.selections[0].oddsStatus, "NOT_FOUND");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Handicap Stage H2 — SPREAD preview display normalization                   */
+/*                                                                            */
+/* buildBetSlipPreview.ts itself never reconstructs a display label (the     */
+/* `selection` field always stays the player's raw text) — these tests prove */
+/* the additive marketType/participant fields it now threads through are     */
+/* exactly what lib/bets/normalizeSelectionToEnglish.ts needs to render the  */
+/* correct "Arsenal -1.5" label, without buildBetSlipPreview.ts itself doing */
+/* any formatting. See lib/bets/normalizeSelectionToEnglish.test.ts for the  */
+/* formatter's own unit coverage (sign rules, multi-team cases, etc).        */
+/* -------------------------------------------------------------------------- */
+
+function fakeVerifySpreadOddsFn(
+  byEvent: Record<string, OddsCheckResult | "reject">,
+  onCall?: (input: { sport: string; event: string; participant: string; line: string; odds: number | null }) => void,
+) {
+  return async (input: {
+    sport: string;
+    event: string;
+    participant: string;
+    line: string;
+    odds: number | null;
+  }): Promise<OddsCheckResult> => {
+    onCall?.(input);
+    const outcome = byEvent[input.event];
+    if (outcome === undefined) throw new Error(`No fake spread outcome configured for event "${input.event}"`);
+    if (outcome === "reject") throw new Error(`Simulated spread odds-check failure for "${input.event}"`);
+    return outcome;
+  };
+}
+
+test("Handicap Stage H2 (mandatory preview integration): raw 'Arsenal F1(-1.5)' selection round-trips through buildBetSlipPreview with canonical SPREAD/Arsenal/-1.5, and normalizeSelectionToEnglish renders 'Arsenal -1.5' from those exact preview fields — odds/currentOdds/bookmaker are unchanged by this addition", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [
+      { sport: "Football", event: "Arsenal vs Coventry City", market: null, selection: "Arsenal F1(-1.5)", submittedOdds: 1.91 },
+    ],
+  };
+
+  let capturedSpreadInput: { participant: string; line: string } | null = null;
+  const provider = new TheOddsApiProvider(
+    fakeVerifyOddsFn({}),
+    undefined,
+    fakeVerifySpreadOddsFn(
+      { "Arsenal vs Coventry City": verified(1.91, 1.91, "MyBookie.ag") },
+      (input) => {
+        capturedSpreadInput = { participant: input.participant, line: input.line };
+      },
+    ),
+  );
+  const service = new OddsVerificationService(provider);
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+  const previewSelection = result.preview.selections[0];
+
+  // The odds check was actually verified through the SPREAD seam, with the
+  // exact participant/line pair the canonical classifier extracted — never
+  // MONEYLINE/h2h.
+  assert.deepEqual(capturedSpreadInput, { participant: "Arsenal", line: "-1.5" });
+
+  // Canonical display fields are exactly what was classified — never
+  // reconstructed or altered.
+  assert.equal(previewSelection.marketType, "SPREAD");
+  assert.equal(previewSelection.participant, "Arsenal");
+  assert.equal(previewSelection.line, "-1.5");
+  // Raw AI text is preserved verbatim on `selection` — buildBetSlipPreview.ts
+  // itself does no display formatting, matching layer semantics unchanged.
+  assert.equal(previewSelection.selection, "Arsenal F1(-1.5)");
+  // Odds/provider metadata are unaffected by this display-only addition.
+  assert.equal(previewSelection.oddsStatus, "VERIFIED");
+  assert.equal(previewSelection.currentOdds, 1.91);
+  assert.equal(previewSelection.submittedOdds, 1.91);
+  assert.equal(previewSelection.bookmaker, "MyBookie.ag");
+
+  // The actual display seam (what components/miniapp/BetPreviewCard.tsx
+  // calls) — proves the full chain end-to-end, not just the formatter
+  // tested in isolation against hand-built input.
+  const displayLabel = normalizeSelectionToEnglish({
+    selection: previewSelection.selection,
+    sport: previewSelection.sport,
+    event: previewSelection.event,
+    market: previewSelection.market,
+    marketType: previewSelection.marketType,
+    participant: previewSelection.participant,
+    line: previewSelection.line,
+  });
+  assert.equal(displayLabel, "Arsenal -1.5");
+});
+
+test("Handicap Stage H2: a positive-line SPREAD selection ('Coventry City F2(+1.5)') threads participant/line/marketType through the preview and renders 'Coventry City +1.5'", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [
+      {
+        sport: "Football",
+        event: "Arsenal vs Coventry City",
+        market: null,
+        selection: "Coventry City F2(+1.5)",
+        submittedOdds: 1.91,
+      },
+    ],
+  };
+
+  const provider = new TheOddsApiProvider(
+    fakeVerifyOddsFn({}),
+    undefined,
+    fakeVerifySpreadOddsFn({ "Arsenal vs Coventry City": verified(1.91, 1.91, "Pinnacle") }),
+  );
+  const service = new OddsVerificationService(provider);
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+  const previewSelection = result.preview.selections[0];
+
+  assert.equal(previewSelection.marketType, "SPREAD");
+  assert.equal(previewSelection.participant, "Coventry City");
+  assert.equal(previewSelection.line, "1.5");
+
+  const displayLabel = normalizeSelectionToEnglish({
+    selection: previewSelection.selection,
+    marketType: previewSelection.marketType,
+    participant: previewSelection.participant,
+    line: previewSelection.line,
+  });
+  assert.equal(displayLabel, "Coventry City +1.5");
+});
+
+test("Handicap Stage H2: MONEYLINE and TOTALS previews carry marketType/participant but normalizeSelectionToEnglish's SPREAD branch never fires for them (existing display unchanged)", async () => {
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 20,
+    selections: [
+      { sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: 1.8 },
+      { sport: "Football", event: "Arsenal vs Chelsea", market: null, selection: "Over 2.5", line: "2.5", submittedOdds: 1.9 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: totalsAwareVerificationService(
+      { "Real Madrid vs Barcelona": verified(1.8, 1.8) },
+      { "Arsenal vs Chelsea": verified(1.9, 1.9) },
+    ),
+  });
+
+  const [moneyline, totals] = result.preview.selections;
+  assert.equal(moneyline.marketType, "MONEYLINE_2WAY");
+  assert.equal(totals.marketType, "TOTALS");
+
+  // SPREAD branch is strictly gated on marketType === "SPREAD" — passing
+  // these fields through never changes MONEYLINE/TOTALS display.
+  assert.equal(
+    normalizeSelectionToEnglish({
+      selection: moneyline.selection,
+      marketType: moneyline.marketType,
+      participant: moneyline.participant,
+      line: moneyline.line,
+    }),
+    "Real Madrid Win",
+  );
+  assert.equal(
+    normalizeSelectionToEnglish({
+      selection: totals.selection,
+      sport: totals.sport,
+      marketType: totals.marketType,
+      participant: totals.participant,
+      line: totals.line,
+    }),
+    "Over 2.5 Goals",
+  );
 });

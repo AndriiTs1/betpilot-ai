@@ -13,6 +13,16 @@ export interface BetPreviewSelection {
   event: string;
   market: string | null;
   selection: string;
+  // Handicap Stage H2 — canonical SPREAD display data, sourced identically
+  // to `market`/`selection` above (mirrors lib/bets/buildBetSlipPreview.ts's
+  // BetSlipPreviewSelection). null for any market with no participant, or
+  // when verification never resolved one — never fabricated client-side.
+  marketType: string | null;
+  participant: string | null;
+  // Already present on every real API response (mirrors
+  // BetSlipPreviewSelection.line) — declared here, alongside marketType/
+  // participant above, so BetPreviewCard.tsx can read it type-safely.
+  line: string | null;
   submittedOdds: number | null;
   currentOdds: number | null;
   oddsStatus: BetSelectionOddsStatus;
@@ -99,6 +109,9 @@ function isBetPreviewSelection(value: unknown): value is BetPreviewSelection {
     typeof s.event === "string" &&
     (s.market === null || typeof s.market === "string") &&
     typeof s.selection === "string" &&
+    (s.marketType === null || typeof s.marketType === "string") &&
+    (s.participant === null || typeof s.participant === "string") &&
+    (s.line === null || typeof s.line === "string") &&
     (s.submittedOdds === null || typeof s.submittedOdds === "number") &&
     (s.currentOdds === null || typeof s.currentOdds === "number") &&
     typeof s.oddsStatus === "string" &&

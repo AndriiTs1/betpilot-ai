@@ -28,18 +28,37 @@ interface BetSelectionsListProps {
 // it again here is a harmless, idempotent no-op, not a bug: this component
 // can't distinguish that case from the raw-fetched one, and every
 // canonical output is also a recognized input.
-export default function BetSelectionsList({ selections }: BetSelectionsListProps) {
-  if (!selections || selections.length <= 1) return null;
-
-  const normalized = selections.map((selection) => ({
+//
+// Handicap Stage H2 — the mapping itself is extracted into this named,
+// exported function (rather than left inline in the component body) purely
+// so it's unit-testable without this project's deliberately absent
+// DOM-rendering test infra (see ActiveBetsScreen.test.ts's own comment on
+// why) — same rationale as ActiveBetsScreen.tsx exporting ACTIVE_STATUSES.
+// No behavior change: same fields, same normalizeSelectionToEnglish call,
+// just given a name. Both ActiveBetsScreen.tsx and HistoryScreen.tsx import
+// this same single BetSelectionsList component (there is no per-screen
+// variant), so this one function's tests cover both surfaces at once.
+export function normalizeSelectionsForDisplay(
+  selections: readonly MiniAppBetSelection[],
+): MiniAppBetSelection[] {
+  return selections.map((selection) => ({
     ...selection,
     outcome: normalizeSelectionToEnglish({
       selection: selection.outcome,
       sport: selection.sport,
       event: selection.event,
       market: selection.market ?? null,
+      marketType: selection.canonicalMarketType ?? null,
+      participant: selection.canonicalParticipant ?? null,
+      line: selection.line ?? null,
     }),
   }));
+}
+
+export default function BetSelectionsList({ selections }: BetSelectionsListProps) {
+  if (!selections || selections.length <= 1) return null;
+
+  const normalized = normalizeSelectionsForDisplay(selections);
 
   return (
     <div className="mt-1.5">

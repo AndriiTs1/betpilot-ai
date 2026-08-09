@@ -248,6 +248,148 @@ test("an unrecognized already-stored outcome is left exactly as stored", () => {
   assert.equal(display.selections[0].outcome, "Handicap -1.5 (Team A)");
 });
 
+// ---------------------------------------------------------------------
+// Handicap Stage H2 — SPREAD canonical display (Active/History path)
+//
+// mapBetForDisplay.ts is the shared mapper behind ActiveBetsScreen.tsx/
+// HistoryScreen.tsx/BetScreen.tsx's headline row (displayTitle/
+// displaySubtitle) AND PlayerCard.tsx/BetQueueItem.tsx on the Dashboard —
+// these tests exercise the one mapper, not each screen separately.
+// ---------------------------------------------------------------------
+
+test("SPREAD: a stored 'Arsenal F1(-1.5)' selection with canonicalMarketType/canonicalParticipant/line displays as 'Arsenal -1.5', matching the production screenshot's expected fix", () => {
+  const b = bet({
+    event: "Arsenal vs Coventry City",
+    outcome: "Arsenal F1(-1.5)",
+    selections: [
+      selection({
+        event: "Arsenal vs Coventry City",
+        outcome: "Arsenal F1(-1.5)",
+        canonicalMarketType: "SPREAD",
+        canonicalParticipant: "Arsenal",
+        line: "-1.5",
+      }),
+    ],
+  });
+
+  const display = mapBetForDisplay(b);
+
+  assert.equal(display.selections[0].outcome, "Arsenal -1.5");
+  assert.equal(display.displaySubtitle, "Arsenal -1.5");
+});
+
+test("SPREAD: a stored 'Arsenal F1(-2)' selection displays as 'Arsenal -2'", () => {
+  const b = bet({
+    selections: [
+      selection({
+        outcome: "Arsenal F1(-2)",
+        canonicalMarketType: "SPREAD",
+        canonicalParticipant: "Arsenal",
+        line: "-2",
+      }),
+    ],
+  });
+
+  const display = mapBetForDisplay(b);
+  assert.equal(display.selections[0].outcome, "Arsenal -2");
+});
+
+test("SPREAD: a stored 'Coventry City F2(+1.5)' selection displays as 'Coventry City +1.5'", () => {
+  const b = bet({
+    selections: [
+      selection({
+        outcome: "Coventry City F2(+1.5)",
+        canonicalMarketType: "SPREAD",
+        canonicalParticipant: "Coventry City",
+        line: "1.5",
+      }),
+    ],
+  });
+
+  const display = mapBetForDisplay(b);
+  assert.equal(display.selections[0].outcome, "Coventry City +1.5");
+});
+
+test("SPREAD: an EXPRESS leg's canonical fields are threaded independently per selection, order preserved, alongside a plain MONEYLINE sibling", () => {
+  const b = bet({
+    type: "EXPRESS",
+    event: null,
+    outcome: null,
+    selections: [
+      selection({
+        id: "sel-1",
+        outcome: "Real Madrid Win",
+        canonicalMarketType: "MONEYLINE_2WAY",
+        canonicalParticipant: "Real Madrid",
+      }),
+      selection({
+        id: "sel-2",
+        outcome: "Manchester United F1(-0.5)",
+        canonicalMarketType: "SPREAD",
+        canonicalParticipant: "Manchester United",
+        line: "-0.5",
+      }),
+      selection({
+        id: "sel-3",
+        outcome: "Chelsea F2(+0.5)",
+        canonicalMarketType: "SPREAD",
+        canonicalParticipant: "Chelsea",
+        line: "0.5",
+      }),
+    ],
+  });
+
+  const display = mapBetForDisplay(b);
+  assert.deepEqual(
+    display.selections.map((s) => s.outcome),
+    ["Real Madrid Win", "Manchester United -0.5", "Chelsea +0.5"],
+  );
+});
+
+test("regression: MONEYLINE display is byte-for-byte unchanged even when canonicalMarketType/canonicalParticipant are present", () => {
+  const b = bet({
+    selections: [
+      selection({ outcome: "Arsenal Win", canonicalMarketType: "MONEYLINE_2WAY", canonicalParticipant: "Arsenal" }),
+    ],
+  });
+
+  const display = mapBetForDisplay(b);
+  assert.equal(display.selections[0].outcome, "Arsenal Win");
+});
+
+test("regression: TOTALS display is byte-for-byte unchanged even when a line is present (SPREAD branch never fires for TOTALS)", () => {
+  const b = bet({
+    selections: [selection({ outcome: "Over 2.5", canonicalMarketType: "TOTALS", line: "2.5" })],
+  });
+
+  const display = mapBetForDisplay(b);
+  assert.equal(display.selections[0].outcome, "Over 2.5 Goals");
+});
+
+test("SPREAD safety: incomplete canonical data (marketType SPREAD but no participant) falls back safely to the existing raw-text display, never fabricating a participant", () => {
+  const b = bet({
+    selections: [selection({ outcome: "Arsenal F1(-1.5)", canonicalMarketType: "SPREAD", line: "-1.5" })],
+  });
+
+  const display = mapBetForDisplay(b);
+  assert.equal(display.selections[0].outcome, "Arsenal F1(-1.5)");
+});
+
+test("SPREAD safety: incomplete canonical data (marketType SPREAD but no line) falls back safely, never fabricating a line", () => {
+  const b = bet({
+    selections: [selection({ outcome: "Arsenal F1(-1.5)", canonicalMarketType: "SPREAD", canonicalParticipant: "Arsenal" })],
+  });
+
+  const display = mapBetForDisplay(b);
+  assert.equal(display.selections[0].outcome, "Arsenal F1(-1.5)");
+});
+
+test("SPREAD safety: a selection with no canonical fields at all (pre-H2-shaped data) is completely unaffected — same output as before this stage", () => {
+  const b = bet({ selections: [selection({ outcome: "Arsenal F1(-1.5)" })] });
+  const display = mapBetForDisplay(b);
+  assert.equal(display.selections[0].outcome, "Arsenal F1(-1.5)");
+});
+
 test("does not mutate the source bet or its selections array/objects", () => {
   const originalSelections = [selection({ id: "sel-1" }), selection({ id: "sel-2" })];
   const b = bet({ type: "EXPRESS", event: null, outcome: null, selections: originalSelections });

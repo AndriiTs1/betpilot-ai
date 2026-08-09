@@ -56,6 +56,17 @@ export interface DisplaySelection {
   awayTeamName?: string | null;
   competitionName?: string | null;
   eventStartTime?: string | null;
+  // Handicap Stage H2 — canonical SPREAD display data (mirrors the Prisma
+  // BetSelection column names exactly, same "already present on every real
+  // API response via serializeBet's full-row spread, just not previously
+  // declared" story as market/currentOdds/homeTeamName above). Optional so
+  // every existing caller (including mergeConfirmedBet.ts's optimistic
+  // pre-reconciliation objects, which never set these) stays valid
+  // unchanged; a selection missing them just falls through to
+  // normalizeSelectionToEnglish's existing safe raw-text behavior below.
+  canonicalMarketType?: string | null;
+  canonicalParticipant?: string | null;
+  line?: string | null;
 }
 
 // Only the fields the mapper actually needs — a structural subset every
@@ -165,6 +176,9 @@ export function mapBetForDisplay(bet: BetLikeForDisplay): DisplayBet {
       sport: selection.sport,
       event: selection.event,
       market: selection.market ?? null,
+      marketType: selection.canonicalMarketType ?? null,
+      participant: selection.canonicalParticipant ?? null,
+      line: selection.line ?? null,
     }),
   }));
 

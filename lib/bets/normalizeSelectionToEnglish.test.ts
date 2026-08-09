@@ -194,3 +194,132 @@ test("EXPRESS-leg-shaped input (full structured context) normalizes correctly", 
     "Over 2.5 Goals",
   );
 });
+
+// ---------------------------------------------------------------------
+// Handicap Stage H2 — SPREAD canonical display (participant + line)
+// ---------------------------------------------------------------------
+
+test("SPREAD: Arsenal / -1.5 -> 'Arsenal -1.5' (negative half-line)", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Arsenal F1", marketType: "SPREAD", participant: "Arsenal", line: "-1.5" }),
+    "Arsenal -1.5",
+  );
+});
+
+test("SPREAD: Real Madrid / -1 -> 'Real Madrid -1' (negative whole-line)", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Real Madrid F1", marketType: "SPREAD", participant: "Real Madrid", line: "-1" }),
+    "Real Madrid -1",
+  );
+});
+
+test("SPREAD: Coventry City / 1.5 -> 'Coventry City +1.5' (positive half-line gets an explicit +)", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Coventry City F2", marketType: "SPREAD", participant: "Coventry City", line: "1.5" }),
+    "Coventry City +1.5",
+  );
+});
+
+test("SPREAD: Barcelona / 1 -> 'Barcelona +1' (positive whole-line gets an explicit +)", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Barcelona F2", marketType: "SPREAD", participant: "Barcelona", line: "1" }),
+    "Barcelona +1",
+  );
+});
+
+test("SPREAD: Manchester United / -0.5 -> 'Manchester United -0.5'", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Manchester United F1", marketType: "SPREAD", participant: "Manchester United", line: "-0.5" }),
+    "Manchester United -0.5",
+  );
+});
+
+test("SPREAD: Chelsea / 0.5 -> 'Chelsea +0.5'", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Chelsea F2", marketType: "SPREAD", participant: "Chelsea", line: "0.5" }),
+    "Chelsea +0.5",
+  );
+});
+
+test("SPREAD: a zero line displays with no sign at all ('Participant 0', not '+0')", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Juventus F1", marketType: "SPREAD", participant: "Juventus", line: "0" }),
+    "Juventus 0",
+  );
+});
+
+test("SPREAD: multi-word participant name is preserved verbatim in the display label", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "X", marketType: "SPREAD", participant: "Manchester United", line: "-2" }),
+    "Manchester United -2",
+  );
+});
+
+test("SPREAD: raw Latin shorthand ('Arsenal F1') never leaks into the final label when canonical participant/line are present — the display comes entirely from the canonical fields, not from parsing `selection`", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Arsenal F1", marketType: "SPREAD", participant: "Arsenal", line: "-1.5" }),
+    "Arsenal -1.5",
+  );
+});
+
+test("SPREAD: raw Cyrillic shorthand ('Арсенал Ф1(-1.5)') never leaks into the final label either — same canonical-fields-first rule, independent of input language", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Арсенал Ф1(-1.5)", marketType: "SPREAD", participant: "Arsenal", line: "-1.5" }),
+    "Arsenal -1.5",
+  );
+});
+
+test("SPREAD: input language does not affect the rendered label — RU/UA/EN raw text with the identical canonical participant+line all render identically", () => {
+  const canonical = { marketType: "SPREAD", participant: "Arsenal", line: "-1.5" } as const;
+  assert.equal(normalizeSelectionToEnglish({ selection: "Арсенал Ф1(-1.5)", ...canonical }), "Arsenal -1.5");
+  assert.equal(normalizeSelectionToEnglish({ selection: "Арсенал F1(-1.5)", ...canonical }), "Arsenal -1.5");
+  assert.equal(normalizeSelectionToEnglish({ selection: "Arsenal F1(-1.5)", ...canonical }), "Arsenal -1.5");
+  assert.equal(normalizeSelectionToEnglish({ selection: "Arsenal -1.5", ...canonical }), "Arsenal -1.5");
+});
+
+test("SPREAD branch does not fire when marketType is missing — falls through to the existing raw-text path unchanged (regression: 'Handicap -1.5 (Team A)' with no marketType stays untouched)", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Handicap -1.5 (Team A)", participant: "Team A", line: "-1.5" }),
+    "Handicap -1.5 (Team A)",
+  );
+});
+
+test("SPREAD branch does not fire when participant is missing — falls through to the safe raw-text fallback rather than fabricating a label", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Arsenal F1", marketType: "SPREAD", line: "-1.5" }),
+    "Arsenal F1",
+  );
+});
+
+test("SPREAD branch does not fire when line is missing — falls through to the safe raw-text fallback rather than fabricating a label", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Arsenal F1", marketType: "SPREAD", participant: "Arsenal" }),
+    "Arsenal F1",
+  );
+});
+
+test("SPREAD branch does not fire for a malformed (non-decimal) line — falls through rather than rendering a garbled label", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Arsenal F1", marketType: "SPREAD", participant: "Arsenal", line: "not-a-number" }),
+    "Arsenal F1",
+  );
+});
+
+test("SPREAD branch never fires for MONEYLINE — 'Arsenal Win' stays unchanged even if a participant happens to be passed alongside it", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Arsenal Win", marketType: "MONEYLINE_2WAY", participant: "Arsenal", line: null }),
+    "Arsenal Win",
+  );
+});
+
+test("SPREAD branch never fires for TOTALS — 'Over 2.5' with a marketType of TOTALS still renders via the existing Over/Under path, not the SPREAD path", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Over 2.5", marketType: "TOTALS", participant: null, line: "2.5" }),
+    "Over 2.5 Goals",
+  );
+});
+
+test("existing call sites (no marketType/participant/line fields at all) are completely unaffected — every pre-H2 test above this section still exercises the exact same code path", () => {
+  assert.equal(normalizeSelectionToEnglish({ selection: "П1" }), "Home Win");
+  assert.equal(normalizeSelectionToEnglish({ selection: "ТБ 2.5" }), "Over 2.5 Goals");
+});

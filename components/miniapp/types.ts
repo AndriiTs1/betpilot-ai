@@ -25,6 +25,16 @@ export interface MiniAppBetSelection {
   awayTeamName?: string | null;
   competitionName?: string | null;
   eventStartTime?: string | null;
+  // Handicap Stage H2 — canonical SPREAD display data. Already present on
+  // every real API response (serializeBet spreads the raw BetSelection row,
+  // which includes these columns) — declared here, same as the fields
+  // above, so BetSelectionsList.tsx can pass them to
+  // normalizeSelectionToEnglish. Optional so mergeConfirmedBet.ts's
+  // optimistic pre-reconciliation objects (which don't set these) stay
+  // valid without change.
+  canonicalMarketType?: string | null;
+  canonicalParticipant?: string | null;
+  line?: string | null;
 }
 
 export interface RecentBet {

@@ -216,6 +216,14 @@ export async function buildSportmonksFootballPreview(
     // slice only ever handles MONEYLINE match-result selections; Totals
     // is not part of this pipeline.
     line: null,
+    // Handicap Stage H2 — this Sportmonks football vertical only ever
+    // handles MONEYLINE match-result selections (see this file's own
+    // comment on `line` above), so there is no canonical participant/line
+    // pair to display a SPREAD label from; null is exactly correct, not a
+    // placeholder, and never activates normalizeSelectionToEnglish's new
+    // SPREAD branch (gated on marketType === "SPREAD").
+    marketType: null,
+    participant: null,
     submittedOdds: effectiveSubmittedOdds,
     currentOdds,
     oddsStatus: "VERIFIED",

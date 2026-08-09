@@ -159,6 +159,8 @@ function samplePreview(oddsStatus: "VERIFIED" | "ODDS_CHANGED" | "NOT_FOUND" | "
         market: null,
         selection: "Team A Win",
         line: null,
+        marketType: null,
+        participant: null,
         submittedOdds: 1.9,
         currentOdds: 1.9,
         oddsStatus,

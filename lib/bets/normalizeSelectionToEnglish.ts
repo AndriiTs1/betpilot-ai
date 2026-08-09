@@ -30,16 +30,40 @@
 // it, so normalization happens once per flow, not once per render. Never
 // inserted into lib/odds/oddsVerifier.ts or lib/bets/buildBetSlipPreview.ts,
 // which must keep matching against the player's originally submitted text.
+// (The SPREAD branch below reads buildBetSlipPreview.ts's already-computed
+// canonical participant/line as *input*, purely for display — it never
+// changes what gets verified or matched.)
 // Calling this on an already-normalized value is still safe (every
 // canonical output is also a recognized input) — a couple of call sites
 // unavoidably do this across separate requests (see mapBetForDisplay.ts's
 // and BetSelectionsList.tsx's own comments), which is harmless by design.
+//
+// Handicap Stage H2 — SPREAD is the one market this formatter renders from
+// canonical fields instead of pattern-matching `selection` text, because
+// there is no fixed literal phrasing to match against: the raw AI-extracted
+// text for a spread (e.g. "Arsenal F1") isn't a known market phrasing, it's
+// shorthand for a specific participant+line pair already computed upstream
+// (lib/odds/domain.ts's CanonicalSelection). When marketType/participant/
+// line are all present and well-formed, they take priority over `selection`
+// entirely, per product rule: "do not reconstruct the display from raw AI
+// text when canonical fields exist." Every existing call site omits these
+// fields today, so this branch is inert for them — a pure addition.
+
+import { isDecimalString } from "@/lib/odds/domain";
 
 export interface NormalizeSelectionInput {
   selection: string;
   sport?: string | null;
   event?: string | null;
   market?: string | null;
+  // Canonical SPREAD display data (Handicap Stage H2) — see this file's
+  // header comment. Only marketType === "SPREAD" with a non-empty
+  // participant and a well-formed canonical line string (lib/odds/domain.ts's
+  // isDecimalString — e.g. "1.5", "-1.5", "0") triggers the SPREAD branch;
+  // anything else falls through to the raw-text matching below unchanged.
+  marketType?: string | null;
+  participant?: string | null;
+  line?: string | null;
 }
 
 function clean(text: string): string {
@@ -116,9 +140,35 @@ function isFootball(sport?: string | null): boolean {
   return s === "football" || s === "soccer" || s === "футбол";
 }
 
+// String-only sign formatting for a canonical line — no floating-point
+// parsing, matching lib/odds/domain.ts's own "canonical decimal string"
+// convention (unsigned means positive, "-" prefix means negative). A
+// canonical line is never given an explicit "+" (normalizeLineString strips
+// it), so a value that isn't already negative or zero always needs one
+// added for display. Zero magnitude ("0", "0.0", ...) intentionally shows
+// no sign at all, matching existing product convention for a pick'em line.
+const ZERO_LINE_PATTERN = /^0(\.0+)?$/;
+
+function formatSignedLine(line: string): string {
+  if (line.startsWith("-") || ZERO_LINE_PATTERN.test(line)) return line;
+  return `+${line}`;
+}
+
 export function normalizeSelectionToEnglish(input: NormalizeSelectionInput): string {
   const original = input.selection;
   if (typeof original !== "string") return original;
+
+  // Handicap Stage H2 — canonical SPREAD display takes priority over every
+  // raw-text pattern below (see this file's header/interface comments).
+  if (
+    input.marketType === "SPREAD" &&
+    typeof input.participant === "string" &&
+    input.participant.trim().length > 0 &&
+    typeof input.line === "string" &&
+    isDecimalString(input.line)
+  ) {
+    return `${clean(input.participant)} ${formatSignedLine(input.line)}`;
+  }
 
   const text = clean(original);
   if (text.length === 0) return original;

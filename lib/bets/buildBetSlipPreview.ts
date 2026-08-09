@@ -8,7 +8,7 @@ import type { verifyOdds } from "@/lib/odds/oddsVerifier";
 import { TheOddsApiProvider } from "@/lib/odds/theOddsApiProvider";
 import { OddsVerificationService } from "@/lib/odds/oddsVerificationService";
 import type { VerifySelectionRequest } from "@/lib/odds/oddsProvider";
-import type { CanonicalSelection } from "@/lib/odds/domain";
+import type { CanonicalSelection, MarketType } from "@/lib/odds/domain";
 import {
   legacySelectionToCanonicalRequest,
   verificationResultToLegacyOddsCheck,
@@ -105,6 +105,15 @@ export interface BetSlipPreviewSelection {
   // regardless of whether verification succeeded. null for MONEYLINE/DRAW
   // and for a Totals selection that stated no line at all.
   line: string | null;
+  // Handicap Stage H2 — the same canonical request's marketType/participant
+  // (requests[index].selection.marketType / .participant.name), sourced
+  // identically to `line` above. Display-only: lets a formatter render a
+  // SPREAD selection from its canonical participant+line (e.g. "Arsenal
+  // -1.5") instead of the raw AI text in `selection` (e.g. "Arsenal F1").
+  // null for any market that has no participant (e.g. MONEYLINE/TOTALS) or
+  // when verification never resolved one.
+  marketType: MarketType | null;
+  participant: string | null;
   submittedOdds: number | null;
   currentOdds: number | null;
   oddsStatus: BetSelectionOddsStatus;
@@ -358,6 +367,8 @@ export async function buildBetSlipPreview(
       market: selection.market,
       selection: selection.selection,
       line: requests[index]?.selection.line ?? null,
+      marketType: requests[index]?.selection.marketType ?? null,
+      participant: requests[index]?.selection.participant?.name ?? null,
       submittedOdds: effectiveSubmittedOdds,
       currentOdds: oddsCheck?.sourceOdds ?? null,
       oddsStatus: mapOddsCheckToSelectionStatus(oddsCheck),
