@@ -7,6 +7,7 @@ import {
   type RawBetSelectionFields,
   type RawBetSlipFields,
   type NumericRoleObservation,
+  type MarketIntentObservation,
 } from "./betDraftMapper";
 
 function football(overrides: Partial<RawBetSelectionFields> = {}): RawBetSelectionFields {
@@ -457,4 +458,314 @@ test("BA-2B Step 3: no console output of any kind (never logs the player's origi
   }
 
   assert.equal(calls.length, 0, "mapRawBetSlipToParsedBetSlip must never log anything, especially not the player's original message");
+});
+
+/* ============================================================================
+ * Stage BA-2D, Step 4 — market-intent observation (observation only).
+ *
+ * Same discipline as Step 3 above: every test captures observations via
+ * onMarketIntentObservation and separately asserts the RETURNED ParsedBetSlip
+ * — proving both that real verification runs, AND that its verdicts never
+ * influence the slip. No production caller (lib/ai/betParser.ts) supplies
+ * this callback yet — mirroring BA-2B Step 3's own precedent exactly, where
+ * wiring a real caller to invoke (and, for now, discard) the observation was
+ * deferred to whichever later step adds real enforcement.
+ * ============================================================================ */
+
+function observeMarket(raw: RawBetSlipFields, originalText: string, sourceType: "CHAT" | "OCR" = "CHAT") {
+  let captured: readonly MarketIntentObservation[] | null = null;
+  const slip = mapRawBetSlipToParsedBetSlip(raw, {
+    originalText,
+    sourceType,
+    onMarketIntentObservation: (observations) => {
+      captured = observations;
+    },
+  });
+  if (captured === null) throw new Error("onMarketIntentObservation was never called");
+  return { slip, observations: captured as readonly MarketIntentObservation[] };
+}
+
+/* -------------------------------------------------------------------------- */
+/* 1-2. Critical regression: 'Арсенал Ф1(-1.5) ставка 10'                    */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 4: CRITICAL — AI drops the spread shape entirely ('Arsenal' alone) against 'Арсенал Ф1(-1.5) ставка 10' -> CONTRADICTED, and the returned slip is untouched", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Арсенал", selection: "Arsenal", odds: null })] };
+  const { slip, observations } = observeMarket(raw, "Арсенал Ф1(-1.5) ставка 10");
+
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].claim.marketType, "MONEYLINE_2WAY");
+  assert.equal(observations[0].claim.selectionType, "PARTICIPANT");
+  assert.equal(observations[0].verification.verdict, "CONTRADICTED");
+  assert.equal(observations[0].verification.conflictingEvidence[0]?.classification.marketType, "SPREAD");
+
+  // CRITICAL: despite the CONTRADICTED market verdict, the slip is still
+  // built exactly as the AI claimed — no rejection, no correction.
+  assert.equal(slip.selections[0].selection, "Arsenal");
+  assert.equal(slip.stake, 10);
+});
+
+test("BA-2D Step 4: correct AI output ('Арсенал Ф1(-1.5)') against the same original text -> CORROBORATED", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Арсенал", selection: "Арсенал Ф1(-1.5)", odds: null })] };
+  const { slip, observations } = observeMarket(raw, "Арсенал Ф1(-1.5) ставка 10");
+
+  assert.equal(observations[0].claim.marketType, "SPREAD");
+  assert.equal(observations[0].verification.verdict, "CORROBORATED");
+  assert.equal(slip.selections[0].selection, "Арсенал Ф1(-1.5)");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 3-4. TOTALS                                                                */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 4: AI drops the totals shape ('Arsenal' alone) against 'Арсенал ТБ 2.5 ставка 10' -> CONTRADICTED", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Арсенал", selection: "Arsenal", odds: null })] };
+  const { observations } = observeMarket(raw, "Арсенал ТБ 2.5 ставка 10");
+
+  assert.equal(observations[0].claim.marketType, "MONEYLINE_2WAY");
+  assert.equal(observations[0].verification.verdict, "CONTRADICTED");
+  assert.equal(observations[0].verification.conflictingEvidence[0]?.classification.marketType, "TOTALS");
+});
+
+test("BA-2D Step 4: correct TOTALS AI output ('Арсенал ТБ 2.5') -> CORROBORATED", () => {
+  // Unlike SPREAD_TOKEN_PARTICIPANT_PATTERN (which has its own built-in lazy
+  // prefix match), shorthandClassifier.ts's TOTALS pattern requires the
+  // string to literally START with the token — stripping a leading "Арсенал
+  // " prefix only happens via classifyBettingSelectionText's OWN
+  // knownParticipantNames loop, which is only populated when the event
+  // actually splits into two participants. A single-team event (no "vs")
+  // would leave knownParticipantNames empty and fall through to the
+  // generic PARTICIPANT fallback instead — a real, pre-existing classifier
+  // limitation (not something BA-2D introduces or should paper over), so
+  // this test uses a realistic two-team event, exactly like production.
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Арсенал vs Ковентри", selection: "Арсенал ТБ 2.5", odds: null })] };
+  const { observations } = observeMarket(raw, "Арсенал ТБ 2.5 ставка 10");
+
+  assert.equal(observations[0].claim.marketType, "TOTALS");
+  assert.equal(observations[0].claim.selectionType, "OVER");
+  assert.equal(observations[0].verification.verdict, "CORROBORATED");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 5-8. DRAW — RU / UA / EN, and a wrong winner-participant claim             */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 4: AI claims a participant winner ('Arsenal') against 'ничья ставка 10' -> CONTRADICTED", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Арсенал", selection: "Arsenal", odds: null })] };
+  const { observations } = observeMarket(raw, "ничья ставка 10");
+
+  assert.equal(observations[0].claim.marketType, "MONEYLINE_2WAY");
+  assert.equal(observations[0].verification.verdict, "CONTRADICTED");
+  assert.equal(observations[0].verification.conflictingEvidence[0]?.classification.selectionType, "DRAW");
+});
+
+test("BA-2D Step 4: correct DRAW claim (RU 'ничья') -> CORROBORATED", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Арсенал vs Ковентри", selection: "ничья", odds: null })] };
+  const { observations } = observeMarket(raw, "ничья ставка 10");
+
+  assert.equal(observations[0].claim.marketType, "MONEYLINE_3WAY");
+  assert.equal(observations[0].claim.selectionType, "DRAW");
+  assert.equal(observations[0].verification.verdict, "CORROBORATED");
+});
+
+test("BA-2D Step 4: correct DRAW claim (UA 'нічия') -> CORROBORATED", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Арсенал vs Ковентри", selection: "нічия", odds: null })] };
+  const { observations } = observeMarket(raw, "нічия ставка 10");
+
+  assert.equal(observations[0].claim.selectionType, "DRAW");
+  assert.equal(observations[0].verification.verdict, "CORROBORATED");
+});
+
+test("BA-2D Step 4: correct DRAW claim (EN 'draw') -> CORROBORATED", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Arsenal vs Coventry", selection: "draw", odds: null })] };
+  const { observations } = observeMarket(raw, "draw stake 10");
+
+  assert.equal(observations[0].claim.selectionType, "DRAW");
+  assert.equal(observations[0].verification.verdict, "CORROBORATED");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 9. UNVERIFIED                                                              */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 4: 'Арсенал 10' has no strong market intent evidence -> UNVERIFIED, never treated as a contradiction", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Арсенал", selection: "Arsenal", odds: null })] };
+  const { slip, observations } = observeMarket(raw, "Арсенал 10");
+
+  assert.equal(observations[0].verification.verdict, "UNVERIFIED");
+  assert.equal(observations[0].verification.supportingEvidence.length, 0);
+  assert.equal(observations[0].verification.conflictingEvidence.length, 0);
+  assert.equal(slip.stake, 10);
+});
+
+/* -------------------------------------------------------------------------- */
+/* 10. AMBIGUOUS                                                              */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 4: 'Арсенал ТБ 2.5 ТМ 3.5 ставка 10' carries two distinct strong market intents -> AMBIGUOUS, never picks one, never rejects", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Арсенал", selection: "Arsenal", odds: null })] };
+  const { slip, observations } = observeMarket(raw, "Арсенал ТБ 2.5 ТМ 3.5 ставка 10");
+
+  assert.equal(observations[0].verification.verdict, "AMBIGUOUS");
+  assert.equal(slip.stake, 10, "AMBIGUOUS never rejects or alters the slip in Step 4");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 11. Participant transliteration never causes a false CONTRADICTED         */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 4: AI's own English selection text ('Arsenal') against Cyrillic evidence ('Арсенал победа') -> CORROBORATED — participant script/transliteration is never compared", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Арсенал", selection: "Arsenal", odds: null })] };
+  const { observations } = observeMarket(raw, "Арсенал победа ставка 10");
+
+  assert.equal(observations[0].claim.marketType, "MONEYLINE_2WAY");
+  assert.equal(observations[0].verification.verdict, "CORROBORATED");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 12-13. Numeric line mismatch never affects the market verdict — and       */
+/* BA-2B's own numeric observation keeps running, completely independently.  */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 4 + BA-2B Step 3 together: correct SPREAD market claim but a WRONG stake — market CORROBORATED, numeric STAKE CONTRADICTED, neither substitutes for the other", () => {
+  let marketObservations: readonly MarketIntentObservation[] | null = null;
+  let numericObservations: readonly NumericRoleObservation[] | null = null;
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 999, // contradicts the evidence's "ставка 10"
+    selections: [football({ event: "Арсенал", selection: "Арсенал Ф1(-1.5)", line: "-1.5", odds: null })],
+  };
+  const slip = mapRawBetSlipToParsedBetSlip(raw, {
+    originalText: "Арсенал Ф1(-1.5) ставка 10",
+    sourceType: "CHAT",
+    onMarketIntentObservation: (observations) => {
+      marketObservations = observations;
+    },
+    onNumericRoleObservation: (observations) => {
+      numericObservations = observations;
+    },
+  });
+  if (marketObservations === null || numericObservations === null) throw new Error("both callbacks must fire");
+
+  const market = marketObservations as readonly MarketIntentObservation[];
+  const numeric = numericObservations as readonly NumericRoleObservation[];
+
+  assert.equal(market[0].verification.verdict, "CORROBORATED", "market intent must corroborate SPREAD regardless of the numeric mismatch");
+  const stakeObservation = numeric.find((o) => o.role === "STAKE");
+  assert.equal(stakeObservation?.verification.verdict, "CONTRADICTED", "BA-2B's own numeric verifier must independently catch the wrong stake");
+  // Neither guard corrects or rejects anything in Step 4 — the wrong stake
+  // still flows straight through.
+  assert.equal(slip.stake, 999);
+});
+
+/* -------------------------------------------------------------------------- */
+/* 14. EXPRESS — market-intent observation explicitly skipped                */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 4: EXPRESS produces NO market-intent observations at all (no leg attribution invented) — BA-2B's own EXPRESS stake observation is completely unaffected", () => {
+  let marketObservations: readonly MarketIntentObservation[] | null = null;
+  let numericObservations: readonly NumericRoleObservation[] | null = null;
+  const raw: RawBetSlipFields = {
+    type: "EXPRESS",
+    stake: 20,
+    selections: [
+      football({ event: "Arsenal", selection: "Arsenal Ф1(-1.5)", odds: null }),
+      football({ event: "Real Madrid", selection: "Over", market: "totals", line: "3.5", odds: null }),
+    ],
+  };
+  mapRawBetSlipToParsedBetSlip(raw, {
+    originalText: "Арсенал Ф1(-1.5) + Реал ТБ 3.5, экспресс 20",
+    sourceType: "CHAT",
+    onMarketIntentObservation: (observations) => {
+      marketObservations = observations;
+    },
+    onNumericRoleObservation: (observations) => {
+      numericObservations = observations;
+    },
+  });
+  if (marketObservations === null || numericObservations === null) throw new Error("both callbacks must fire");
+
+  assert.equal((marketObservations as readonly MarketIntentObservation[]).length, 0, "EXPRESS must never produce a market-intent observation — no safe per-leg attribution exists yet");
+  const stakeObservation = (numericObservations as readonly NumericRoleObservation[]).find((o) => o.role === "STAKE");
+  assert.equal(stakeObservation?.verification.verdict, "CORROBORATED", "BA-2B's own EXPRESS global-stake observation is unaffected by BA-2D's EXPRESS skip");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 15. CHAT/OCR parity — same shared mapper path                             */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 4: OCR reaches the exact same market-intent observation logic as CHAT — same raw input, same verdict, same slip", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Арсенал", selection: "Arsenal", odds: null })] };
+  const text = "Арсенал Ф1(-1.5) ставка 10";
+
+  const chatResult = observeMarket(raw, text, "CHAT");
+  const ocrResult = observeMarket(raw, text, "OCR");
+
+  assert.deepEqual(chatResult.slip, ocrResult.slip);
+  assert.equal(chatResult.observations[0].verification.verdict, "CONTRADICTED");
+  assert.equal(chatResult.observations[0].verification.verdict, ocrResult.observations[0].verification.verdict);
+});
+
+/* -------------------------------------------------------------------------- */
+/* 16. No mutation                                                            */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 4: no AI-claimed field is ever mutated or corrected regardless of the market verdict, and the raw input object is never mutated", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Арсенал", selection: "Arsenal", odds: null })] };
+  const rawSnapshot = JSON.parse(JSON.stringify(raw));
+  const { slip, observations } = observeMarket(raw, "Арсенал Ф1(-1.5) ставка 10");
+
+  assert.deepEqual(raw, rawSnapshot);
+  assert.equal(observations[0].verification.verdict, "CONTRADICTED");
+  // The claimed (contradicted) selection still flows through verbatim.
+  assert.equal(slip.selections[0].selection, "Arsenal");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 17. No console output                                                     */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 4: no console output of any kind (never logs the player's original message)", () => {
+  const originalLog = console.log;
+  const originalWarn = console.warn;
+  const originalError = console.error;
+  const calls: unknown[][] = [];
+  console.log = (...args: unknown[]) => calls.push(args);
+  console.warn = (...args: unknown[]) => calls.push(args);
+  console.error = (...args: unknown[]) => calls.push(args);
+
+  try {
+    const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Арсенал", selection: "Arsenal", odds: null })] };
+    observeMarket(raw, "Арсенал Ф1(-1.5) ставка 10 — секретный текст игрока");
+  } finally {
+    console.log = originalLog;
+    console.warn = originalWarn;
+    console.error = originalError;
+  }
+
+  assert.equal(calls.length, 0, "mapRawBetSlipToParsedBetSlip must never log anything, especially not the player's original message");
+});
+
+/* -------------------------------------------------------------------------- */
+/* 18. Production default call (no callback) is byte-for-byte unchanged      */
+/* -------------------------------------------------------------------------- */
+
+test("BA-2D Step 4: SINGLE mapping unchanged when onMarketIntentObservation is omitted (the real production call shape today)", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Арсенал", selection: "Arsenal", odds: null })] };
+  const withoutCallback = mapRawBetSlipToParsedBetSlip(raw, { originalText: "Арсенал Ф1(-1.5) ставка 10", sourceType: "CHAT" });
+  const { slip: withCallback } = observeMarket(raw, "Арсенал Ф1(-1.5) ставка 10");
+
+  assert.deepEqual(withoutCallback, withCallback);
+});
+
+test("BA-2D Step 4: EXPRESS mapping unchanged when onMarketIntentObservation is omitted", () => {
+  const raw: RawBetSlipFields = {
+    type: "EXPRESS",
+    stake: 20,
+    selections: [football({ event: "Arsenal", selection: "Arsenal Ф1(-1.5)", odds: null }), football({ event: "Real Madrid", selection: "Win", odds: 1.8 })],
+  };
+  const withoutCallback = mapRawBetSlipToParsedBetSlip(raw, { originalText: "Арсенал Ф1(-1.5) + Реал победа, экспресс 20", sourceType: "CHAT" });
+  const { slip: withCallback } = observeMarket(raw, "Арсенал Ф1(-1.5) + Реал победа, экспресс 20");
+
+  assert.deepEqual(withoutCallback, withCallback);
 });

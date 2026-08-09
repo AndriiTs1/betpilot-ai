@@ -36,8 +36,11 @@ import {
 import { universalBetDraftToParsedBetSlip } from "@/lib/bets/draft/legacyAdapter";
 import type { ParsedBetSlip } from "@/lib/bets/betSlip";
 import type { MarketType, Period, Sport } from "@/lib/odds/domain";
+import { classifyBettingSelectionText } from "@/lib/odds/shorthandClassifier";
 import { extractNumericRoleEvidence } from "@/lib/ai/numericRoleEvidence";
 import { verifyNumericRoleClaim, type NumericRoleVerification } from "@/lib/ai/numericRoleVerifier";
+import { extractMarketIntentEvidence } from "@/lib/ai/marketIntentEvidence";
+import { verifyMarketIntentClaim, type MarketIntentClaim, type MarketIntentVerification } from "@/lib/ai/marketIntentVerifier";
 
 /* -------------------------------------------------------------------------- */
 /* Raw extraction shapes                                                      */
@@ -77,6 +80,16 @@ export interface BetDraftMappingContext {
   // stage) to inspect what the verifier concluded, without widening this
   // function's return type or logging the player's original message.
   readonly onNumericRoleObservation?: (observations: readonly NumericRoleObservation[]) => void;
+  // Stage BA-2D, Step 4 — observation only, same discipline as
+  // onNumericRoleObservation above: when provided, receives the market-
+  // intent verification computed for this slip (see
+  // computeMarketIntentObservations below). NEVER influences this
+  // function's return value in any way. Omitted by every current
+  // production call site (lib/ai/betParser.ts never sets it), mirroring
+  // BA-2B Step 3's own precedent exactly — wiring a real production
+  // caller to actually invoke (and, for now, discard) this belongs to
+  // whichever future step adds real enforcement, not this one.
+  readonly onMarketIntentObservation?: (observations: readonly MarketIntentObservation[]) => void;
 }
 
 export type BetDraftMapperErrorCode = "INVALID_NUMERIC_VALUE";
@@ -249,6 +262,58 @@ function computeNumericRoleObservations(raw: RawBetSlipFields, originalText: str
 }
 
 /* -------------------------------------------------------------------------- */
+/* Stage BA-2D, Step 4 — market-intent observation (observation only)        */
+/* -------------------------------------------------------------------------- */
+//
+// Compares what the AI/canonical output WOULD RESOLVE TO as a market/
+// selection (via classifyBettingSelectionText — the exact same deterministic
+// function, called on the exact same raw.selection text and split-participant
+// names, that lib/odds/legacyOddsBridge.ts's legacySelectionToCanonicalRequest
+// independently calls on this identical text later — see the BA-2D Step 1
+// architecture audit's own proof that these two calls are provably
+// equivalent) against lib/ai/marketIntentEvidence.ts's deterministic read of
+// the player's own original message, via lib/ai/marketIntentVerifier.ts.
+//
+// The claim is deliberately NOT derived from originalText itself — that
+// would compare originalText against itself and always CORROBORATE
+// trivially. It reflects what the AI actually wrote (raw.selection/
+// raw.event), which is the value that would actually reach odds
+// verification if nothing intervened.
+//
+// Reported ONLY through BetDraftMappingContext.onMarketIntentObservation, an
+// optional callback no current production caller supplies (same as
+// onNumericRoleObservation). Never appears in this function's return value,
+// is never logged, and is never persisted.
+
+export interface MarketIntentObservation {
+  readonly claim: MarketIntentClaim;
+  readonly verification: MarketIntentVerification;
+}
+
+// SINGLE only — mirrors computeNumericRoleObservations' own LINE/ODDS
+// EXPRESS gate above for the same reason: a claim is only unambiguous when
+// there is exactly one selection to attribute it to. An EXPRESS slip's
+// originalText can contain several legs' worth of market-shape tokens with
+// no reliable way to say which belongs to which leg (see BA-2D Step 1
+// audit's own EXPRESS section) — attempting a claim anyway (e.g. against
+// raw.selections[0] alone) would silently overclaim a per-leg confidence
+// this code does not have, so EXPRESS produces no observations at all
+// rather than one unreliable one.
+function computeMarketIntentObservations(raw: RawBetSlipFields, originalText: string): MarketIntentObservation[] {
+  if (raw.type !== "SINGLE") return [];
+
+  const selection = raw.selections[0];
+  const participants = splitDraftEventParticipants(selection.event).map((participant) => participant.rawName);
+  const classified = classifyBettingSelectionText(selection.selection, participants);
+  const claim: MarketIntentClaim = { marketType: classified.marketType, selectionType: classified.selectionType };
+
+  const evidence = extractMarketIntentEvidence(originalText);
+  const verification = verifyMarketIntentClaim(claim, evidence);
+
+  return [{ claim, verification }];
+}
+
+/* -------------------------------------------------------------------------- */
 /* Top-level slip mapping                                                     */
 /* -------------------------------------------------------------------------- */
 
@@ -282,6 +347,10 @@ export function mapRawBetSlipToParsedBetSlip(raw: RawBetSlipFields, context: Bet
   // documented as never-throwing) and never touches `draft` or the value
   // returned below in any way.
   context.onNumericRoleObservation?.(computeNumericRoleObservations(raw, context.originalText));
+
+  // Stage BA-2D, Step 4 — same "always computed when a caller opts in,
+  // never otherwise" discipline as the numeric-role observation above.
+  context.onMarketIntentObservation?.(computeMarketIntentObservations(raw, context.originalText));
 
   return universalBetDraftToParsedBetSlip(draft);
 }
