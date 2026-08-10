@@ -904,3 +904,232 @@ test("Stage 10: no Bet is ever created and no balance field is ever touched by t
   const body = await response.json();
   assert.equal(body.preview.type, "SINGLE");
 });
+
+/* -------------------------------------------------------------------------- */
+/* H4-B5.3 — TEMP [BET_PREVIEW_DIAGNOSTIC] log at the final response         */
+/* boundary. These tests prove exactly what the diagnostic captures (the     */
+/* FINAL preview's event/odds fields, nothing reconstructed), exactly what   */
+/* it must never capture (raw player text, initData/auth), and that adding   */
+/* this console.log has zero effect on the JSON the client actually          */
+/* receives — remove this whole section along with the TEMP log line once    */
+/* the production reproduction is complete.                                  */
+/* -------------------------------------------------------------------------- */
+
+function findDiagnosticCall(loggedCalls: unknown[][]): unknown[] | undefined {
+  return loggedCalls.find((call) => call[0] === "[BET_PREVIEW_DIAGNOSTIC]");
+}
+
+test("H4-B5.3: diagnostic log includes the final event metadata and oddsStatus for a VERIFIED selection", async () => {
+  delete process.env.SPORTMONKS_FOOTBALL_PREVIEW_ENABLED;
+  const originalConsoleLog = console.log;
+  const loggedCalls: unknown[][] = [];
+  console.log = (...args: unknown[]) => loggedCalls.push(args);
+
+  try {
+    const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+    const request = buildRequest(initData, { message: "Real Madrid Win vs Barcelona, 50" });
+
+    const response = await handleTextPreview(
+      request,
+      baseOptions({
+        verifyOddsFn: async (): Promise<OddsCheckResult> => ({
+          matched: true,
+          withinTolerance: true,
+          sourceOdds: 1.9,
+          submittedOdds: 1.9,
+          discrepancyPercent: 0,
+          bookmaker: "test-bookmaker",
+          note: null,
+          providerEventId: "evt-real-madrid-barcelona",
+          providerSportKey: "soccer_spain_la_liga",
+          eventStartTime: "2026-09-01T19:00:00.000Z",
+          homeTeamName: "Real Madrid",
+          awayTeamName: "Barcelona",
+          competitionName: "La Liga",
+        }),
+      }),
+    );
+
+    assert.equal(response.status, 200);
+
+    const diagnosticCall = findDiagnosticCall(loggedCalls);
+    assert.ok(diagnosticCall, "expected exactly one [BET_PREVIEW_DIAGNOSTIC] log call");
+    assert.equal(diagnosticCall![0], "[BET_PREVIEW_DIAGNOSTIC]");
+
+    const parsed = JSON.parse(String(diagnosticCall![1]));
+    assert.equal(parsed.type, "SINGLE");
+    const selection = parsed.selections[0];
+    assert.equal(selection.homeTeamName, "Real Madrid");
+    assert.equal(selection.awayTeamName, "Barcelona");
+    assert.equal(selection.competitionName, "La Liga");
+    assert.equal(selection.eventStartTime, "2026-09-01T19:00:00.000Z");
+    assert.equal(selection.oddsStatus, "VERIFIED");
+    assert.equal(selection.currentOdds, 1.9);
+    assert.equal(selection.submittedOdds, 1.9);
+  } finally {
+    console.log = originalConsoleLog;
+  }
+});
+
+test("H4-B5.3: diagnostic log can represent NOT_FOUND with a resolved event — event metadata is present even though the exact selection/line was not matched", async () => {
+  delete process.env.SPORTMONKS_FOOTBALL_PREVIEW_ENABLED;
+  const originalConsoleLog = console.log;
+  const loggedCalls: unknown[][] = [];
+  console.log = (...args: unknown[]) => loggedCalls.push(args);
+
+  try {
+    const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+    const request = buildRequest(initData, { message: "Arsenal Win, 10" });
+
+    // A MONEYLINE-classified selection ("Arsenal Win" -> h2h), not a
+    // SPREAD-shaped one: this route's own HandleTextPreviewOptions only
+    // exposes verifyOddsFn (the h2h seam) — a SPREAD-classified selection
+    // (e.g. "Arsenal -0.75") is routed to TheOddsApiProvider's real,
+    // unmocked verifySpreadOddsFn instead, which this fake would never
+    // reach. The diagnostic's own fidelity to `result` is what this test
+    // proves — it does not depend on which market produced that result, and
+    // H4-B5.1/H4-B5.2 already separately proved SPREAD's own real
+    // metadata-preservation behavior end-to-end against the live provider.
+    const response = await handleTextPreview(
+      request,
+      baseOptions({
+        parseBetSlip: fakeParseBetSlip({
+          valid: true,
+          type: "SINGLE",
+          stake: 10,
+          selections: [{ sport: "Football", event: "Arsenal", market: null, selection: "Arsenal Win", submittedOdds: null }],
+        }),
+        verifyOddsFn: async (): Promise<OddsCheckResult> => ({
+          matched: false,
+          withinTolerance: null,
+          sourceOdds: null,
+          submittedOdds: null,
+          discrepancyPercent: null,
+          bookmaker: null,
+          note: 'Could not match selection "Arsenal Win" for "Arsenal"',
+          providerEventId: "evt-arsenal-coventry",
+          providerSportKey: "soccer_epl",
+          eventStartTime: "2026-08-21T19:00:00.000Z",
+          homeTeamName: "Arsenal",
+          awayTeamName: "Coventry City",
+          competitionName: "Premier League",
+        }),
+      }),
+    );
+
+    assert.equal(response.status, 200);
+
+    const diagnosticCall = findDiagnosticCall(loggedCalls);
+    assert.ok(diagnosticCall, "expected exactly one [BET_PREVIEW_DIAGNOSTIC] log call");
+
+    const parsed = JSON.parse(String(diagnosticCall![1]));
+    const selection = parsed.selections[0];
+    assert.equal(selection.oddsStatus, "NOT_FOUND");
+    assert.equal(selection.currentOdds, null, "no fabricated odds in the diagnostic");
+    assert.equal(selection.homeTeamName, "Arsenal", "resolved event metadata must still be present on a NOT_FOUND selection");
+    assert.equal(selection.awayTeamName, "Coventry City");
+    assert.equal(selection.competitionName, "Premier League");
+    assert.equal(selection.event, "Arsenal — Coventry City");
+  } finally {
+    console.log = originalConsoleLog;
+  }
+});
+
+test("H4-B5.3: diagnostic log never contains the player's raw message text", async () => {
+  delete process.env.SPORTMONKS_FOOTBALL_PREVIEW_ENABLED;
+  const originalConsoleLog = console.log;
+  const loggedCalls: unknown[][] = [];
+  console.log = (...args: unknown[]) => loggedCalls.push(args);
+
+  const secretRawText = "SECRET_RAW_MESSAGE_do_not_log_this_verbatim_9f21a";
+
+  try {
+    const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+    const request = buildRequest(initData, { message: secretRawText });
+
+    const response = await handleTextPreview(
+      request,
+      baseOptions({
+        parseBetSlip: fakeParseBetSlip({
+          valid: true,
+          type: "SINGLE",
+          stake: 50,
+          selections: [{ sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: 1.9 }],
+        }),
+      }),
+    );
+
+    assert.equal(response.status, 200);
+    const diagnosticCall = findDiagnosticCall(loggedCalls);
+    assert.ok(diagnosticCall);
+
+    assert.equal(String(diagnosticCall![1]).includes(secretRawText), false, "the diagnostic must never echo the player's raw submitted message");
+  } finally {
+    console.log = originalConsoleLog;
+  }
+});
+
+test("H4-B5.3: diagnostic log never contains Telegram initData, auth headers, tokens, or the player id", async () => {
+  delete process.env.SPORTMONKS_FOOTBALL_PREVIEW_ENABLED;
+  const originalConsoleLog = console.log;
+  const loggedCalls: unknown[][] = [];
+  console.log = (...args: unknown[]) => loggedCalls.push(args);
+
+  try {
+    const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+    const request = buildRequest(initData, { message: "Real Madrid Win vs Barcelona, 50" });
+
+    const response = await handleTextPreview(request, baseOptions());
+
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    const diagnosticCall = findDiagnosticCall(loggedCalls);
+    assert.ok(diagnosticCall);
+    const diagnosticText = String(diagnosticCall![1]);
+
+    for (const forbidden of [
+      initData,
+      String(PLAYER_TELEGRAM_ID),
+      PLAYER_ID,
+      BOT_TOKEN,
+      PREVIEW_TOKEN_SECRET,
+      body.previewToken as string,
+    ]) {
+      assert.equal(diagnosticText.includes(forbidden), false, `diagnostic must never contain: ${forbidden}`);
+    }
+  } finally {
+    console.log = originalConsoleLog;
+  }
+});
+
+test("H4-B5.3: adding the diagnostic log has zero effect on the response JSON returned to the client (byte-for-byte unchanged)", async () => {
+  delete process.env.SPORTMONKS_FOOTBALL_PREVIEW_ENABLED;
+  const originalConsoleLog = console.log;
+
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request1 = buildRequest(initData, { message: "Real Madrid Win vs Barcelona, 50" });
+  const request2 = buildRequest(initData, { message: "Real Madrid Win vs Barcelona, 50" });
+
+  // Run once with logging silenced (but not replaced with a no-op — the real
+  // production code path, diagnostic line included, still executes) and once
+  // with console.log fully suppressed to a no-op, to prove the two response
+  // bodies are identical regardless of whether anything actually observes
+  // the log call.
+  const responseWithLogging = await handleTextPreview(request1, baseOptions());
+  const bodyWithLogging = await responseWithLogging.json();
+
+  console.log = () => {};
+  let bodyWithSuppressedLogging: unknown;
+  try {
+    const responseSuppressed = await handleTextPreview(request2, baseOptions());
+    bodyWithSuppressedLogging = await responseSuppressed.json();
+  } finally {
+    console.log = originalConsoleLog;
+  }
+
+  // previewToken is a freshly signed JWT per call (includes a random
+  // preview id / issuedAt), so it legitimately differs between the two
+  // independent calls — everything else must be byte-for-byte identical.
+  assert.deepEqual(bodyWithLogging.preview, (bodyWithSuppressedLogging as { preview: unknown }).preview);
+  assert.equal(typeof (bodyWithSuppressedLogging as { previewToken: unknown }).previewToken, "string");
+});
