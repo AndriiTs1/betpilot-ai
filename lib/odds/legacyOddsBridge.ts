@@ -104,6 +104,24 @@ export function legacyFootballLeagueFromSportString(sport: string): CanonicalLea
 // exclusively inside that file.
 const EVENT_SEPARATOR_REGEX = /\s+(?:vs\.?|v\.?|-|–|—)\s+/i;
 
+// H4-B5.4 — the two proven-unusable AI event values: blank/whitespace-only
+// (a value betParser.ts's `event: z.string().min(1)` schema does NOT
+// reject, since it validates the raw string's length, not whether it
+// survives a later .trim()), and the literal sentinel "<UNKNOWN>" the real
+// production Claude tool call was directly observed to emit (H4-B5.3's
+// production diagnostic) — a syntactically valid, non-empty string that
+// trivially satisfies minLength 1 with nothing left to catch it. This is
+// deliberately NOT an open-ended blocklist of every string a model might
+// ever hallucinate — only what has actually been observed in production, or
+// is trivially indistinguishable from "nothing was extracted."
+const UNUSABLE_EVENT_TEXTS = new Set(["<unknown>", "unknown"]);
+
+function isUsableEventText(rawEvent: string): boolean {
+  const trimmed = rawEvent.trim();
+  if (trimmed.length === 0) return false;
+  return !UNUSABLE_EVENT_TEXTS.has(trimmed.toLowerCase());
+}
+
 function legacyEventToCanonical(sport: Sport, eventName: string, league: CanonicalLeague | undefined): CanonicalEvent {
   const parts = eventName
     .split(EVENT_SEPARATOR_REGEX)
@@ -198,7 +216,7 @@ export function legacySelectionToCanonicalRequest(selection: LegacyVerifiableSel
   const league = selection.league
     ? { name: selection.league.trim() }
     : legacyFootballLeagueFromSportString(selection.sport);
-  const event = legacyEventToCanonical(sport, selection.event, league);
+  let event = legacyEventToCanonical(sport, selection.event, league);
 
   // Stage BA-2A — the one deterministic shorthand classifier
   // (lib/odds/shorthandClassifier.ts), replacing this function's own
@@ -226,6 +244,39 @@ export function legacySelectionToCanonicalRequest(selection: LegacyVerifiableSel
   // itself uses, so this function and BA-2D's claim can never diverge on
   // the same input again.
   const classified = classifyBettingSelectionTextWithMarketHint(selection.selection, selection.marketRawText, knownParticipantNames);
+
+  // H4-B5.4 — event search-hint recovery. Root cause (proven live via the
+  // H4-B5.3 production diagnostic, not assumed): for at least one real
+  // production message, Claude's own extract_bet tool call returned
+  // event: "<UNKNOWN>" — a syntactically valid, non-empty string, so
+  // betParser.ts's `event: z.string().min(1)` schema has nothing to reject
+  // (there is no schema bypass; "<UNKNOWN>" trivially satisfies
+  // minLength 1). That placeholder text was then sent to the provider as
+  // the event query verbatim and — correctly — never matched anything,
+  // producing EVENT_NOT_FOUND even though the player's own selection text
+  // named a real, resolvable participant ("Arsenal") the whole time.
+  //
+  // Recovery: when the raw AI event text is unusable (blank, whitespace-
+  // only, or that proven literal placeholder) AND the classifier already
+  // resolved a real participant name from `selection.selection` — which by
+  // construction (see shorthandClassifier.ts's matchSpread/matchTeamTotal/
+  // classifyOnce) is ONLY ever non-null for a participant-attributed market
+  // (SPREAD, TEAM_TOTAL, or MONEYLINE's team-name fallback), never for
+  // HOME/DRAW/AWAY/OVER/UNDER — that participant name becomes the event
+  // SEARCH HINT instead of the unusable text. This never fabricates an
+  // opponent: it substitutes one real, single-team search string for
+  // another, exactly the same shape H3.1 already treats as a legitimate
+  // query ("Arsenal" alone, same as a player typing just one team name).
+  // resolveMatchedEvent/findMatchingEvent (lib/odds/oddsVerifier.ts,
+  // untouched by this stage) remain the sole authority on whether that
+  // search resolves uniquely, is ambiguous, or is not found — no second
+  // event matcher, no rounding, no guessed opponent. If no participant name
+  // was resolved either, `event` is left exactly as built above (from the
+  // original unusable text), which correctly fails as EVENT_NOT_FOUND
+  // downstream rather than being silently rescued.
+  if (!isUsableEventText(selection.event) && classified.participantName !== null) {
+    event = legacyEventToCanonical(sport, classified.participantName, league);
+  }
 
   // Line precedence: BetSlipSelectionInput.line (Phase 2's already-threaded
   // field — the AI's own dedicated "line" tool-schema value) is always

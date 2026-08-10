@@ -1063,3 +1063,108 @@ test("H3 regression: existing Ф1/F1 short forms unaffected by the new marketRaw
   assert.equal(request.selection.participant?.name, "Арсенал");
   assert.equal(request.selection.line, "-1.5");
 });
+
+/* -------------------------------------------------------------------------- */
+/* H4-B5.4 — event search-hint recovery. Root cause proven live via the      */
+/* H4-B5.3 production diagnostic: Claude's real extract_bet tool call        */
+/* returned event: "<UNKNOWN>" for at least one real message — a             */
+/* syntactically valid non-empty string that betParser.ts's own              */
+/* z.string().min(1) has no reason to reject. When the raw event text is     */
+/* unusable but the classifier still resolved a real participant name from   */
+/* the selection text, that participant becomes the event SEARCH HINT —      */
+/* never a fabricated opponent, and the provider's own resolver remains the  */
+/* sole authority on unique/ambiguous/not-found.                             */
+/* -------------------------------------------------------------------------- */
+
+test("H4-B5.4 (A): blank event ('') + participant 'Arsenal' from a SPREAD selection -> event search hint becomes 'Arsenal', never left as ''", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "", selection: "Arsenal -0.75", submittedOdds: null, line: "-0.75" });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Arsenal");
+  assert.equal(request.selection.event.name, "Arsenal", "the event search text must recover to the real participant name, not stay blank");
+  assert.deepEqual(request.selection.event.participants, [], "a single-team search hint has no second participant to split out — never a fabricated opponent");
+});
+
+test("H4-B5.4 (B): whitespace-only event ('   ') behaves identically to blank", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "   ", selection: "Arsenal -0.75", submittedOdds: null, line: "-0.75" });
+  assert.equal(request.selection.event.name, "Arsenal");
+});
+
+test("H4-B5.4 (proven production shape): the literal AI placeholder '<UNKNOWN>' (any case) recovers to the participant name, exactly the real observed production input", () => {
+  for (const placeholder of ["<UNKNOWN>", "<unknown>", "<Unknown>", "unknown", "UNKNOWN"]) {
+    const request = legacySelectionToCanonicalRequest({ sport: "Football", event: placeholder, selection: "Arsenal", marketRawText: "Handicap", submittedOdds: null, line: "-0.75" });
+    assert.equal(request.selection.marketType, "SPREAD", `placeholder "${placeholder}" must still classify as SPREAD via the market hint`);
+    assert.equal(request.selection.participant?.name, "Arsenal");
+    assert.equal(request.selection.event.name, "Arsenal", `placeholder "${placeholder}" must recover to the participant name`);
+  }
+});
+
+test("H4-B5.4 (C): a MONEYLINE participant fallback also benefits from the same recovery (not SPREAD-only) — 'Arsenal Win' with blank event", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "", selection: "Arsenal Win", submittedOdds: 1.9 });
+  assert.equal(request.selection.marketType, "MONEYLINE_2WAY");
+  assert.equal(request.selection.participant?.name, "Arsenal");
+  assert.equal(request.selection.event.name, "Arsenal");
+});
+
+test("H4-B5.4 (D): event 'Arsenal' (already usable, equal to the participant) is completely unchanged", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "Arsenal", selection: "Arsenal -0.75", submittedOdds: null, line: "-0.75" });
+  assert.equal(request.selection.event.name, "Arsenal");
+});
+
+test("H4-B5.4 (E): a real two-team event string is completely unchanged and never replaced by the participant name", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "Arsenal — Coventry City", selection: "Arsenal -0.75", submittedOdds: null, line: "-0.75" });
+  assert.equal(request.selection.event.name, "Arsenal — Coventry City");
+  assert.deepEqual(request.selection.event.participants, [{ name: "Arsenal" }, { name: "Coventry City" }]);
+});
+
+test("H4-B5.4 (F): blank event + NO resolvable participant (a bare HOME/DRAW/AWAY selection has no participant to recover from) -> event is left exactly as the unusable raw text, never silently rescued", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "", selection: "Draw", submittedOdds: 3.4 });
+  assert.equal(request.selection.participant, undefined, "DRAW has no participant by construction");
+  assert.equal(request.selection.event.name, "", "with nothing to recover from, the event stays exactly as unusable as it started — this is what lets EVENT_NOT_FOUND fire downstream, never a fabricated rescue");
+});
+
+test("H4-B5.4 (F variant): the literal '<UNKNOWN>' placeholder with a bare HOME/AWAY selection is also left unrescued", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "<UNKNOWN>", selection: "Home", submittedOdds: 2.0 });
+  assert.equal(request.selection.participant, undefined);
+  assert.equal(request.selection.event.name, "<UNKNOWN>");
+});
+
+test("H4-B5.4 (G/H safety note): recovery only ever changes the SEARCH TEXT sent to the provider — it never fabricates event.participants for a single-team search, so the provider's own unique/ambiguous/not-found resolution (untouched by this stage) is what decides the actual outcome, not this function", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "<UNKNOWN>", selection: "Arsenal -1.25", submittedOdds: null, line: "-1.25" });
+  // Exactly one participant known (the search hint itself) — never two, so
+  // this function itself could never claim a specific opponent even if it
+  // wanted to. Ambiguity/uniqueness is entirely the provider's own job.
+  assert.deepEqual(request.selection.event.participants, []);
+  assert.equal(request.selection.event.name, "Arsenal");
+});
+
+/* -------------------------------------------------------------------------- */
+/* H4-B5.4 (I/J/K/L) — MONEYLINE/TOTALS/SPREAD regression: a normal, usable  */
+/* event string must be completely unaffected by this stage for every market */
+/* type, standard or quarter line alike.                                     */
+/* -------------------------------------------------------------------------- */
+
+test("H4-B5.4 (I): MONEYLINE regression — a normal two-team event is unaffected", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "Real Madrid vs Barcelona", selection: "1", submittedOdds: 2.1 });
+  assert.ok(["MONEYLINE_2WAY", "MONEYLINE_3WAY"].includes(request.selection.marketType));
+  assert.equal(request.selection.event.name, "Real Madrid vs Barcelona");
+});
+
+test("H4-B5.4 (J): TOTALS regression — a normal two-team event is unaffected", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "Arsenal vs Coventry", selection: "Over 2.5", submittedOdds: 1.9 });
+  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.event.name, "Arsenal vs Coventry");
+});
+
+test("H4-B5.4 (K): SPREAD standard line regression — a normal two-team event with line '-1.5' is unaffected", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "Arsenal vs Coventry City", selection: "Arsenal -1.5", submittedOdds: null, line: "-1.5" });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.line, "-1.5");
+  assert.equal(request.selection.event.name, "Arsenal vs Coventry City");
+});
+
+test("H4-B5.4 (L): SPREAD quarter line regression — a normal two-team event with line '-0.75' is unaffected", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "Arsenal vs Coventry City", selection: "Arsenal -0.75", submittedOdds: null, line: "-0.75" });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.line, "-0.75");
+  assert.equal(request.selection.event.name, "Arsenal vs Coventry City");
+});

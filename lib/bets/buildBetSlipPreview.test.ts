@@ -1964,6 +1964,73 @@ test("H4-B5.1 Section 11(D): quarter SPREAD line unavailable (-0.75) still prese
   assert.equal(confirmable, false, "event display recovering must never make an unverified line confirmable");
 });
 
+test("H4-B5.4: the EXACT real production shape (event: '<UNKNOWN>', selection: 'Arsenal', market hint 'Handicap', line '-0.75' — proven live via the H4-B5.3 diagnostic) now resolves to Event 'Arsenal — Coventry City' end-to-end through buildBetSlipPreview, instead of staying <UNKNOWN>", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    // This mirrors the real production RawBetSlipFields shape observed via
+    // the H4-B5.3 [BET_PREVIEW_DIAGNOSTIC] log: event was the literal AI
+    // placeholder "<UNKNOWN>", selection was the bare participant name
+    // "Arsenal" (the line was carried separately, not embedded in the
+    // selection text), and the final preview's marketType/participant came
+    // out SPREAD/"Arsenal" — only reachable if a market hint like "Handicap"
+    // combined with "Arsenal" via classifyBettingSelectionTextWithMarketHint's
+    // own H3 reconstruction rule (lib/odds/shorthandClassifier.ts).
+    selections: [{ sport: "Football", event: "<UNKNOWN>", market: "Handicap", marketRawText: "Handicap", selection: "Arsenal", line: "-0.75", submittedOdds: null }],
+  };
+
+  let capturedSpreadEvent: string | null = null;
+  const provider = new TheOddsApiProvider(
+    fakeVerifyOddsFn({}),
+    undefined,
+    fakeVerifySpreadOddsFn(
+      {
+        // Keyed by "Arsenal" — the RECOVERED search hint — never by the
+        // literal "<UNKNOWN>" text. If the fix regressed and the raw
+        // placeholder text were still sent as the query, this fake would
+        // throw "no fake spread outcome configured for event" and the test
+        // would fail loudly rather than silently passing.
+        Arsenal: {
+          matched: false,
+          withinTolerance: null,
+          sourceOdds: null,
+          submittedOdds: null,
+          discrepancyPercent: null,
+          bookmaker: null,
+          note: 'Could not match spread selection "Arsenal -0.75" for "Arsenal" (LINE_NOT_AVAILABLE)',
+          providerEventId: "evt-arsenal-coventry",
+          providerSportKey: "soccer_epl",
+          eventStartTime: "2026-08-21T19:00:00.000Z",
+          homeTeamName: "Arsenal",
+          awayTeamName: "Coventry City",
+          competitionName: "Premier League",
+        },
+      },
+      (input) => {
+        capturedSpreadEvent = input.event;
+      },
+    ),
+  );
+  const service = new OddsVerificationService(provider);
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+  const previewSelection = result.preview.selections[0];
+
+  assert.equal(capturedSpreadEvent, "Arsenal", "the provider must be queried with the recovered participant name, never the literal '<UNKNOWN>' placeholder");
+  assert.equal(previewSelection.marketType, "SPREAD");
+  assert.equal(previewSelection.participant, "Arsenal");
+  assert.equal(previewSelection.line, "-0.75");
+  assert.equal(previewSelection.oddsStatus, "NOT_FOUND");
+  assert.equal(previewSelection.currentOdds, null, "no fabricated odds — the line is still genuinely unavailable");
+  assert.equal(
+    previewSelection.event,
+    "Arsenal — Coventry City",
+    "this is the actual production bug fix: the event must now resolve and display correctly instead of staying '<UNKNOWN>'",
+  );
+  assert.equal(previewSelection.homeTeamName, "Arsenal");
+  assert.equal(previewSelection.awayTeamName, "Coventry City");
+});
+
 test("Handicap Stage H2: MONEYLINE and TOTALS previews carry marketType/participant but normalizeSelectionToEnglish's SPREAD branch never fires for them (existing display unchanged)", async () => {
   const slip: ParsedBetSlip = {
     type: "EXPRESS",
