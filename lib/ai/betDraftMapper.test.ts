@@ -515,6 +515,231 @@ test("BA-2D Step 4: correct AI output ('Арсенал Ф1(-1.5)') against the s
 });
 
 /* -------------------------------------------------------------------------- */
+/* H3 Production Gap Fix — raw.market fallback when raw.selection alone      */
+/* falls to the classifier's generic PARTICIPANT fallback.                   */
+/* -------------------------------------------------------------------------- */
+
+test("H3 gap fix: RU 'Арсенал фора -1.5 ставка 10' — AI splits market='Фора'/selection='Арсенал' -> claim SPREAD, CORROBORATED (previously CONTRADICTED/market_mismatch)", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Арсенал vs Ковентрі", market: "Фора", selection: "Арсенал", line: "-1.5", odds: null })],
+  };
+  const { slip, observations } = observeMarket(raw, "Арсенал фора -1.5 ставка 10");
+
+  assert.equal(observations[0].claim.marketType, "SPREAD");
+  assert.equal(observations[0].claim.selectionType, "PARTICIPANT");
+  assert.equal(observations[0].verification.verdict, "CORROBORATED");
+  // Slip is still built from the AI's own raw fields, byte-for-byte — this
+  // fix only changes the BA-2D claim used for verification, never the
+  // returned selection/line/market text itself.
+  assert.equal(slip.selections[0].selection, "Арсенал");
+});
+
+test("H3 gap fix: RU 'Арсенал с формой -1.5 ставка 10' — AI splits market='Фора' (compound RU marker) -> claim SPREAD, CORROBORATED", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Арсенал vs Ковентрі", market: "Фора", selection: "Арсенал", line: "-1.5", odds: null })],
+  };
+  const { observations } = observeMarket(raw, "Арсенал с форой -1.5 ставка 10");
+
+  assert.equal(observations[0].claim.marketType, "SPREAD");
+  assert.equal(observations[0].verification.verdict, "CORROBORATED");
+});
+
+test("H3 gap fix: UA 'Арсенал азійська фора -1.25 ставка 10' — AI splits market='Азійська фора'/selection='Арсенал' -> claim SPREAD, CORROBORATED (quarter line — parser passes, H1 provider gate remains a separate, unaffected concern)", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Арсенал vs Ковентрі", market: "Азійська фора", selection: "Арсенал", line: "-1.25", odds: null })],
+  };
+  const { slip, observations } = observeMarket(raw, "Арсенал азійська фора -1.25 ставка 10");
+
+  assert.equal(observations[0].claim.marketType, "SPREAD");
+  assert.equal(observations[0].verification.verdict, "CORROBORATED");
+  // The quarter line itself is untouched — this fix never rounds, drops, or
+  // normalizes a line; H1's own provider-level capability gate (unchanged,
+  // out of scope here) is what later keeps a quarter line non-confirmable.
+  assert.equal(slip.selections[0].line, "-1.25");
+});
+
+test("H3 gap fix: EN 'Arsenal handicap -1.5 stake 10' — AI splits market='Handicap'/selection='Arsenal' -> claim SPREAD, CORROBORATED (previously CONTRADICTED/market_mismatch, proving this was never RU/UA-specific)", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Arsenal vs Coventry", market: "Handicap", selection: "Arsenal", line: "-1.5", odds: null })],
+  };
+  const { observations } = observeMarket(raw, "Arsenal handicap -1.5 stake 10");
+
+  assert.equal(observations[0].claim.marketType, "SPREAD");
+  assert.equal(observations[0].verification.verdict, "CORROBORATED");
+});
+
+test("H3 gap fix: EN 'Arsenal spread -1.5 stake 10' — AI splits market='Spread'/selection='Arsenal' -> claim SPREAD, CORROBORATED", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Arsenal vs Coventry", market: "Spread", selection: "Arsenal", line: "-1.5", odds: null })],
+  };
+  const { observations } = observeMarket(raw, "Arsenal spread -1.5 stake 10");
+
+  assert.equal(observations[0].claim.marketType, "SPREAD");
+  assert.equal(observations[0].verification.verdict, "CORROBORATED");
+});
+
+test("H3 gap fix safety: a real, confident MONEYLINE selection ('Arsenal Win') is NEVER overridden by a contradictory raw.market ('Handicap') — the fallback never even attempts reconstruction once selection alone is already a real classification", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Arsenal vs Coventry", market: "Handicap", selection: "Arsenal Win", odds: null })],
+  };
+  const { observations } = observeMarket(raw, "Арсенал фора -1.5 ставка 10");
+
+  // Claim stays exactly what "Arsenal Win" alone resolves to — MONEYLINE —
+  // never silently replaced with SPREAD merely because raw.market says
+  // "Handicap". Real originalText evidence here is SPREAD, so this remains
+  // a genuine (correct) CONTRADICTED — the safety property this whole guard
+  // exists for is preserved, not weakened.
+  assert.equal(observations[0].claim.marketType, "MONEYLINE_2WAY");
+  assert.equal(observations[0].claim.selectionType, "PARTICIPANT");
+  assert.equal(observations[0].verification.verdict, "CONTRADICTED");
+});
+
+test("H3 gap fix safety: a real, confident TOTALS selection ('Over 2.5') is NEVER overridden by a contradictory raw.market ('Handicap')", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Arsenal vs Coventry", market: "Handicap", selection: "Over 2.5", odds: null })],
+  };
+  const { observations } = observeMarket(raw, "Over 2.5 ставка 10");
+
+  assert.equal(observations[0].claim.marketType, "TOTALS");
+  assert.equal(observations[0].claim.selectionType, "OVER");
+  assert.equal(observations[0].verification.verdict, "CORROBORATED");
+});
+
+test("H3 gap fix: an unrecognized raw.market ('Premier League') is never fabricated into a market — behavior identical to before this fix", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Арсенал vs Ковентрі", market: "Premier League", selection: "Арсенал", line: "-1.5", odds: null })],
+  };
+  const { observations } = observeMarket(raw, "Арсенал фора -1.5 ставка 10");
+
+  assert.equal(observations[0].claim.marketType, "MONEYLINE_2WAY");
+  assert.equal(observations[0].claim.selectionType, "PARTICIPANT");
+  assert.equal(observations[0].verification.verdict, "CONTRADICTED");
+});
+
+test("H3 gap fix: raw.market null (unchanged from before this fix) — 'Arsenal' alone against SPREAD evidence still CONTRADICTED", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Арсенал vs Ковентрі", market: null, selection: "Арсенал", line: "-1.5", odds: null })],
+  };
+  const { observations } = observeMarket(raw, "Арсенал фора -1.5 ставка 10");
+
+  assert.equal(observations[0].claim.marketType, "MONEYLINE_2WAY");
+  assert.equal(observations[0].verification.verdict, "CONTRADICTED");
+});
+
+test("H3 gap fix: raw.market as an empty/whitespace-only string behaves exactly like null — never fabricates a market", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Арсенал vs Ковентрі", market: "   ", selection: "Арсенал", line: "-1.5", odds: null })],
+  };
+  const { observations } = observeMarket(raw, "Арсенал фора -1.5 ставка 10");
+
+  assert.equal(observations[0].claim.marketType, "MONEYLINE_2WAY");
+  assert.equal(observations[0].verification.verdict, "CONTRADICTED");
+});
+
+test("H3 gap fix: numeric-role safety (BA-2B) is completely unaffected — LINE=-1.5 and STAKE=10 both independently CORROBORATED for the RU market-split case", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Арсенал vs Ковентрі", market: "Фора", selection: "Арсенал", line: "-1.5", odds: null })],
+  };
+  let numericObservations: readonly NumericRoleObservation[] = [];
+  mapRawBetSlipToParsedBetSlip(raw, {
+    originalText: "Арсенал фора -1.5 ставка 10",
+    sourceType: "CHAT",
+    onNumericRoleObservation: (observations) => {
+      numericObservations = observations;
+    },
+  });
+
+  const stake = numericObservations.find((o) => o.role === "STAKE");
+  const line = numericObservations.find((o) => o.role === "LINE");
+  assert.equal(stake?.verification.verdict, "CORROBORATED");
+  assert.equal(line?.verification.verdict, "CORROBORATED");
+});
+
+test("H3 gap fix: EXPRESS is completely unaffected — still produces NO market-intent observations at all, regardless of any leg's market/selection split", () => {
+  const raw: RawBetSlipFields = {
+    type: "EXPRESS",
+    stake: 10,
+    selections: [
+      football({ event: "Арсенал vs Ковентрі", market: "Фора", selection: "Арсенал", line: "-1.5", odds: 1.9 }),
+      football({ event: "Real Madrid vs Barcelona", selection: "Real Madrid Win", odds: 1.8 }),
+    ],
+  };
+  const { observations } = observeMarket(raw, "Арсенал фора -1.5, Реал Мадрид победа, экспресс 10");
+  assert.deepEqual(observations, []);
+});
+
+test("H3 gap fix: CHAT and OCR reach the exact same fixed logic for the market-split case — identical claim, identical verdict", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Arsenal vs Coventry", market: "Handicap", selection: "Arsenal", line: "-1.5", odds: null })],
+  };
+  const chat = observeMarket(raw, "Arsenal handicap -1.5 stake 10", "CHAT");
+  const ocr = observeMarket(raw, "Arsenal handicap -1.5 stake 10", "OCR");
+
+  assert.deepEqual(chat.observations[0].claim, ocr.observations[0].claim);
+  assert.equal(chat.observations[0].verification.verdict, "CORROBORATED");
+  assert.equal(ocr.observations[0].verification.verdict, "CORROBORATED");
+});
+
+test("H3 gap fix: no mutation — the raw input object is never mutated by the market-field fallback", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Арсенал vs Ковентрі", market: "Фора", selection: "Арсенал", line: "-1.5", odds: null })],
+  };
+  const snapshot = JSON.parse(JSON.stringify(raw));
+  observeMarket(raw, "Арсенал фора -1.5 ставка 10");
+  assert.deepEqual(raw, snapshot);
+});
+
+test("H3 gap fix: no console output of any kind for the market-split fallback path", () => {
+  const originalLog = console.log;
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  const calls: unknown[][] = [];
+  console.log = (...args: unknown[]) => calls.push(args);
+  console.error = (...args: unknown[]) => calls.push(args);
+  console.warn = (...args: unknown[]) => calls.push(args);
+
+  try {
+    const raw: RawBetSlipFields = {
+      type: "SINGLE",
+      stake: 10,
+      selections: [football({ event: "Арсенал vs Ковентрі", market: "Фора", selection: "Арсенал", line: "-1.5", odds: null })],
+    };
+    observeMarket(raw, "Арсенал фора -1.5 ставка 10");
+    assert.equal(calls.length, 0);
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+    console.warn = originalWarn;
+  }
+});
+
+/* -------------------------------------------------------------------------- */
 /* 3-4. TOTALS                                                                */
 /* -------------------------------------------------------------------------- */
 
