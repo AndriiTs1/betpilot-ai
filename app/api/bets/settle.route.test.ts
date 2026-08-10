@@ -11,7 +11,13 @@ import { NextRequest } from "next/server";
 // level up, flat under app/api/bets/, purely so `node --test` can find it
 // at all; route.ts itself must stay exactly where Next.js's routing
 // convention requires it.
-import { handleSettleBet, type HandleSettleBetOptions } from "./[id]/settle/route";
+import {
+  handleSettleBet,
+  buildSettlementMessage,
+  type HandleSettleBetOptions,
+  type AppliedSettleResult,
+  type SettledBetDisplayFields,
+} from "./[id]/settle/route";
 import { Prisma, type PrismaClient, type BetStatus } from "@/lib/generated/prisma/client";
 
 // ---------------------------------------------------------------------
@@ -499,6 +505,96 @@ test("settle route: with BET_TELEGRAM_NOTIFICATIONS_ENABLED=true, WIN still send
   } finally {
     delete process.env.BET_TELEGRAM_NOTIFICATIONS_ENABLED;
   }
+});
+
+// ---------------------------------------------------------------------
+// H4-B4 — buildSettlementMessage() safety for SETTLED_HALF_WIN/
+// SETTLED_HALF_LOSS. Neither is reachable through handleSettleBet() itself
+// (the public route still rejects both with 422 — see the "H4-B3" test
+// block above), so these call the exported formatter directly, matching
+// Section 6's own requirement: unreachable in production today, but must
+// not throw, mislabel, or omit the result if a future stage ever makes it
+// reachable.
+// ---------------------------------------------------------------------
+
+function halfWinResult(overrides: Partial<AppliedSettleResult> = {}): AppliedSettleResult {
+  return {
+    kind: "APPLIED",
+    betId: BET_ID,
+    status: "SETTLED_HALF_WIN",
+    playerId: PLAYER_ID,
+    transactionId: "tx-1",
+    amount: new Prisma.Decimal("50"),
+    balanceAfter: new Prisma.Decimal("1050"),
+    grossPayout: new Prisma.Decimal("100"),
+    netProfit: new Prisma.Decimal("50"),
+    ...overrides,
+  };
+}
+
+function halfLossResult(overrides: Partial<AppliedSettleResult> = {}): AppliedSettleResult {
+  return {
+    kind: "APPLIED",
+    betId: BET_ID,
+    status: "SETTLED_HALF_LOSS",
+    playerId: PLAYER_ID,
+    transactionId: "tx-1",
+    amount: new Prisma.Decimal("-50"),
+    balanceAfter: new Prisma.Decimal("950"),
+    ...overrides,
+  };
+}
+
+function displayFields(overrides: Partial<SettledBetDisplayFields> = {}): SettledBetDisplayFields {
+  return {
+    sport: "Football",
+    event: "Arsenal vs Coventry City",
+    outcome: "Arsenal -0.75",
+    odds: new Prisma.Decimal("1.90"),
+    totalOdds: new Prisma.Decimal("1.90"),
+    stake: new Prisma.Decimal("100"),
+    ...overrides,
+  };
+}
+
+test("buildSettlementMessage: SETTLED_HALF_WIN never throws and never says the full 'Ставка выиграла!' — it uses the distinct half-win label", () => {
+  const text = buildSettlementMessage(halfWinResult(), displayFields());
+
+  assert.match(text, /наполовину/);
+  assert.doesNotMatch(text, /Ставка выиграла!/);
+  assert.doesNotMatch(text, /аннулирована/);
+});
+
+test("buildSettlementMessage: SETTLED_HALF_LOSS never throws and never says the full 'Ставка не зашла' — it uses the distinct half-loss label", () => {
+  const text = buildSettlementMessage(halfLossResult(), displayFields());
+
+  assert.match(text, /наполовину/);
+  assert.doesNotMatch(text, /Ставка не зашла/);
+  assert.doesNotMatch(text, /аннулирована/);
+});
+
+test("buildSettlementMessage: SETTLED_HALF_WIN reports the real half-stake payout/profit figures from settleBet's own result, never recomputed", () => {
+  const text = buildSettlementMessage(halfWinResult({ grossPayout: new Prisma.Decimal("100"), netProfit: new Prisma.Decimal("50") }), displayFields());
+
+  assert.match(text, /Выплата: 100/);
+  assert.match(text, /Чистая прибыль: 50/);
+  assert.match(text, /Баланс: 1050/);
+});
+
+test("buildSettlementMessage: SETTLED_HALF_LOSS reports the actual half-stake loss amount from result.amount, never the full original stake", () => {
+  // stake is 100, but the actual HALF_LOSS delta (result.amount) is -50 —
+  // the displayed loss figure must reflect the real half-stake delta, not
+  // bet.stake (which would wrongly show 100).
+  const text = buildSettlementMessage(halfLossResult({ amount: new Prisma.Decimal("-50") }), displayFields({ stake: new Prisma.Decimal("100") }));
+
+  assert.match(text, /Проигрыш: 50/);
+  assert.doesNotMatch(text, /Проигрыш: 100/);
+  assert.match(text, /Баланс: 950/);
+});
+
+test("buildSettlementMessage: the result text is never empty/omitted for either HALF_* status", () => {
+  assert.ok(buildSettlementMessage(halfWinResult(), displayFields()).length > 0);
+  assert.ok(buildSettlementMessage(halfLossResult(), displayFields()).length > 0);
 });
 
 test("settle route: an IDEMPOTENT repeated settlement sends no notification (already zero, since notifications are disabled by default)", async () => {

@@ -12,7 +12,24 @@ interface HistoryScreenProps {
 // Complement of ActiveBetsScreen's ACTIVE_STATUSES — every Bet.status value
 // is either "not yet settled" (active) or one of these final states, so a
 // bet can never appear in both screens at once. No API/Prisma changes.
-const FINAL_STATUSES = new Set(["REJECTED", "SETTLED_WIN", "SETTLED_LOSS", "VOID"]);
+//
+// H4-B4 — SETTLED_HALF_WIN/SETTLED_HALF_LOSS (H4-B1) are also terminal
+// settlement outcomes and must land in History, never Active, never
+// disappear from both. Before this fix, a HALF_* bet would have matched
+// neither ACTIVE_STATUSES nor this set — invisible in the player's bet
+// list entirely, not merely miscategorized.
+//
+// Exported so HistoryScreen.test.ts can filter fixtures through the exact
+// same set this component uses — same convention as ActiveBetsScreen.tsx's
+// own exported ACTIVE_STATUSES.
+export const FINAL_STATUSES = new Set([
+  "REJECTED",
+  "SETTLED_WIN",
+  "SETTLED_LOSS",
+  "VOID",
+  "SETTLED_HALF_WIN",
+  "SETTLED_HALF_LOSS",
+]);
 
 export default function HistoryScreen({ recentBets }: HistoryScreenProps) {
   const finishedBets = recentBets.filter((bet) => FINAL_STATUSES.has(bet.status));

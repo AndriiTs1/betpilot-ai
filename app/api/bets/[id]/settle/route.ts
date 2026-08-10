@@ -117,9 +117,13 @@ function mapSettlementError(err: unknown, betId: string): NextResponse<SettleErr
   return errorResponse(500, { code: "INTERNAL_ERROR", message: "Internal server error" });
 }
 
-type AppliedSettleResult = Extract<SettleBetResult, { kind: "APPLIED" }>;
+// H4-B4 — exported alongside buildSettlementMessage (see its own comment)
+// so settle.route.test.ts can construct a valid HALF_* AppliedSettleResult
+// directly, without needing a real HTTP round-trip that the public route's
+// own pre-check would refuse to allow for these two statuses.
+export type AppliedSettleResult = Extract<SettleBetResult, { kind: "APPLIED" }>;
 
-interface SettledBetDisplayFields {
+export interface SettledBetDisplayFields {
   sport: string;
   event: string | null;
   outcome: string | null;
@@ -135,7 +139,16 @@ interface SettledBetDisplayFields {
 // a raw Decimal object, never a plain-number reformat). Only player-facing
 // figures appear here — no bet id, transaction id, error code, or any other
 // internal/technical field.
-function buildSettlementMessage(result: AppliedSettleResult, bet: SettledBetDisplayFields): string {
+//
+// H4-B4 — exported (was module-private) solely so settle.route.test.ts can
+// exercise the SETTLED_HALF_WIN/SETTLED_HALF_LOSS branches directly.
+// Neither is reachable through handleSettleBet() itself today: the public
+// route's isSettlementTarget pre-check rejects both with 422 before
+// settleBet() is ever called (Section 8's own requirement, unchanged by
+// this stage), so there is no way to drive an AppliedSettleResult with a
+// HALF_* status through the real HTTP entry point to prove this function
+// stays safe for them.
+export function buildSettlementMessage(result: AppliedSettleResult, bet: SettledBetDisplayFields): string {
   const event = escapeHtml(bet.event ?? "—");
   const normalizedOutcome =
     bet.outcome !== null ? normalizeSelectionToEnglish({ selection: bet.outcome, sport: bet.sport, event: bet.event }) : bet.outcome;
@@ -165,6 +178,41 @@ function buildSettlementMessage(result: AppliedSettleResult, bet: SettledBetDisp
       `💰 Ставка: ${stake}\n` +
       oddsLine +
       `📉 Проигрыш: ${stake}\n` +
+      `💳 Баланс: ${result.balanceAfter.toString()}`
+    );
+  }
+
+  // H4-B4 — SETTLED_HALF_WIN/SETTLED_HALF_LOSS readiness: unreachable in
+  // production today (the public settle route still rejects both — see
+  // isSettlementTarget above — and no auto-settlement path can produce
+  // them either), but this formatter must not throw, mislabel a half
+  // outcome as a full Won/Lost, or silently fall into the VOID branch
+  // below and say "annulled" for a bet that actually won or lost half its
+  // stake. grossPayout/netProfit/amount are read directly from `result`
+  // (settleBet.ts's own computed figures) — never recomputed here, same
+  // "one source of financial truth" rule as every other branch in this
+  // function.
+  if (result.status === "SETTLED_HALF_WIN") {
+    return (
+      `🟢 <b>Ставка выиграла наполовину</b>\n` +
+      `⚽ ${event}\n` +
+      `🎯 ${outcome}\n` +
+      `💰 Ставка: ${stake}\n` +
+      oddsLine +
+      `💵 Выплата: ${result.grossPayout?.toString() ?? "—"}\n` +
+      `📊 Чистая прибыль: ${result.netProfit?.toString() ?? "—"}\n` +
+      `💳 Баланс: ${result.balanceAfter.toString()}`
+    );
+  }
+
+  if (result.status === "SETTLED_HALF_LOSS") {
+    return (
+      `🔴 <b>Ставка проиграла наполовину</b>\n` +
+      `⚽ ${event}\n` +
+      `🎯 ${outcome}\n` +
+      `💰 Ставка: ${stake}\n` +
+      oddsLine +
+      `📉 Проигрыш: ${result.amount.negated().toString()}\n` +
       `💳 Баланс: ${result.balanceAfter.toString()}`
     );
   }

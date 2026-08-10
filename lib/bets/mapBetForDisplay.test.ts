@@ -406,3 +406,39 @@ test("does not mutate the source bet or its selections array/objects", () => {
   const display = mapBetForDisplay(b);
   assert.notEqual(display.selections, b.selections);
 });
+
+// ---------------------------------------------------------------------
+// H4-B4 — SETTLED_HALF_WIN/SETTLED_HALF_LOSS lifecycle readiness. This
+// mapper has no status-specific logic at all (status flows straight
+// through unexamined), so a HALF_* status must pass through it exactly
+// like any other status: no exception, no special-cased/recomputed
+// financial figure. potentialPayout is the same generic stake x odds
+// ceiling every bet already gets regardless of status — never a HALF_*-
+// specific payout formula.
+// ---------------------------------------------------------------------
+
+test("H4-B4: a SETTLED_HALF_WIN bet flows through mapBetForDisplay without exception, status passed through unchanged", () => {
+  const b = bet({ status: "SETTLED_HALF_WIN", selections: [selection()] });
+  const display = mapBetForDisplay(b);
+  assert.equal(display.status, "SETTLED_HALF_WIN");
+});
+
+test("H4-B4: a SETTLED_HALF_LOSS bet flows through mapBetForDisplay without exception, status passed through unchanged", () => {
+  const b = bet({ status: "SETTLED_HALF_LOSS", selections: [selection()] });
+  const display = mapBetForDisplay(b);
+  assert.equal(display.status, "SETTLED_HALF_LOSS");
+});
+
+test("H4-B4: potentialPayout for a HALF_WIN bet is the same generic stake x odds figure every status gets — not a recomputed half-stake payout", () => {
+  const bWin = bet({ status: "SETTLED_WIN", stake: "100", totalOdds: "1.90", odds: null, selections: [selection()] });
+  const bHalfWin = bet({ status: "SETTLED_HALF_WIN", stake: "100", totalOdds: "1.90", odds: null, selections: [selection()] });
+
+  const displayWin = mapBetForDisplay(bWin);
+  const displayHalfWin = mapBetForDisplay(bHalfWin);
+
+  // Same stake/odds -> identical potentialPayout regardless of status —
+  // proves this field is not status-aware and never derives a HALF_*-
+  // specific (e.g. halved) figure.
+  assert.equal(displayHalfWin.potentialPayout, displayWin.potentialPayout);
+  assert.equal(displayHalfWin.potentialPayout, "190.00");
+});
