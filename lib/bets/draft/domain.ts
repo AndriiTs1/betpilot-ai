@@ -179,6 +179,16 @@ export interface UniversalBetDraftSelection {
   readonly league: BetDraftField<BetDraftLeague>;
   readonly event: BetDraftEvent;
   readonly marketType: BetDraftField<MarketType>;
+  // H3 Production Fix — the AI's own market text, verbatim, never
+  // normalized — additive alongside marketType above, never replacing it.
+  // Preserved so a later stage (legacySelectionToCanonicalRequest) can
+  // recover market intent that normalizeDraftMarket doesn't recognize as a
+  // canonical display label (e.g. "Фора"/"Handicap"/"Spread") via
+  // classifyBettingSelectionTextWithMarketHint, the same deterministic
+  // classifier every selection already goes through. null exactly when the
+  // AI supplied no market text at all — same nullable-at-parse-time
+  // semantics as submittedOdds below.
+  readonly marketRawText: string | null;
   readonly selectionType: BetDraftField<SelectionType>;
   readonly selectionRawText: string; // always preserved verbatim — the ground truth the legacy adapter reads
   readonly participant: BetDraftParticipantRef | null; // null when no reference could be determined at all

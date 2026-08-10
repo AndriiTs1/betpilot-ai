@@ -1698,3 +1698,164 @@ test("Handicap Stage H2: MONEYLINE and TOTALS previews carry marketType/particip
     "Over 2.5 Goals",
   );
 });
+
+/* -------------------------------------------------------------------------- */
+/* H3 Production Fix — full preview-construction proof. The formerly         */
+/* dangerous shape (AI splits market="Фора"/selection="Арсенал") must never  */
+/* verify/confirm as MONEYLINE odds through the REAL buildBetSlipPreview()   */
+/* pipeline — the same function every real preview route calls.             */
+/* -------------------------------------------------------------------------- */
+
+test("H3 production fix: buildBetSlipPreview — bare 'Арсенал' + marketRawText 'Фора' + line '-1.5' verifies as SPREAD, never as MONEYLINE odds (h2h primed with the exact real production price 1.16, proven never called)", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [
+      {
+        sport: "Football",
+        event: "Арсенал vs Ковентрі",
+        market: null,
+        marketRawText: "Фора",
+        selection: "Арсенал",
+        submittedOdds: null,
+        line: "-1.5",
+      },
+    ],
+  };
+
+  let h2hCallCount = 0;
+  const provider = new TheOddsApiProvider(
+    async () => {
+      h2hCallCount += 1;
+      // Primed with the exact real production price — if this is ever
+      // reached, the bug has reappeared.
+      return verified(1.16, 1.16, "Pinnacle");
+    },
+    undefined,
+    fakeVerifySpreadOddsFn({ "Арсенал vs Ковентрі": verified(1.91, 1.91, "MyBookie.ag") }),
+  );
+  const service = new OddsVerificationService(provider);
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+  const previewSelection = result.preview.selections[0];
+
+  assert.equal(h2hCallCount, 0, "must never reach h2h — this is the exact second production incident and must never be priced as 'Arsenal Win' at 1.16");
+  assert.equal(previewSelection.marketType, "SPREAD");
+  assert.notEqual(previewSelection.marketType, "MONEYLINE_2WAY");
+  assert.equal(previewSelection.participant, "Арсенал");
+  assert.equal(previewSelection.line, "-1.5");
+  assert.equal(previewSelection.oddsStatus, "VERIFIED");
+  assert.equal(previewSelection.currentOdds, 1.91);
+  assert.notEqual(previewSelection.currentOdds, 1.16, "must never surface the moneyline price as if it were the spread price");
+  assert.equal(previewSelection.bookmaker, "MyBookie.ag");
+});
+
+test("H3 production fix: buildBetSlipPreview — if the exact spread line genuinely isn't offered, the selection safely stays non-VERIFIED rather than falling back to MONEYLINE odds", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [
+      {
+        sport: "Football",
+        event: "Арсенал vs Ковентрі",
+        market: null,
+        marketRawText: "Фора",
+        selection: "Арсенал",
+        submittedOdds: null,
+        line: "-1.5",
+      },
+    ],
+  };
+
+  let h2hCallCount = 0;
+  const provider = new TheOddsApiProvider(
+    async () => {
+      h2hCallCount += 1;
+      return verified(1.16, 1.16, "Pinnacle");
+    },
+    undefined,
+    fakeVerifySpreadOddsFn({
+      "Арсенал vs Ковентрі": {
+        matched: false,
+        withinTolerance: null,
+        sourceOdds: null,
+        submittedOdds: null,
+        discrepancyPercent: null,
+        bookmaker: null,
+        note: 'Could not match spread selection "Арсенал -1.5" for "Арсенал vs Ковентрі" (LINE_NOT_AVAILABLE)',
+      },
+    }),
+  );
+  const service = new OddsVerificationService(provider);
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+  const previewSelection = result.preview.selections[0];
+
+  assert.equal(h2hCallCount, 0, "must never fall back to h2h when the exact spread line is unavailable");
+  assert.notEqual(previewSelection.oddsStatus, "VERIFIED");
+  assert.equal(previewSelection.marketType, "SPREAD");
+  assert.notEqual(previewSelection.currentOdds, 1.16);
+});
+
+test("H3 production fix: buildBetSlipPreview — RU 'с формой', UA 'азійська фора', and EN 'handicap'/'spread' market-hint shapes all verify as SPREAD end-to-end, never MONEYLINE", async () => {
+  const cases: Array<{ label: string; market: string; selection: string; line: string; event: string }> = [
+    { label: "RU 'с форой'", market: "Фора", selection: "Арсенал", line: "-1.5", event: "Арсенал vs Ковентрі" },
+    { label: "UA 'азійська фора' (quarter line, canonical only)", market: "Азійська фора", selection: "Арсенал", line: "-1.25", event: "Арсенал vs Ковентрі" },
+    { label: "EN 'handicap'", market: "Handicap", selection: "Arsenal", line: "-1.5", event: "Arsenal vs Coventry" },
+    { label: "EN 'spread'", market: "Spread", selection: "Arsenal", line: "-1.5", event: "Arsenal vs Coventry" },
+  ];
+
+  for (const c of cases) {
+    const slip: ParsedBetSlip = {
+      type: "SINGLE",
+      stake: 10,
+      selections: [
+        { sport: "Football", event: c.event, market: null, marketRawText: c.market, selection: c.selection, submittedOdds: null, line: c.line },
+      ],
+    };
+
+    let h2hCallCount = 0;
+    const provider = new TheOddsApiProvider(
+      async () => {
+        h2hCallCount += 1;
+        return verified(1.16, 1.16);
+      },
+      undefined,
+      fakeVerifySpreadOddsFn({ [c.event]: verified(1.9, 1.9) }),
+    );
+    const service = new OddsVerificationService(provider);
+
+    const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+    const previewSelection = result.preview.selections[0];
+
+    assert.equal(previewSelection.marketType, "SPREAD", c.label);
+    assert.equal(h2hCallCount, 0, `${c.label}: must never reach h2h`);
+  }
+});
+
+test("H3 production fix: buildBetSlipPreview — 'Arsenal Win' + marketRawText 'Handicap' still verifies as MONEYLINE (h2h), the market hint never overrides a real selection-derived claim", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [
+      {
+        sport: "Football",
+        event: "Arsenal vs Coventry",
+        market: null,
+        marketRawText: "Handicap",
+        selection: "Arsenal Win",
+        submittedOdds: 1.16,
+        line: null,
+      },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => verified(1.16, 1.16),
+  });
+  const previewSelection = result.preview.selections[0];
+
+  assert.equal(previewSelection.marketType, "MONEYLINE_2WAY");
+  assert.equal(previewSelection.oddsStatus, "VERIFIED");
+  assert.equal(previewSelection.currentOdds, 1.16);
+});

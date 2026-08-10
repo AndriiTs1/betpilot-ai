@@ -490,3 +490,80 @@ export function classifyBettingSelectionText(
   // the original text as a PARTICIPANT name so nothing is silently dropped.
   return { marketType: "MONEYLINE_2WAY", selectionType: "PARTICIPANT", participantName: trimmed, embeddedLine: null };
 }
+
+/* -------------------------------------------------------------------------- */
+/* H3 Production Fix — market-hint-aware classification, one shared          */
+/* implementation for every caller that has a separate market-field hint     */
+/* alongside the selection text (lib/ai/betDraftMapper.ts's BA-2D claim      */
+/* construction, lib/odds/legacyOddsBridge.ts's canonical request            */
+/* construction — previously two independently-maintained copies of the      */
+/* same reconstruction rule; this is the one place it now lives).            */
+/* -------------------------------------------------------------------------- */
+
+// The classifier's own final, lossless fallback (see classifyBettingSelectionText's
+// own last branch above) is recognizable exactly this way: marketType
+// MONEYLINE_2WAY, selectionType PARTICIPANT, and participantName equal to
+// the EXACT text that was classified, verbatim. This is what distinguishes
+// a genuine "nothing matched" fallback from a real, confident MONEYLINE_2WAY
+// classification that merely happens to share the same marketType/
+// selectionType (e.g. "Arsenal Win"'s winner-suffix-derived participantName
+// "Arsenal" — shorter than the full input "Arsenal Win" — is never mistaken
+// for a fallback here).
+function isGenericParticipantFallback(classified: ShorthandClassification, classifiedText: string): boolean {
+  return classified.marketType === "MONEYLINE_2WAY" && classified.selectionType === "PARTICIPANT" && classified.participantName === classifiedText;
+}
+
+// Root cause this exists to fix: an AI/parser output sometimes legitimately
+// splits a natural-language handicap phrase across two separate fields —
+// e.g. market: "Фора", selection: "Арсенал" — because the schema's own
+// field semantics actively invite this (market: the bet TYPE; selection:
+// the specific OUTCOME). classifyBettingSelectionText(selectionText) alone
+// then sees nothing but a bare participant name and falls back to a
+// fabricated MONEYLINE_2WAY reading — even though the real market intent
+// ("фора"/"handicap"/"spread", or any of H3's other recognized aliases) was
+// right there in the market field the whole time.
+//
+// Fix: ONLY when selectionText alone resolves to the classifier's own
+// generic PARTICIPANT fallback (never for any other, already-confident
+// classification — see isGenericParticipantFallback above), and ONLY when
+// marketHint is present and non-empty, try ONE additional reconstructed
+// candidate: `${selectionText} ${marketHint}` (participant-then-marker —
+// the SUFFIX shape this file's own SPREAD/TEAM_TOTAL grammar is built
+// around, e.g. "Арсенал Фора", "Arsenal Handicap"; the reverse order does
+// not match that grammar without a trailing line, which this reconstruction
+// never has). If — and only if — that reconstructed candidate is ALSO not a
+// generic fallback, it becomes the result instead. No other permutation is
+// tried, no fuzzy matching, no vocabulary changes — this only ever recovers
+// intent the caller itself already explicitly supplied in marketHint,
+// exactly as stated, through the exact same closed-vocabulary deterministic
+// classifier every other call already goes through.
+//
+// A genuinely confident selection-derived classification (e.g. "Arsenal
+// Win", or "Over 2.5") is NEVER reached by this fallback at all — the
+// generic-fallback guard short-circuits before any reconstruction is even
+// attempted, so marketHint can never silently override a real reading; it
+// can only fill in for a reading that was never real to begin with (a
+// fabricated PARTICIPANT reading of a bare name).
+export function classifyBettingSelectionTextWithMarketHint(
+  selectionText: string,
+  marketHint: string | null | undefined,
+  knownParticipantNames: readonly string[] = [],
+): ShorthandClassification {
+  const classified = classifyBettingSelectionText(selectionText, knownParticipantNames);
+
+  const trimmedHint = marketHint?.trim() ?? "";
+  if (trimmedHint.length === 0) return classified;
+  if (!isGenericParticipantFallback(classified, selectionText.trim())) return classified;
+
+  const reconstructedText = `${selectionText.trim()} ${trimmedHint}`;
+  const reconstructed = classifyBettingSelectionText(reconstructedText, knownParticipantNames);
+
+  if (isGenericParticipantFallback(reconstructed, reconstructedText)) {
+    // marketHint didn't contain anything the classifier recognizes either
+    // (e.g. a league name, or genuinely unrelated text) — never fabricate a
+    // market from it; the original fallback classification stands.
+    return classified;
+  }
+
+  return reconstructed;
+}

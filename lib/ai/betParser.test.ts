@@ -341,9 +341,12 @@ test("parseBetSlipMessage: extract_bet with league/market/period/line supplied p
   if (!result.valid) return;
   assert.deepEqual(Object.keys(result).sort(), ["selections", "stake", "type", "valid"]);
   // Step 16A — league now also threads through; Betting Markets V1 Phase 2
-  // — line now also threads through (period still does not).
-  assert.deepEqual(Object.keys(result.selections[0]).sort(), ["event", "league", "line", "market", "selection", "sport", "submittedOdds"]);
+  // — line now also threads through (period still does not). H3 Production
+  // Fix — marketRawText (the AI's raw, unnormalized market text) now also
+  // threads through, additively alongside the existing normalized `market`.
+  assert.deepEqual(Object.keys(result.selections[0]).sort(), ["event", "league", "line", "market", "marketRawText", "selection", "sport", "submittedOdds"]);
   assert.equal(result.selections[0].market, "Match Winner");
+  assert.equal(result.selections[0].marketRawText, "Match Winner");
   assert.equal(result.selections[0].line, null);
   assert.equal(result.selections[0].league, "Premier League");
   assert.equal(result.selections[0].sport, "Football");
@@ -374,7 +377,7 @@ test("parseBetSlipMessage: extract_bet with the four new fields explicitly null 
     valid: true,
     type: "SINGLE",
     stake: 50,
-    selections: [{ sport: "Football", league: null, event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: 1.9, line: null }],
+    selections: [{ sport: "Football", league: null, event: "Real Madrid vs Barcelona", market: null, marketRawText: null, selection: "Real Madrid Win", submittedOdds: 1.9, line: null }],
   });
 });
 

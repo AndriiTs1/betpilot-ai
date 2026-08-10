@@ -25,6 +25,15 @@ export interface BetSlipSelectionInput {
   league?: string | null;
   event: string;
   market: string | null;
+  // H3 Production Fix — the AI's own market text, verbatim/unnormalized,
+  // additive alongside `market` above (never replacing its existing
+  // normalized-display-label-or-null semantics). Optional (matching
+  // `league`/`line` below): every existing caller/fixture that builds this
+  // shape without it keeps compiling and behaving exactly as before. Reused
+  // downstream by legacySelectionToCanonicalRequest (lib/odds/
+  // legacyOddsBridge.ts) to recover market intent (e.g. "Фора"/"Handicap"/
+  // "Spread") that a bare `selection` alone can't express on its own.
+  marketRawText?: string | null;
   selection: string;
   // Decimal-compatible: a plain number here (what every parser produces
   // today) — callers construct a Prisma.Decimal from it at the point they

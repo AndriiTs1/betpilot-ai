@@ -36,7 +36,7 @@ import {
 import { universalBetDraftToParsedBetSlip } from "@/lib/bets/draft/legacyAdapter";
 import type { ParsedBetSlip } from "@/lib/bets/betSlip";
 import type { MarketType, Period, Sport } from "@/lib/odds/domain";
-import { classifyBettingSelectionText } from "@/lib/odds/shorthandClassifier";
+import { classifyBettingSelectionTextWithMarketHint } from "@/lib/odds/shorthandClassifier";
 import { extractNumericRoleEvidence } from "@/lib/ai/numericRoleEvidence";
 import { verifyNumericRoleClaim, type NumericRoleVerification } from "@/lib/ai/numericRoleVerifier";
 import { extractMarketIntentEvidence } from "@/lib/ai/marketIntentEvidence";
@@ -179,6 +179,17 @@ export function mapRawSelectionToDraftSelection(raw: RawBetSelectionFields): Map
       league: leagueField,
       event,
       marketType: marketField,
+      // H3 Production Fix — the AI's own market text, verbatim, alongside
+      // (never replacing) the normalized marketType field above. Preserved
+      // specifically so a later stage (legacySelectionToCanonicalRequest)
+      // can recover market intent that normalizeDraftMarket doesn't
+      // recognize as a canonical label (e.g. "Фора"/"Handicap"/"Spread" —
+      // this vertical's own product vocabulary, never one of
+      // normalizeDraftMarket's known display-label set) but
+      // classifyBettingSelectionTextWithMarketHint still can, using the
+      // exact same deterministic classifier every other selection already
+      // goes through.
+      marketRawText: raw.market,
       selectionType,
       selectionRawText: raw.selection,
       participant,
@@ -293,81 +304,23 @@ export interface MarketIntentObservation {
   readonly verification: MarketIntentVerification;
 }
 
-// H3 Production Gap Fix — the classifier's own final, lossless fallback
-// (never fabricate a market it couldn't actually determine; preserve the
-// original text as a PARTICIPANT name instead) is recognizable exactly the
-// same way numericRoleEvidence.ts's and marketIntentEvidence.ts's own
-// (private, unexported) isGenericFallback checks already do: marketType
-// MONEYLINE_2WAY, selectionType PARTICIPANT, and participantName equal to
-// the EXACT text that was classified, verbatim. Reimplemented here rather
-// than imported, per this fix's explicit scope (marketIntentEvidence.ts is
-// not touched) — same "one check, independently reimplemented per file"
-// precedent numericRoleEvidence.ts's own header comment already documents.
-// This is what distinguishes a genuine "nothing matched" fallback from a
-// real, confident MONEYLINE_2WAY classification that merely happens to
-// share the same marketType/selectionType (e.g. "Arsenal Win"'s
-// winner-suffix-derived participantName "Arsenal" — shorter than the full
-// input "Arsenal Win" — is never mistaken for a fallback here).
-function isGenericParticipantFallback(classified: Pick<MarketIntentClaim, "marketType" | "selectionType"> & { participantName: string | null }, classifiedText: string): boolean {
-  return classified.marketType === "MONEYLINE_2WAY" && classified.selectionType === "PARTICIPANT" && classified.participantName === classifiedText;
-}
-
-// H3 Production Gap Fix — root cause: raw.selection alone is sometimes not
-// the whole story. The AI's own field split is a legitimate, schema-
-// encouraged choice ("market": the bet type, only when named or
-// unambiguous; "selection": the outcome) — for a natural-language handicap
-// phrase, the AI may correctly move the market word ("Фора"/"Handicap") into
-// raw.market while leaving raw.selection as the bare participant name
-// ("Арсенал"). classifyBettingSelectionText(raw.selection) alone then sees
-// nothing but a bare name and falls back to a fabricated MONEYLINE_2WAY
-// claim — which then genuinely (but falsely) CONTRADICTS the real SPREAD
-// evidence marketIntentEvidence.ts already correctly found in originalText.
-//
-// Fix: ONLY when raw.selection alone resolves to the classifier's own
-// generic PARTICIPANT fallback (never for any other, already-confident
-// classification — see isGenericParticipantFallback above), and ONLY when
-// raw.market is present and non-empty, try ONE additional reconstructed
-// candidate: `${raw.selection} ${raw.market}` (participant-then-marker —
-// the SUFFIX shape shorthandClassifier.ts's own SPREAD/TEAM_TOTAL grammar
-// is built around, e.g. "Арсенал Фора", "Arsenal Handicap"; the reverse
-// order does not match that grammar without a trailing line, which this
-// reconstruction never has). If — and only if — that reconstructed
-// candidate is ALSO not a generic fallback, its (marketType, selectionType)
-// becomes the claim instead. No other permutation is tried, no fuzzy
-// matching, no originalText involvement — this only ever recovers intent
-// the AI itself already explicitly supplied in raw.market, exactly as
-// stated, through the exact same closed-vocabulary deterministic classifier
-// every other claim already goes through.
-//
-// A genuinely confident selection-derived claim (e.g. "Arsenal Win", or
-// "Over 2.5") is NEVER reached by this fallback at all — the generic-
-// fallback guard above short-circuits before any reconstruction is even
-// attempted, so raw.market can never silently override a real claim; it can
-// only fill in for a claim that was never real to begin with (a fabricated
-// "PARTICIPANT" reading of a bare name).
+// H3 Production Fix — the market-hint-aware reconstruction this claim needs
+// (root cause: raw.selection alone is sometimes not the whole story — the
+// AI's own field split is a legitimate, schema-encouraged choice ("market":
+// the bet type; "selection": the outcome) — for a natural-language handicap
+// phrase, the AI may correctly move the market word ("Фора"/"Handicap")
+// into raw.market while leaving raw.selection as the bare participant name)
+// now lives in exactly ONE place — classifyBettingSelectionTextWithMarketHint
+// (lib/odds/shorthandClassifier.ts) — shared with
+// lib/odds/legacyOddsBridge.ts's legacySelectionToCanonicalRequest, which
+// applies the identical rule when building the REAL canonical request used
+// for odds verification. Previously this logic was duplicated here as its
+// own local classifyMarketIntentClaim/isGenericParticipantFallback pair;
+// consolidated so BA-2D's claim and the canonical request can never
+// silently diverge on the same input again.
 function classifyMarketIntentClaim(selection: RawBetSelectionFields, participants: readonly string[]): MarketIntentClaim {
-  const classified = classifyBettingSelectionText(selection.selection, participants);
-
-  if (!isGenericParticipantFallback(classified, selection.selection.trim())) {
-    return { marketType: classified.marketType, selectionType: classified.selectionType };
-  }
-
-  const rawMarket = selection.market?.trim() ?? "";
-  if (rawMarket.length === 0) {
-    return { marketType: classified.marketType, selectionType: classified.selectionType };
-  }
-
-  const reconstructedText = `${selection.selection.trim()} ${rawMarket}`;
-  const reconstructed = classifyBettingSelectionText(reconstructedText, participants);
-
-  if (isGenericParticipantFallback(reconstructed, reconstructedText)) {
-    // raw.market didn't contain anything the classifier recognizes either
-    // (e.g. a league name, or genuinely unrelated text) — never fabricate a
-    // market from it; the original fallback claim stands.
-    return { marketType: classified.marketType, selectionType: classified.selectionType };
-  }
-
-  return { marketType: reconstructed.marketType, selectionType: reconstructed.selectionType };
+  const classified = classifyBettingSelectionTextWithMarketHint(selection.selection, selection.market, participants);
+  return { marketType: classified.marketType, selectionType: classified.selectionType };
 }
 
 // SINGLE only — mirrors computeNumericRoleObservations' own LINE/ODDS

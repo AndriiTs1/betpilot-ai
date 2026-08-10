@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyBettingSelectionText } from "./shorthandClassifier";
+import { classifyBettingSelectionText, classifyBettingSelectionTextWithMarketHint } from "./shorthandClassifier";
 
 /* -------------------------------------------------------------------------- */
 /* Moneyline — bare 1X2 tokens (parity with the removed legacyOddsBridge.ts   */
@@ -873,4 +873,93 @@ test("existing markets regression: MONEYLINE and TOTALS classification is comple
   assert.equal(under.marketType, "TOTALS");
   assert.equal(under.selectionType, "UNDER");
   assert.equal(under.embeddedLine, "3");
+});
+
+/* -------------------------------------------------------------------------- */
+/* H3 Production Fix — classifyBettingSelectionTextWithMarketHint            */
+/* -------------------------------------------------------------------------- */
+
+test("classifyBettingSelectionTextWithMarketHint: 'Арсенал' + market hint 'Фора' -> SPREAD, participant Arsenal (the exact production bug shape)", () => {
+  const result = classifyBettingSelectionTextWithMarketHint("Арсенал", "Фора");
+  assert.equal(result.marketType, "SPREAD");
+  assert.equal(result.selectionType, "PARTICIPANT");
+  assert.equal(result.participantName, "Арсенал");
+});
+
+test("classifyBettingSelectionTextWithMarketHint: 'Арсенал' + market hint 'Handicap' (EN word, RU selection) -> SPREAD, participant Арсенал", () => {
+  const result = classifyBettingSelectionTextWithMarketHint("Арсенал", "Handicap");
+  assert.equal(result.marketType, "SPREAD");
+  assert.equal(result.participantName, "Арсенал");
+});
+
+test("classifyBettingSelectionTextWithMarketHint: 'Arsenal' + market hint 'Spread' -> SPREAD, participant Arsenal", () => {
+  const result = classifyBettingSelectionTextWithMarketHint("Arsenal", "Spread");
+  assert.equal(result.marketType, "SPREAD");
+  assert.equal(result.participantName, "Arsenal");
+});
+
+test("classifyBettingSelectionTextWithMarketHint: 'Арсенал' + market hint 'Азійська фора' -> SPREAD, participant Арсенал", () => {
+  const result = classifyBettingSelectionTextWithMarketHint("Арсенал", "Азійська фора");
+  assert.equal(result.marketType, "SPREAD");
+  assert.equal(result.participantName, "Арсенал");
+});
+
+test("classifyBettingSelectionTextWithMarketHint: multi-word participant + market hint still resolves correctly ('Manchester United' + 'Handicap')", () => {
+  const result = classifyBettingSelectionTextWithMarketHint("Manchester United", "Handicap");
+  assert.equal(result.marketType, "SPREAD");
+  assert.equal(result.participantName, "Manchester United");
+});
+
+test("classifyBettingSelectionTextWithMarketHint: null market hint -> behaves exactly like classifyBettingSelectionText alone", () => {
+  const withHint = classifyBettingSelectionTextWithMarketHint("Арсенал", null);
+  const without = classifyBettingSelectionText("Арсенал");
+  assert.deepEqual(withHint, without);
+  assert.equal(withHint.marketType, "MONEYLINE_2WAY");
+});
+
+test("classifyBettingSelectionTextWithMarketHint: empty/whitespace-only market hint -> behaves exactly like no hint at all", () => {
+  const empty = classifyBettingSelectionTextWithMarketHint("Арсенал", "");
+  const whitespace = classifyBettingSelectionTextWithMarketHint("Арсенал", "   ");
+  assert.equal(empty.marketType, "MONEYLINE_2WAY");
+  assert.equal(whitespace.marketType, "MONEYLINE_2WAY");
+});
+
+test("classifyBettingSelectionTextWithMarketHint: undefined market hint -> behaves exactly like no hint at all", () => {
+  const result = classifyBettingSelectionTextWithMarketHint("Арсенал", undefined);
+  assert.equal(result.marketType, "MONEYLINE_2WAY");
+});
+
+test("classifyBettingSelectionTextWithMarketHint safety: a real, confident MONEYLINE selection ('Arsenal Win') is NEVER overridden by a contradictory market hint ('Handicap')", () => {
+  const result = classifyBettingSelectionTextWithMarketHint("Arsenal Win", "Handicap");
+  assert.equal(result.marketType, "MONEYLINE_2WAY");
+  assert.equal(result.participantName, "Arsenal");
+});
+
+test("classifyBettingSelectionTextWithMarketHint safety: a real, confident TOTALS selection ('Over 2.5') is NEVER overridden by a contradictory market hint ('Handicap')", () => {
+  const result = classifyBettingSelectionTextWithMarketHint("Over 2.5", "Handicap");
+  assert.equal(result.marketType, "TOTALS");
+  assert.equal(result.selectionType, "OVER");
+});
+
+test("classifyBettingSelectionTextWithMarketHint safety: an existing bare Ф1/F1 SPREAD selection is unaffected by a redundant market hint", () => {
+  const result = classifyBettingSelectionTextWithMarketHint("Арсенал Ф1(-1.5)", "Фора");
+  assert.equal(result.marketType, "SPREAD");
+  assert.equal(result.participantName, "Арсенал");
+  assert.equal(result.embeddedLine, "-1.5");
+});
+
+test("classifyBettingSelectionTextWithMarketHint: an unrecognized market hint ('Premier League') never fabricates a market", () => {
+  const result = classifyBettingSelectionTextWithMarketHint("Арсенал", "Premier League");
+  assert.equal(result.marketType, "MONEYLINE_2WAY");
+  assert.equal(result.participantName, "Арсенал");
+});
+
+test("classifyBettingSelectionTextWithMarketHint: knownParticipantNames still apply exactly as they do for classifyBettingSelectionText alone", () => {
+  // "Арсенал ТБ 2.5" arriving as one concatenated selection field, "Арсенал"
+  // known from the event split — the participant-stripping loop runs
+  // BEFORE this function's own market-hint fallback, unaffected by it.
+  const result = classifyBettingSelectionTextWithMarketHint("Арсенал ТБ 2.5", null, ["Арсенал", "Челси"]);
+  assert.equal(result.marketType, "TOTALS");
+  assert.equal(result.selectionType, "OVER");
+  assert.equal(result.embeddedLine, "2.5");
 });

@@ -298,6 +298,11 @@ export async function buildBetSlipPreview(
         // token (canonicalLine) and, eventually, persistence. Not read by
         // any matching/verification logic yet.
         line: selection.line ?? null,
+        // H3 Production Fix — threaded through so legacySelectionToCanonicalRequest
+        // can recover market intent a bare `selection` alone can't express
+        // (e.g. "Фора"/"Handicap"/"Spread") — see that function's own
+        // comment for the exact, narrow rule this only ever applies under.
+        marketRawText: selection.marketRawText ?? null,
       }),
     );
   });

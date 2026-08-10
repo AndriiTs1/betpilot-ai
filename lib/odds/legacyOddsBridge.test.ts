@@ -813,3 +813,253 @@ test("request mapping: SINGLE and EXPRESS selections classify identically — le
 
   assert.deepEqual(singleResult.selection, expressLegResult.selection);
 });
+
+/* -------------------------------------------------------------------------- */
+/* H3 Production Fix — canonical classification now consults marketRawText   */
+/* when `selection` alone falls to the generic PARTICIPANT fallback. This is */
+/* the ACTUAL fix for the production bug: BA-2D (lib/ai/betDraftMapper.ts)   */
+/* already correctly recognized SPREAD after the earlier e7c5303 fix, but    */
+/* THIS function — the one that builds the request real odds verification   */
+/* uses — independently reclassified the bare selection text with no        */
+/* knowledge of the market hint at all, silently reaching MONEYLINE_2WAY.    */
+/* -------------------------------------------------------------------------- */
+
+// ---------------------------------------------------------------------
+// Required field-shape tests A-E
+// ---------------------------------------------------------------------
+
+test("H3 field shape A: selection='Арсенал', market hint='Фора', line='-1.5' -> SPREAD, participant Арсенал, line -1.5", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Ковентрі",
+    selection: "Арсенал",
+    marketRawText: "Фора",
+    submittedOdds: null,
+    line: "-1.5",
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.selectionType, "PARTICIPANT");
+  assert.equal(request.selection.participant?.name, "Арсенал");
+  assert.equal(request.selection.line, "-1.5");
+});
+
+test("H3 field shape B: selection='Арсенал', market hint=null, line='-1.5' -> preserves current safe behavior, MONEYLINE (never fabricates SPREAD without a hint)", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Ковентрі",
+    selection: "Арсенал",
+    marketRawText: null,
+    submittedOdds: null,
+    line: "-1.5",
+  });
+  assert.equal(request.selection.marketType, "MONEYLINE_2WAY");
+  assert.equal(request.selection.participant?.name, "Арсенал");
+});
+
+test("H3 field shape C: selection='Арсенал фора' (marker already inside selection), market hint='Фора', line='-1.5' -> SPREAD, participant Арсенал", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Ковентрі",
+    selection: "Арсенал фора",
+    marketRawText: "Фора",
+    submittedOdds: null,
+    line: "-1.5",
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Арсенал");
+  assert.equal(request.selection.line, "-1.5");
+});
+
+test("H3 field shape D: selection='Арсенал -1.5' (line embedded in selection), market hint='Фора', line='-1.5' -> SPREAD, participant Арсенал", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Ковентрі",
+    selection: "Арсенал -1.5",
+    marketRawText: "Фора",
+    submittedOdds: null,
+    line: "-1.5",
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Арсенал");
+  assert.equal(request.selection.line, "-1.5");
+});
+
+test("H3 field shape E: selection='Арсенал', market hint='Spread' (EN word on a RU selection), line='-1.5' -> SPREAD, participant Арсенал", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Ковентрі",
+    selection: "Арсенал",
+    marketRawText: "Spread",
+    submittedOdds: null,
+    line: "-1.5",
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Арсенал");
+});
+
+test("H3 field shape EN: selection='Arsenal', market hint='Handicap', line='-1.5' -> SPREAD, participant Arsenal", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal vs Coventry",
+    selection: "Arsenal",
+    marketRawText: "Handicap",
+    submittedOdds: null,
+    line: "-1.5",
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Arsenal");
+});
+
+// ---------------------------------------------------------------------
+// Critical safety invariant — a market hint can never fabricate SPREAD
+// from an already-meaningful selection classification
+// ---------------------------------------------------------------------
+
+test("H3 critical safety: 'Arsenal Win' + market hint 'Handicap' remains MONEYLINE — the hint never overrides a real, confident classification", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal vs Coventry",
+    selection: "Arsenal Win",
+    marketRawText: "Handicap",
+    submittedOdds: 1.16,
+    line: null,
+  });
+  assert.equal(request.selection.marketType, "MONEYLINE_2WAY");
+  assert.notEqual(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Arsenal");
+});
+
+test("H3 critical safety: 'Over 2.5' + market hint 'Handicap' remains TOTALS", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal vs Coventry",
+    selection: "Over 2.5",
+    marketRawText: "Handicap",
+    submittedOdds: 1.9,
+    line: null,
+  });
+  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.selectionType, "OVER");
+});
+
+// ---------------------------------------------------------------------
+// Natural-language production regression — the exact reported phrases
+// ---------------------------------------------------------------------
+
+test("H3 production regression: RU 'Арсенал фора -1.5 ставка 10' shape -> canonical SPREAD/Арсенал/-1.5", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Ковентрі",
+    selection: "Арсенал",
+    marketRawText: "Фора",
+    submittedOdds: null,
+    line: "-1.5",
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Арсенал");
+  assert.equal(request.selection.line, "-1.5");
+});
+
+test("H3 production regression: RU 'Арсенал с форой -1.5 ставка 10' shape -> canonical SPREAD/Арсенал/-1.5", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Ковентрі",
+    selection: "Арсенал",
+    marketRawText: "Фора",
+    submittedOdds: null,
+    line: "-1.5",
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Арсенал");
+});
+
+test("H3 production regression: EN 'Arsenal handicap -1.5 stake 10' shape -> canonical SPREAD/Arsenal/-1.5", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal vs Coventry",
+    selection: "Arsenal",
+    marketRawText: "Handicap",
+    submittedOdds: null,
+    line: "-1.5",
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Arsenal");
+  assert.equal(request.selection.line, "-1.5");
+});
+
+test("H3 production regression: EN 'Arsenal spread -1.5 stake 10' shape -> canonical SPREAD/Arsenal/-1.5", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal vs Coventry",
+    selection: "Arsenal",
+    marketRawText: "Spread",
+    submittedOdds: null,
+    line: "-1.5",
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Arsenal");
+});
+
+// ---------------------------------------------------------------------
+// Quarter-line invariant — canonicalizes to SPREAD, exact line preserved,
+// never rounded. The H1 provider capability gate (unchanged, out of scope
+// here) is what keeps it non-confirmable — this only proves canonicalization
+// itself is correct and honest.
+// ---------------------------------------------------------------------
+
+test("H3 quarter-line: UA 'Арсенал азійська фора -1.25 ставка 10' shape -> canonical SPREAD/Арсенал/-1.25, exact line preserved, never rounded", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Ковентрі",
+    selection: "Арсенал",
+    marketRawText: "Азійська фора",
+    submittedOdds: null,
+    line: "-1.25",
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Арсенал");
+  assert.equal(request.selection.line, "-1.25");
+  assert.notEqual(request.selection.line, "-1.5");
+  assert.notEqual(request.selection.line, "-1");
+});
+
+// ---------------------------------------------------------------------
+// MONEYLINE/TOTALS regression — existing behavior byte-for-byte unchanged
+// ---------------------------------------------------------------------
+
+test("H3 regression: 'Arsenal Win' (no market hint at all) -> MONEYLINE_2WAY, unchanged", () => {
+  const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "Arsenal vs Coventry", selection: "Arsenal Win", submittedOdds: 1.16 });
+  assert.equal(request.selection.marketType, "MONEYLINE_2WAY");
+});
+
+test("H3 regression: 'Draw'/'Ничья' -> MONEYLINE_3WAY/DRAW, unchanged", () => {
+  const en = legacySelectionToCanonicalRequest({ sport: "Football", event: "Arsenal vs Coventry", selection: "Draw", submittedOdds: 3.4 });
+  assert.equal(en.selection.marketType, "MONEYLINE_3WAY");
+  assert.equal(en.selection.selectionType, "DRAW");
+
+  const ru = legacySelectionToCanonicalRequest({ sport: "Football", event: "Арсенал vs Ковентрі", selection: "Ничья", submittedOdds: 3.4 });
+  assert.equal(ru.selection.marketType, "MONEYLINE_3WAY");
+  assert.equal(ru.selection.selectionType, "DRAW");
+});
+
+test("H3 regression: 'Over 2.5'/'Under 3' -> TOTALS, unchanged", () => {
+  const over = legacySelectionToCanonicalRequest({ sport: "Football", event: "Arsenal vs Coventry", selection: "Over 2.5", submittedOdds: 1.9 });
+  assert.equal(over.selection.marketType, "TOTALS");
+  assert.equal(over.selection.selectionType, "OVER");
+
+  const under = legacySelectionToCanonicalRequest({ sport: "Football", event: "Arsenal vs Coventry", selection: "Under 3", submittedOdds: 1.9 });
+  assert.equal(under.selection.marketType, "TOTALS");
+  assert.equal(under.selection.selectionType, "UNDER");
+});
+
+test("H3 regression: existing Ф1/F1 short forms unaffected by the new marketRawText field being omitted entirely (optional, backward-compatible)", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Челси",
+    selection: "Арсенал Ф1(-1.5)",
+    submittedOdds: 1.9,
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Арсенал");
+  assert.equal(request.selection.line, "-1.5");
+});

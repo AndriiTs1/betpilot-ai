@@ -29,7 +29,7 @@ import type { VerifySelectionRequest } from "./oddsProvider";
 import type { VerificationResult } from "./verification";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { resolveFootballLeague } from "./footballLeagues";
-import { classifyBettingSelectionText } from "./shorthandClassifier";
+import { classifyBettingSelectionTextWithMarketHint } from "./shorthandClassifier";
 
 /* -------------------------------------------------------------------------- */
 /* Legacy sport string -> canonical Sport                                     */
@@ -169,9 +169,16 @@ export interface LegacyVerifiableSelection {
   readonly submittedOdds: number | null;
   // Betting Markets V1, Phase 2 — the numeric line for a TOTALS/SPREAD
   // selection, when stated (e.g. "2.5", "-1.5", "+1.5"). Absent/null both
-  // mean "no line stated". Purely additive: no market classification below
-  // reads this field yet.
+  // mean "no line stated".
   readonly line?: string | null;
+  // H3 Production Fix — the AI's own raw, unnormalized market text (e.g.
+  // "Фора", "Азійська фора", "Handicap", "Spread"), when stated. Absent/
+  // null both mean "no market hint stated". Consulted ONLY as a fallback,
+  // and ONLY when `selection` alone resolves to the classifier's own
+  // generic PARTICIPANT fallback — see classifyBettingSelectionTextWithMarketHint
+  // (lib/odds/shorthandClassifier.ts) for the exact rule. Never overrides a
+  // real, already-confident classification derived from `selection` alone.
+  readonly marketRawText?: string | null;
 }
 
 // league/provider IDs/acceptedOdds/currentOdds are never set here — league
@@ -209,7 +216,16 @@ export function legacySelectionToCanonicalRequest(selection: LegacyVerifiableSel
   // still be recognized — closing the exact gap the BA-1 acceptance audit
   // traced this production bug to.
   const knownParticipantNames = event.participants.map((participant) => participant.name);
-  const classified = classifyBettingSelectionText(selection.selection, knownParticipantNames);
+  // H3 Production Fix — this is the ACTUAL canonical-request-building call
+  // (the one whose output real odds verification uses), previously blind to
+  // any market hint the AI supplied separately from `selection` — the exact
+  // production root cause (a natural-language handicap phrase split across
+  // market="Фора"/selection="Арсенал" silently reclassified as MONEYLINE
+  // here, even after BA-2D's own claim was correctly SPREAD). Now uses the
+  // one shared reconstruction rule (lib/odds/shorthandClassifier.ts) BA-2D
+  // itself uses, so this function and BA-2D's claim can never diverge on
+  // the same input again.
+  const classified = classifyBettingSelectionTextWithMarketHint(selection.selection, selection.marketRawText, knownParticipantNames);
 
   // Line precedence: BetSlipSelectionInput.line (Phase 2's already-threaded
   // field — the AI's own dedicated "line" tool-schema value) is always

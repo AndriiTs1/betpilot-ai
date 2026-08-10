@@ -803,6 +803,90 @@ test("end-to-end sanity check: 'Арсенал победа ставка 10' rem
   assert.equal(calls.length, 1, "a real, supported MONEYLINE selection must still reach the h2h verifier exactly once");
 });
 
+/* -------------------------------------------------------------------------- */
+/* H3 Production Fix — the SECOND production incident, discovered after      */
+/* e7c5303: BA-2D correctly recognized SPREAD, but legacySelectionToCanonicalRequest */
+/* (the function that ACTUALLY builds the request real odds verification     */
+/* uses) independently reclassified the bare "Арсенал" selection with no     */
+/* knowledge of the market hint "Фора" at all, silently reaching             */
+/* MONEYLINE_2WAY and pricing it at Arsenal's real moneyline odds (1.16 —    */
+/* the exact figure from the real production report). This proves the fix:  */
+/* the same request, now built WITH the market hint threaded through, routes*/
+/* only to spread verification — h2h is primed with the exact same 1.16     */
+/* price and proven never called.                                           */
+/* -------------------------------------------------------------------------- */
+
+test("H3 production fix end-to-end: bare 'Арсенал' + market hint 'Фора' + line '-1.5' — canonical SPREAD, routes ONLY to spread verification, h2h (primed with the exact real production price 1.16) is NEVER called", async () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal — Coventry City",
+    selection: "Арсенал",
+    marketRawText: "Фора",
+    submittedOdds: null,
+    line: "-1.5",
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.notEqual(request.selection.marketType, "MONEYLINE_2WAY");
+  assert.equal(request.selection.participant?.name, "Арсенал");
+  assert.equal(request.selection.line, "-1.5");
+
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.16 }));
+  const { fn: spreadFn, calls: spreadCalls } = capturingVerifySpreadOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9 }),
+  );
+  const provider = new TheOddsApiProvider(h2hFn, undefined, spreadFn);
+  const result = await provider.verifySelection({ selection: request.selection });
+
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(h2hCalls.length, 0, "must never reach the h2h verifier — this is the exact second production incident's fixture and must never be priced as 'Arsenal Win' at 1.16");
+  assert.equal(spreadCalls.length, 1);
+  assert.equal(spreadCalls[0].participant, "Арсенал");
+  assert.equal(spreadCalls[0].line, "-1.5");
+  assert.notEqual(result.currentOdds, "1.16", "must never surface the moneyline price as if it were the spread price");
+});
+
+test("H3 production fix end-to-end: EN 'Arsenal' + market hint 'Handicap' + line '-1.5' — same proof, h2h never called even though a throwing fake would catch any accidental call", async () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal — Coventry City",
+    selection: "Arsenal",
+    marketRawText: "Handicap",
+    submittedOdds: null,
+    line: "-1.5",
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Arsenal");
+
+  // A throwing h2h fake — if this is ever called, the test fails loudly via
+  // an unhandled/rejected promise rather than silently, the strongest form
+  // of "never called" this test suite's own conventions already use.
+  const provider = new TheOddsApiProvider(throwingVerifyOddsFn(), undefined, capturingVerifySpreadOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9 })).fn);
+  const result = await provider.verifySelection({ selection: request.selection });
+
+  assert.equal(result.status, "VERIFIED");
+});
+
+test("H3 production fix: MONEYLINE safety preserved through the full provider path — 'Arsenal Win' + market hint 'Handicap' still routes to h2h, never spread", async () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal — Coventry City",
+    selection: "Arsenal Win",
+    marketRawText: "Handicap",
+    submittedOdds: 1.16,
+    line: null,
+  });
+  assert.equal(request.selection.marketType, "MONEYLINE_2WAY");
+
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.16 }));
+  const { fn: spreadFn, calls: spreadCalls } = capturingVerifySpreadOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9 }));
+  const provider = new TheOddsApiProvider(h2hFn, undefined, spreadFn);
+  const result = await provider.verifySelection({ selection: request.selection });
+
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(h2hCalls.length, 1, "a real, confident MONEYLINE claim must still reach h2h — the market hint never suppresses a genuine MONEYLINE routing");
+  assert.equal(spreadCalls.length, 0);
+});
+
 /* ============================================================================
  * Handicap Stage H1 — SPREAD exact-line provider verification.
  * Standard whole/half lines only; quarter lines remain non-confirmable.

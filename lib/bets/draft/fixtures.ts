@@ -46,6 +46,7 @@ export function draftSelection(overrides: Partial<UniversalBetDraftSelection> = 
     league: missingField(),
     event: draftEvent(),
     marketType: missingField(),
+    marketRawText: null,
     selectionType: extractedField("PARTICIPANT", "Arsenal"),
     selectionRawText: "Arsenal",
     participant: { kind: "INDEX", participantIndex: 0 },

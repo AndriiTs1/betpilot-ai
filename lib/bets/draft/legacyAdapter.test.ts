@@ -26,6 +26,9 @@ test("adapter: football SINGLE with odds adapts to the exact ParsedBetSlip shape
         league: null,
         event: "Arsenal vs Chelsea",
         market: null,
+        // H3 Production Fix — the raw market hint now threads through too
+        // (null here: the fixture's default marketRawText is null).
+        marketRawText: null,
         selection: "Arsenal",
         submittedOdds: 1.95,
         // Betting Markets V1, Phase 2 — line now threads through too (null
@@ -235,7 +238,7 @@ test("adapter: period/warnings/confidence/participants never leak into the adapt
   const slip = universalBetDraftToParsedBetSlip(input);
 
   assert.deepEqual(Object.keys(slip).sort(), ["selections", "stake", "type"]);
-  assert.deepEqual(Object.keys(slip.selections[0]).sort(), ["event", "league", "line", "market", "selection", "sport", "submittedOdds"]);
+  assert.deepEqual(Object.keys(slip.selections[0]).sort(), ["event", "league", "line", "market", "marketRawText", "selection", "sport", "submittedOdds"]);
   // The actual point of Step 16A: an extracted league's resolvedName
   // reaches ParsedBetSlip, where it used to be silently dropped.
   assert.equal(slip.selections[0].league, "La Liga");

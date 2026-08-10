@@ -994,3 +994,57 @@ test("BA-2D Step 4: EXPRESS mapping unchanged when onMarketIntentObservation is 
 
   assert.deepEqual(withoutCallback, withCallback);
 });
+
+/* -------------------------------------------------------------------------- */
+/* H3 Production Fix — marketRawText threads through the full mapper output, */
+/* and BA-2D's claim now agrees with what legacySelectionToCanonicalRequest  */
+/* (lib/odds/legacyOddsBridge.ts) will independently derive from the SAME    */
+/* ParsedBetSlip fields — both now share ONE reconstruction implementation   */
+/* (classifyBettingSelectionTextWithMarketHint), so they can never diverge   */
+/* again on the same input.                                                  */
+/* -------------------------------------------------------------------------- */
+
+test("H3 gap fix: raw.market survives into ParsedBetSlip.selections[0].marketRawText verbatim, alongside (never replacing) the existing normalized market field", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Арсенал vs Ковентрі", market: "Фора", selection: "Арсенал", line: "-1.5", odds: null })],
+  };
+  const slip = mapRawBetSlipToParsedBetSlip(raw, { originalText: "Арсенал фора -1.5 ставка 10", sourceType: "CHAT" });
+
+  assert.equal(slip.selections[0].marketRawText, "Фора");
+  // The existing normalized `market` field is unaffected — "Фора" is not a
+  // canonical display label normalizeDraftMarket recognizes, so it still
+  // adapts to null exactly as it did before this fix.
+  assert.equal(slip.selections[0].market, null);
+  assert.equal(slip.selections[0].selection, "Арсенал");
+});
+
+test("H3 gap fix: marketRawText is null when raw.market is null — no fabrication", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Арсенал vs Ковентрі", market: null, selection: "Арсенал", line: "-1.5", odds: null })],
+  };
+  const slip = mapRawBetSlipToParsedBetSlip(raw, { originalText: "Арсенал фора -1.5 ставка 10", sourceType: "CHAT" });
+  assert.equal(slip.selections[0].marketRawText, null);
+});
+
+test("H3 gap fix: BA-2D's claim and the downstream canonical classification (legacySelectionToCanonicalRequest, called with the same ParsedBetSlip fields this test observes) now agree — both SPREAD for the market-split shape", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Арсенал vs Ковентрі", market: "Фора", selection: "Арсенал", line: "-1.5", odds: null })],
+  };
+  const { slip, observations } = observeMarket(raw, "Арсенал фора -1.5 ставка 10");
+
+  assert.equal(observations[0].claim.marketType, "SPREAD");
+  assert.equal(observations[0].verification.verdict, "CORROBORATED");
+
+  // The exact fields legacySelectionToCanonicalRequest (lib/odds/legacyOddsBridge.ts)
+  // would independently receive from this same ParsedBetSlip — proving the
+  // data needed for both call sites to agree is actually present here.
+  assert.equal(slip.selections[0].selection, "Арсенал");
+  assert.equal(slip.selections[0].marketRawText, "Фора");
+  assert.equal(slip.selections[0].line, "-1.5");
+});

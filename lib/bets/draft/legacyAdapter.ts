@@ -112,6 +112,10 @@ export function universalBetDraftToParsedBetSlip(draft: UniversalBetDraft): Pars
     league: optionalLegacyLeagueText(selection.league),
     event: selection.event.rawText,
     market: optionalLegacyDisplayText(selection.marketType),
+    // H3 Production Fix — threaded through verbatim, additive alongside the
+    // normalized `market` field above (see UniversalBetDraftSelection's own
+    // comment on marketRawText for why this survives separately).
+    marketRawText: selection.marketRawText,
     selection: selection.selectionRawText,
     submittedOdds: toOptionalNumber(selection.submittedOdds, "INVALID_SUBMITTED_ODDS", `selections[${index}].submittedOdds`),
     line: optionalLegacyLineText(selection.line),
