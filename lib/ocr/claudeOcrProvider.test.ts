@@ -108,6 +108,43 @@ test("claudeOcrProvider: the request sent to Claude carries the base64 image and
   assert.equal(imageBlock.source.data, Buffer.from("hello-image").toString("base64"));
 });
 
+// Stage AI-1 — temperature: 0 on the raw transcription request (verbatim
+// text, not semantic extraction — deliberately not the same value as the
+// production parser's 0.1). Also pins every other request field this
+// stage must leave untouched, so a future change to one of them fails
+// loudly here rather than silently. This literal is a deliberate fixture
+// copy of claudeOcrProvider.ts's own OCR_SYSTEM_PROMPT (not exported by
+// that module), not a re-derivation — if the prompt ever changes for an
+// unrelated reason, this assertion is meant to catch that drift too.
+const EXPECTED_OCR_SYSTEM_PROMPT =
+  "You transcribe visible text from an image exactly as it appears, nothing " +
+  "more. Output only the raw text you can read, preserving line breaks, " +
+  "numbers, decimal separators, plus/minus signs, punctuation, and symbols " +
+  "exactly as shown. Do not translate, summarize, classify, interpret, or " +
+  "add any commentary of your own. If the image contains no legible text, " +
+  "respond with nothing.";
+
+test("claudeOcrProvider: the request sent to Claude carries temperature: 0 and leaves model/max_tokens/system unchanged", async () => {
+  let capturedBody: Record<string, unknown> | null = null;
+
+  currentHandler = async (_url, init) => {
+    capturedBody = JSON.parse(String(init?.body));
+    return anthropicTextResponse("ok");
+  };
+
+  const provider = createClaudeOcrProvider();
+  await provider.recognize(validInput());
+
+  assert.ok(capturedBody);
+  const body = capturedBody as Record<string, unknown>;
+  assert.equal(body.temperature, 0);
+  assert.equal(body.model, "claude-sonnet-4-6");
+  assert.equal(body.max_tokens, 2048);
+  assert.equal(body.system, EXPECTED_OCR_SYSTEM_PROMPT);
+  assert.equal("top_p" in body, false);
+  assert.equal("top_k" in body, false);
+});
+
 test("claudeOcrProvider: missing ANTHROPIC_API_KEY returns PROVIDER_UNAVAILABLE without any network call", async () => {
   delete process.env.ANTHROPIC_API_KEY;
   let fetchCalled = false;

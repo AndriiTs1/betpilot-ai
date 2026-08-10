@@ -90,6 +90,12 @@ export function createClaudeOcrProvider(options: CreateClaudeOcrProviderOptions 
           {
             model: CLAUDE_OCR_MODEL,
             max_tokens: 2048,
+            // Stage AI-1 — this call only transcribes visible text verbatim
+            // (OCR_SYSTEM_PROMPT above), never paraphrases or interprets, so
+            // zero randomness is the correct setting: any deviation from the
+            // API default here would only ever mean a misread character, not
+            // a legitimate creative choice worth preserving.
+            temperature: 0,
             system: OCR_SYSTEM_PROMPT,
             messages: [
               {

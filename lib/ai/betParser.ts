@@ -606,6 +606,14 @@ async function parseTextSlipWithClaude(
       {
         model: CLAUDE_MODEL,
         max_tokens: 1024,
+        // Stage AI-1 — this is structured field extraction (event/market/
+        // selection/line/odds/stake via a strict tool schema), not creative
+        // generation, so a low temperature reduces run-to-run variance on
+        // ambiguous input without a documented quality cost (Anthropic's
+        // own SDK docs recommend closer to 0.0 for "analytical" tasks).
+        // Applied identically to CHAT and OCR modes — both share this exact
+        // call site and schema, only the system prompt below differs.
+        temperature: 0.1,
         // Only the system prompt varies by mode — both share the exact
         // same `tools` array immediately below, which is what guarantees
         // CHAT and OCR always produce the identical JSON schema.

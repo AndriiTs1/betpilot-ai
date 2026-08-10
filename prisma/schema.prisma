@@ -14,6 +14,13 @@ enum BetStatus {
   SETTLED_WIN
   SETTLED_LOSS
   VOID
+  // H4-B1 — schema/type foundation only, added ahead of the H4-B3 payout
+  // math that will actually produce them. Not yet reachable through any
+  // public settlement route or auto-settlement path (see
+  // lib/bets/settlementRules.ts's SettlementTarget / isSettlementTarget
+  // split and lib/bets/settleBet.ts's UnsupportedSettlementTargetError).
+  SETTLED_HALF_WIN
+  SETTLED_HALF_LOSS
 }
 
 // Stage 1 of the Bet -> Bet + BetSelection migration (see README "What's not
@@ -53,6 +60,68 @@ enum TransactionType {
 enum MessageDirection {
   INBOUND
   OUTBOUND
+}
+
+// Stage 4.3.1 — Retry & Manual Review. Bet.settlementReviewStatus's own
+// nullable status: null means "not flagged, ordinary automatic polling
+// applies"; NEEDS_REVIEW/RESOLVED are set exclusively by the Stage 4.3
+// orchestration layer (pollConfirmedBetResults / the future manual-retry
+// service) — settleBet.ts/settlementRules.ts never read or write this
+// enum, and its values never gate a financial transition on their own.
+//
+// DB-0 — restored from commit d0b62b86e3349e02f825c381ca42d3f53b8e33a1
+// (branch stage-4.3-settlement-review) to bring prisma/schema.prisma back
+// in sync with migration 20260730072017_stage_4_3_1_settlement_review_fields,
+// already applied to the shared dev database but missing from main's
+// history. Schema/migration-history restoration only — the Retry & Manual
+// Review application code that reads/writes these fields (routes,
+// dashboard components, polling/escalation logic) is deliberately NOT
+// restored; nothing in main writes to these fields yet.
+enum SettlementReviewStatus {
+  NEEDS_REVIEW
+  RESOLVED
+}
+
+// Stage 4.3.1 — stable, machine-readable reason a Bet was escalated to
+// NEEDS_REVIEW. Deliberately NOT free text (see Stage 4.3 v2/v3 design
+// notes) — the dashboard is responsible for localizing/formatting this into
+// operator-facing copy; dynamic detail (e.g. a specific participant name)
+// belongs in Bet.lastSettlementErrorMessage instead, never here. Every
+// value below is either a direct 1:1 mirror of an existing settlement
+// rejection/evaluator reasonCode already used elsewhere in this codebase
+// (lib/bets/settlement/evaluateSelectionOutcome.ts's Unsupported/InvalidData
+// reason codes, autoSettleSingleBet.ts/autoSettleExpressBet.ts's REJECTED
+// reasonCode, settleBet.ts's MissingSettlementOddsError/
+// InvalidEffectiveSettlementOddsError.code) or a genuinely new Stage
+// 4.3-only derived reason for a transient class that exceeded its retry
+// budget (the four *_MAX_RETRIES / POLLING_WINDOW_EXPIRED values).
+enum SettlementReviewReason {
+  POLLING_WINDOW_EXPIRED
+  EVENT_NOT_FOUND_MAX_RETRIES
+  MISSING_SCORE_MAX_RETRIES
+  DB_ERROR_MAX_RETRIES
+
+  MISSING_PROVIDER_REFERENCE
+  PROVIDER_EVENT_MISMATCH
+  MISSING_CANONICAL_METADATA
+
+  INVALID_BET_TYPE
+  EMPTY_SELECTIONS
+  DUPLICATE_PROVIDER_EVENT_RESULT
+
+  UNSUPPORTED_MARKET
+  UNSUPPORTED_SELECTION
+  UNSUPPORTED_PERIOD
+
+  INVALID_SCORE
+  PARTICIPANT_MISMATCH
+  INVALID_EVENT_RESULT
+  MISSING_PARTICIPANT_NAME
+  AMBIGUOUS_PARTICIPANT_MATCH
+
+  MISSING_SETTLEMENT_ODDS
+  INVALID_SETTLEMENT_ODDS
+  INVALID_EXPRESS_DATA
 }
 
 model Operator {
@@ -189,6 +258,30 @@ model Bet {
   canonicalParticipant   String?
   canonicalPeriod        String?
 
+  // Stage 4.3.1 — Retry & Manual Review. Current-state-only fields (no
+  // array/JSON attempt history — a future, separate Settlement Audit Trail
+  // stage owns full per-attempt history; this is deliberately NOT that).
+  // All additive/nullable-or-defaulted so every existing row (including the
+  // legacy, provider-metadata-less CONFIRMED bets) migrates with a safe
+  // default and is structurally unaffected. Written exclusively by the
+  // Stage 4.3 polling/manual-retry orchestration layer — never by
+  // settleBet.ts/settlementRules.ts, and never inside settleBet()'s own
+  // $transaction (see Stage 4.3 design notes on why that boundary matters
+  // for idempotency).
+  //
+  // DB-0 — restored (schema declarations only, matching the already-applied
+  // migration 20260730072017_stage_4_3_1_settlement_review_fields) from
+  // commit d0b62b86e3349e02f825c381ca42d3f53b8e33a1, branch
+  // stage-4.3-settlement-review. The Retry & Manual Review application code
+  // that reads/writes these fields is NOT restored — nothing on main
+  // touches them yet.
+  settlementRetryCount       Int                      @default(0)
+  lastSettlementAttemptAt    DateTime?
+  lastSettlementErrorCode    String?
+  lastSettlementErrorMessage String?
+  settlementReviewStatus     SettlementReviewStatus?
+  settlementReviewReason     SettlementReviewReason?
+
   // Betting Markets V1, Phase 1 — the numeric line for TOTALS (e.g. 2.5)
   // and SPREAD (e.g. -1.5) selections. Nullable and unpopulated by any
   // code path yet: this phase only adds the column, no parsing/provider/
@@ -196,10 +289,13 @@ model Bet {
   // for MONEYLINE_2WAY/MONEYLINE_3WAY (including DRAW), which have no
   // line concept — matches lib/odds/domain.ts's CanonicalSelection.line
   // (optional) and validateCanonicalSelection's own per-market rules.
-  // Decimal(4,1): football totals/spreads are always in whole or
-  // half-point increments (2.5, 10.5, -1.5), max realistic magnitude far
-  // below the 999.9 ceiling this precision allows.
-  line Decimal? @db.Decimal(4, 1)
+  // Decimal(5,2) — widened in H4-B1 from the original Decimal(4,1) so a
+  // quarter-point Asian handicap line (e.g. -1.25, +0.75) can be persisted
+  // losslessly. Standard whole/half-point totals and spreads (2.5, 10.5,
+  // -1.5) round-trip unchanged. This is schema-only: no parsing/provider/
+  // preview/confirmation/settlement code path writes a quarter line yet —
+  // see lib/odds/theOddsApiProvider.ts's still-untouched capability gate.
+  line Decimal? @db.Decimal(5, 2)
 
   // Full event display metadata — the provider's own team names and a
   // human-readable competition name, alongside the provider fields above.
@@ -259,8 +355,9 @@ model BetSelection {
 
   // Betting Markets V1, Phase 1 — same field, same rationale as Bet.line
   // above, one per EXPRESS leg (Variant B: mirrors the same field set
-  // added to Bet, for SINGLE).
-  line Decimal? @db.Decimal(4, 1)
+  // added to Bet, for SINGLE). Decimal(5,2): see Bet.line's own comment
+  // for the H4-B1 quarter-line precision widening.
+  line Decimal? @db.Decimal(5, 2)
 
   // Same full event display metadata as Bet's own fields above, per leg.
   homeTeamName    String?

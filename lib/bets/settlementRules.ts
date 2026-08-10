@@ -16,7 +16,15 @@ import type { BetStatus } from "@/lib/generated/prisma/client";
 // which by definition means the mutation already happened on some earlier
 // request and must not run again.
 
-export type SettlementTarget = "SETTLED_WIN" | "SETTLED_LOSS" | "VOID";
+// H4-B1 — widened from the original 3-value union to also *structurally*
+// recognize SETTLED_HALF_WIN/SETTLED_HALF_LOSS (needed so this type can
+// describe a bet's currentStatus once it's terminally half-settled, and so
+// SettlementConflictError/SettlementDecision can name them). This is a type-
+// level widening only. SETTLEMENT_TARGET_STATUSES/isSettlementTarget below —
+// the *runtime* gate on what a caller may currently REQUEST — deliberately
+// stay at the original 3 values. See the comment above isSettlementTarget
+// for why that split is intentional, not an oversight.
+export type SettlementTarget = "SETTLED_WIN" | "SETTLED_LOSS" | "VOID" | "SETTLED_HALF_WIN" | "SETTLED_HALF_LOSS";
 
 // Frozen array (not a mutable Set) exported directly — a plain frozen
 // array reliably rejects consumer mutation (Object.freeze blocks .push()/
@@ -24,6 +32,16 @@ export type SettlementTarget = "SETTLED_WIN" | "SETTLED_LOSS" | "VOID";
 // reliably block .add()/.set() in modern JS engines, since their mutating
 // state lives in an internal slot rather than an own property). The
 // `readonly` type additionally blocks any mutating call at compile time.
+//
+// H4-B1 — intentionally NOT widened to include SETTLED_HALF_WIN/
+// SETTLED_HALF_LOSS, even though the SettlementTarget type above now
+// includes them. This is the one runtime gate decideSettlementTransition
+// uses to validate requestedStatus, and it's also the exact gate
+// app/api/bets/[id]/settle/route.ts uses for its public pre-check — so
+// keeping it at 3 values is what keeps HALF_WIN/HALF_LOSS unrequestable
+// through both the public settle API and decideSettlementTransition itself
+// until H4-B3 adds real payout math for them. The schema/type layer knows
+// the status; no settlement action can request it yet.
 export const SETTLEMENT_TARGET_STATUSES: readonly SettlementTarget[] = Object.freeze([
   "SETTLED_WIN",
   "SETTLED_LOSS",
@@ -35,6 +53,10 @@ export const SETTLEMENT_TARGET_STATUSES: readonly SettlementTarget[] = Object.fr
 // there's nothing mutable for a consumer to reach.
 const SETTLEMENT_TARGET_SET: ReadonlySet<SettlementTarget> = new Set(SETTLEMENT_TARGET_STATUSES);
 
+// Returns true only for the 3 currently-requestable targets — see the
+// comment on SETTLEMENT_TARGET_STATUSES above. Correctly returns false for
+// "SETTLED_HALF_WIN"/"SETTLED_HALF_LOSS", even though both are valid
+// SettlementTarget *type* members now.
 export function isSettlementTarget(value: unknown): value is SettlementTarget {
   return typeof value === "string" && SETTLEMENT_TARGET_SET.has(value as SettlementTarget);
 }
@@ -146,7 +168,25 @@ export function decideSettlementTransition(currentStatus: BetStatus, requestedSt
     throw new InvalidSettlementTargetError(currentStatus, requestedStatus);
   }
 
-  if (currentStatus === "SETTLED_WIN" || currentStatus === "SETTLED_LOSS" || currentStatus === "VOID") {
+  // H4-B1 — widened to also recognize SETTLED_HALF_WIN/SETTLED_HALF_LOSS as
+  // terminal currentStatus values, both because BetStatus now has 8 members
+  // (the exhaustiveCheck guard below requires it) and because Section 5
+  // explicitly wants a HALF_* currentStatus to correctly conflict against a
+  // later different settlement request rather than falling through to
+  // BetNotConfirmedForSettlementError or the exhaustiveness error. Note
+  // this branch is reachable for a HALF_* currentStatus today only via a
+  // direct/manual DB write (nothing in this codebase can produce it yet);
+  // "same-target idempotency" for HALF_* (currentStatus === requestedStatus
+  // === a HALF_* value) is NOT reachable here, because requestedStatus must
+  // first pass isSettlementTarget, which stays at 3 values — that half of
+  // terminal recognition is deferred to H4-B3 alongside real payout support.
+  if (
+    currentStatus === "SETTLED_WIN" ||
+    currentStatus === "SETTLED_LOSS" ||
+    currentStatus === "VOID" ||
+    currentStatus === "SETTLED_HALF_WIN" ||
+    currentStatus === "SETTLED_HALF_LOSS"
+  ) {
     if (currentStatus === requestedStatus) {
       return { kind: "IDEMPOTENT", currentStatus, targetStatus: requestedStatus };
     }

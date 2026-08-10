@@ -98,6 +98,28 @@ export class InvalidEffectiveSettlementOddsError extends Error {
   }
 }
 
+// H4-B1 — SETTLED_HALF_WIN/SETTLED_HALF_LOSS are now valid SettlementTarget
+// *type* members (see lib/bets/settlementRules.ts), but this file's payout
+// math (computeSettlementFinancials below) does not yet know how to price
+// a half-win/half-loss. Nothing in this codebase can produce this error
+// today — decideSettlementTransition already rejects HALF_* as a
+// requestedStatus shape before settleBet ever calls computeSettlementFinancials
+// — but the explicit throw below is the fail-closed second layer Section 4
+// asks for, so a HALF_* target can never silently fall through to the VOID
+// branch and settle for a zero delta.
+export class UnsupportedSettlementTargetError extends Error {
+  readonly code = "UNSUPPORTED_SETTLEMENT_TARGET" as const;
+  readonly betId: string;
+  readonly targetStatus: SettlementTarget;
+
+  constructor(betId: string, targetStatus: SettlementTarget) {
+    super(`Bet ${betId}: settlement target ${targetStatus} has no financial execution support yet (H4-B3)`);
+    this.name = "UnsupportedSettlementTargetError";
+    this.betId = betId;
+    this.targetStatus = targetStatus;
+  }
+}
+
 // Deliberately NOT added (see Stage 13.3 report):
 // - PlayerNotFoundForSettlementError — Bet.playerId is a required FK with
 //   real referential integrity; a Bet can't reference a Player that
@@ -186,6 +208,12 @@ function computeSettlementFinancials(
   legacyOdds: Prisma.Decimal | null,
   overrideOdds: Prisma.Decimal | null,
 ): SettlementFinancials {
+  // Fail closed, before either real branch or the VOID fallback — see
+  // UnsupportedSettlementTargetError's own comment above.
+  if (targetStatus === "SETTLED_HALF_WIN" || targetStatus === "SETTLED_HALF_LOSS") {
+    throw new UnsupportedSettlementTargetError(betId, targetStatus);
+  }
+
   if (targetStatus === "SETTLED_WIN") {
     // Precedence: Stage 3.4A's caller-supplied overrideOdds first (already
     // validated by validateEffectiveOddsInput before this function is ever

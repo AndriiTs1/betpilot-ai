@@ -828,6 +828,116 @@ test("Betting Markets V1 Phase 1: EXPRESS BetSelection schema can persist line =
 });
 
 // ---------------------------------------------------------------------
+// H4-B1 — Decimal(5,2) precision widening (was Decimal(4,1)). These are
+// the schema persistence proofs Section 8/9 of the H4-B1 task ask for.
+// This repo has no live-database integration test harness (every test
+// here goes through the same in-memory fake DB the Phase 1 tests above
+// use), so these prove the schema *type*/creation path round-trips each
+// value exactly through Prisma.Decimal — not a live-database guarantee.
+// The real DB column's new precision was independently verified by
+// inspecting the generated migration SQL (`ALTER COLUMN "line" SET DATA
+// TYPE DECIMAL(5,2)`), reported in the H4-B1 final report rather than
+// asserted here as a fake DB guarantee.
+// ---------------------------------------------------------------------
+
+const QUARTER_LINE_VALUES = ["-1.25", "0.75", "-1.75", "1.25"] as const;
+
+for (const value of QUARTER_LINE_VALUES) {
+  test(`H4-B1: SINGLE Bet schema can persist line = ${value} (a quarter-line Asian handicap value, round-trips exactly, no rounding)`, async () => {
+    const db = createFakeDb();
+    const created = await db.bet.create({
+      data: {
+        playerId: "player-1",
+        previewId: `preview-line-${value}`,
+        type: "SINGLE",
+        sport: "Football",
+        event: "Arsenal vs Coventry City",
+        outcome: `Arsenal ${value}`,
+        odds: new Prisma.Decimal("1.9"),
+        stake: new Prisma.Decimal("10"),
+        totalOdds: new Prisma.Decimal("1.9"),
+        status: "PENDING",
+        line: new Prisma.Decimal(value),
+      },
+    });
+
+    assert.equal(created.line?.toString(), value);
+  });
+}
+
+test("H4-B1: EXPRESS BetSelection schema can persist line = -1.25 (a quarter-line Asian handicap value, round-trips exactly)", async () => {
+  const db = createFakeDb();
+  const created = await db.bet.create({
+    data: {
+      playerId: "player-1",
+      previewId: "preview-express-quarter-line",
+      type: "EXPRESS",
+      sport: "Football",
+      event: null,
+      outcome: null,
+      odds: null,
+      stake: new Prisma.Decimal("10"),
+      totalOdds: new Prisma.Decimal("3.06"),
+      status: "PENDING",
+      selections: {
+        create: [
+          {
+            sport: "Football",
+            event: "Arsenal vs Coventry City",
+            outcome: "Arsenal -1.25",
+            market: "Spread",
+            odds: new Prisma.Decimal("1.8"),
+            currentOdds: new Prisma.Decimal("1.8"),
+            oddsStatus: "VERIFIED",
+            line: new Prisma.Decimal("-1.25"),
+            providerName: null,
+            providerEventId: null,
+            providerSportKey: null,
+            eventStartTime: null,
+            canonicalMarketType: null,
+            canonicalSelectionType: null,
+            canonicalParticipant: null,
+            canonicalPeriod: null,
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(created.selections.length, 1);
+  assert.equal(created.selections[0].line?.toString(), "-1.25");
+});
+
+// H4-B1 Section 9 — existing whole/half-point standard SPREAD lines must
+// remain exact after the Decimal(4,1) -> Decimal(5,2) widening; this is a
+// strict superset of the old precision, so nothing here should round or
+// truncate differently than before.
+const STANDARD_LINE_VALUES = ["0", "-0.5", "0.5", "-1", "1", "-1.5", "1.5", "-2", "2"] as const;
+
+for (const value of STANDARD_LINE_VALUES) {
+  test(`H4-B1 regression: SINGLE Bet schema still persists standard line = ${value} exactly after the Decimal(5,2) widening`, async () => {
+    const db = createFakeDb();
+    const created = await db.bet.create({
+      data: {
+        playerId: "player-1",
+        previewId: `preview-standard-line-${value}`,
+        type: "SINGLE",
+        sport: "Football",
+        event: "Arsenal vs Coventry City",
+        outcome: `Arsenal ${value}`,
+        odds: new Prisma.Decimal("1.9"),
+        stake: new Prisma.Decimal("10"),
+        totalOdds: new Prisma.Decimal("1.9"),
+        status: "PENDING",
+        line: new Prisma.Decimal(value),
+      },
+    });
+
+    assert.equal(created.line?.toString(), value);
+  });
+}
+
+// ---------------------------------------------------------------------
 // Betting Markets V1, Phase 2 — line plumbing through createBetFromPreview()
 // itself. Unlike the Phase 1 tests above (which wrote directly to the fake
 // DB because the token payload had no line field yet), these go through

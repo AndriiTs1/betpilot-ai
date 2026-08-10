@@ -214,3 +214,59 @@ test("decideSettlementTransition never throws for the three APPLY cases and the 
     assert.doesNotThrow(() => decideSettlementTransition(target, target));
   }
 });
+
+// ---------------------------------------------------------------------
+// H4-B1 — SETTLED_HALF_WIN / SETTLED_HALF_LOSS foundation.
+//
+// isSettlementTarget/SETTLEMENT_TARGET_STATUSES deliberately stay at the
+// original 3 values even though BetStatus and the SettlementTarget *type*
+// both now include the two new statuses (see settlementRules.ts's own
+// comments on SETTLEMENT_TARGET_STATUSES). This means: (a) HALF_* is
+// correctly rejected as a requestedStatus shape, from any currentStatus,
+// so it can never be *requested* through decideSettlementTransition in
+// B1; (b) HALF_* IS recognized as a terminal currentStatus, so a later,
+// different settlement request against an already-half-settled bet
+// correctly conflicts instead of being silently allowed. Same-target
+// idempotency for HALF_* (currentStatus === requestedStatus === a HALF_*
+// value) is NOT reachable here for exactly the same reason as (a) — that
+// half of terminal recognition is deferred to H4-B3 alongside real payout
+// support, not implemented as a workaround here.
+// ---------------------------------------------------------------------
+
+const HALF_STATUSES: readonly BetStatus[] = ["SETTLED_HALF_WIN", "SETTLED_HALF_LOSS"];
+
+test("isSettlementTarget: false for SETTLED_HALF_WIN and SETTLED_HALF_LOSS (fail closed — not yet a requestable target)", () => {
+  for (const status of HALF_STATUSES) {
+    assert.equal(isSettlementTarget(status), false);
+  }
+});
+
+for (const halfStatus of HALF_STATUSES) {
+  test(`decideSettlementTransition: CONFIRMED -> ${halfStatus} is an InvalidSettlementTargetError (not requestable in B1)`, () => {
+    assertThrowsAs(
+      () => decideSettlementTransition("CONFIRMED", halfStatus),
+      InvalidSettlementTargetError,
+      "INVALID_SETTLEMENT_TARGET",
+    );
+  });
+
+  test(`decideSettlementTransition: ${halfStatus} -> ${halfStatus} (repeat) is also an InvalidSettlementTargetError, not IDEMPOTENT — same-target idempotency for HALF_* is deferred to H4-B3`, () => {
+    assertThrowsAs(
+      () => decideSettlementTransition(halfStatus, halfStatus),
+      InvalidSettlementTargetError,
+      "INVALID_SETTLEMENT_TARGET",
+    );
+  });
+
+  for (const target of TARGETS) {
+    test(`decideSettlementTransition: ${halfStatus} -> ${target} is a SettlementConflictError (HALF_* recognized as a terminal currentStatus)`, () => {
+      const err = assertThrowsAs(
+        () => decideSettlementTransition(halfStatus, target),
+        SettlementConflictError,
+        "SETTLEMENT_CONFLICT",
+      );
+      assert.equal(err.currentStatus, halfStatus);
+      assert.equal(err.requestedStatus, target);
+    });
+  }
+}

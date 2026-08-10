@@ -2,7 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import type { Prisma, PrismaClient } from "@/lib/generated/prisma/client";
 import { isOperatorAuthorized } from "@/lib/auth/operatorAuth";
-import { settleBet, BetNotFoundForSettlementError, MissingSettlementOddsError, type SettleBetResult } from "@/lib/bets/settleBet";
+import {
+  settleBet,
+  BetNotFoundForSettlementError,
+  MissingSettlementOddsError,
+  UnsupportedSettlementTargetError,
+  type SettleBetResult,
+} from "@/lib/bets/settleBet";
 import {
   isSettlementTarget,
   InvalidSettlementTargetError,
@@ -96,6 +102,15 @@ function mapSettlementError(err: unknown, betId: string): NextResponse<SettleErr
 
   if (err instanceof MissingSettlementOddsError) {
     return errorResponse(422, { code: err.code, message: err.message, betId: err.betId });
+  }
+
+  // H4-B1 — unreachable through this route today: the isSettlementTarget
+  // pre-check above already rejects SETTLED_HALF_WIN/SETTLED_HALF_LOSS
+  // before settleBet() is ever called. Handled explicitly anyway so any
+  // future internal caller of settleBet() gets a clean, typed 501 instead
+  // of falling into the generic 500 below.
+  if (err instanceof UnsupportedSettlementTargetError) {
+    return errorResponse(501, { code: err.code, message: err.message, betId: err.betId });
   }
 
   console.error(`POST /api/bets/${betId}/settle failed:`, err);

@@ -164,6 +164,72 @@ test("parseBetSlipMessage: CHAT and OCR modes send the exact same tool schema (o
   assert.deepEqual(capturedTools[0], capturedTools[1]);
 });
 
+// ---------------------------------------------------------------------
+// Stage AI-1 — temperature: 0.1 on the production parser's outbound
+// request, identical for CHAT and OCR mode (same call site, same schema).
+// Also pins every other request field this stage must leave untouched, so
+// a future change to one of them fails loudly here rather than silently.
+// ---------------------------------------------------------------------
+
+test("parseBetSlipMessage: CHAT mode sends temperature: 0.1 and leaves model/max_tokens/tool_choice/messages unchanged", async () => {
+  let capturedBody: Record<string, unknown> | null = null;
+  currentHandler = async (_url, init) => {
+    capturedBody = JSON.parse(String(init?.body));
+    return anthropicToolUseResponse("reject_bet", { reason: "n/a" });
+  };
+
+  await parseBetSlipMessage("100 on Real Madrid to win", "CHAT");
+
+  assert.ok(capturedBody);
+  const body = capturedBody as Record<string, unknown>;
+  assert.equal(body.temperature, 0.1);
+  assert.equal(body.model, "claude-sonnet-4-6");
+  assert.equal(body.max_tokens, 1024);
+  assert.equal(body.system, chatPrompt);
+  assert.deepEqual(body.tool_choice, { type: "any" });
+  assert.deepEqual(body.messages, [{ role: "user", content: "100 on Real Madrid to win" }]);
+  assert.equal("top_p" in body, false);
+  assert.equal("top_k" in body, false);
+});
+
+test("parseBetSlipMessage: OCR mode also sends temperature: 0.1 (identical to CHAT mode) and leaves model/max_tokens/tool_choice/messages unchanged", async () => {
+  let capturedBody: Record<string, unknown> | null = null;
+  currentHandler = async (_url, init) => {
+    capturedBody = JSON.parse(String(init?.body));
+    return anthropicToolUseResponse("reject_bet", { reason: "n/a" });
+  };
+
+  await parseBetSlipMessage("ocr-transcribed slip text", "OCR");
+
+  assert.ok(capturedBody);
+  const body = capturedBody as Record<string, unknown>;
+  assert.equal(body.temperature, 0.1);
+  assert.equal(body.model, "claude-sonnet-4-6");
+  assert.equal(body.max_tokens, 1024);
+  assert.equal(body.system, ocrPrompt);
+  assert.deepEqual(body.tool_choice, { type: "any" });
+  assert.deepEqual(body.messages, [{ role: "user", content: "ocr-transcribed slip text" }]);
+  assert.equal("top_p" in body, false);
+  assert.equal("top_k" in body, false);
+});
+
+test("parseBetSlipMessage: CHAT and OCR modes send byte-identical temperature (parity)", async () => {
+  const capturedTemperatures: unknown[] = [];
+  currentHandler = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    capturedTemperatures.push(body.temperature);
+    return anthropicToolUseResponse("reject_bet", { reason: "n/a" });
+  };
+
+  await parseBetSlipMessage("chat text", "CHAT");
+  await parseBetSlipMessage("ocr text", "OCR");
+
+  assert.equal(capturedTemperatures.length, 2);
+  assert.equal(capturedTemperatures[0], 0.1);
+  assert.equal(capturedTemperatures[1], 0.1);
+  assert.equal(capturedTemperatures[0], capturedTemperatures[1]);
+});
+
 test("parseBetSlipMessage: OCR mode extract_bet produces the exact same ParsedBetSlip shape as CHAT mode", async () => {
   const toolInput = {
     sport: "Football",
