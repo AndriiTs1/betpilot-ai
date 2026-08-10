@@ -19,6 +19,7 @@
 // inputs to this function, so there is no way to accidentally let them
 // leak into a decision.
 
+import { Prisma } from "@/lib/generated/prisma/client";
 import { isMarketType, isPeriod, isSelectionType, type CanonicalSelection } from "@/lib/odds/domain";
 
 export interface SingleBetCanonicalFields {
@@ -26,10 +27,18 @@ export interface SingleBetCanonicalFields {
   readonly canonicalSelectionType: string | null;
   readonly canonicalParticipant: string | null;
   readonly canonicalPeriod: string | null;
+  // H4-B2 — Bet.line (Decimal(5,2), see H4-B1), threaded through so
+  // evaluateSelectionOutcome() can evaluate SPREAD selections. Converted
+  // with Prisma.Decimal's own .toString() — decimal.js never loses
+  // precision or reformats the value (no rounding, no added/dropped
+  // trailing zeros beyond what was already stored), so -1.25 stays
+  // "-1.25" and 0.75 stays "0.75", never coerced through a native
+  // floating-point number at any point in this function.
+  readonly line: Prisma.Decimal | null;
 }
 
 export function mapSingleBetToCanonicalSelection(bet: SingleBetCanonicalFields): CanonicalSelection | null {
-  const { canonicalMarketType, canonicalSelectionType, canonicalPeriod, canonicalParticipant } = bet;
+  const { canonicalMarketType, canonicalSelectionType, canonicalPeriod, canonicalParticipant, line } = bet;
 
   if (canonicalMarketType === null || !isMarketType(canonicalMarketType)) return null;
   if (canonicalSelectionType === null || !isSelectionType(canonicalSelectionType)) return null;
@@ -47,5 +56,6 @@ export function mapSingleBetToCanonicalSelection(bet: SingleBetCanonicalFields):
     period: canonicalPeriod,
     selectionType: canonicalSelectionType,
     participant: canonicalParticipant !== null ? { name: canonicalParticipant } : undefined,
+    line: line !== null ? line.toString() : undefined,
   };
 }

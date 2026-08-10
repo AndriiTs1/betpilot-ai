@@ -27,6 +27,10 @@ interface FakeBetRow {
   canonicalSelectionType: string | null;
   canonicalParticipant: string | null;
   canonicalPeriod: string | null;
+  // H4-B2 — threaded through to mapSingleBetToCanonicalSelection(); null by
+  // default (matches every pre-existing MONEYLINE fixture, which has no
+  // line concept) unless a test overrides it for a SPREAD scenario.
+  line: Prisma.Decimal | null;
 }
 
 interface FakePlayerRow {
@@ -71,6 +75,7 @@ function fakeBet(overrides: Partial<FakeBetRow> = {}): FakeBetRow {
     canonicalSelectionType: "HOME",
     canonicalParticipant: null,
     canonicalPeriod: "FULL_GAME",
+    line: null,
     ...overrides,
   };
 }
@@ -316,6 +321,62 @@ test("B: INVALID_DATA (missing score on COMPLETED) -> NO_ACTION", async () => {
   assert.equal(result.kind, "NO_ACTION");
   if (result.kind !== "NO_ACTION") return;
   assert.equal(result.reasonCode, "MISSING_SCORE");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+/* -------------------------------------------------------------------------- */
+/* H4-B2 — SPREAD is evaluator-only, deferred here regardless of outcome     */
+/* -------------------------------------------------------------------------- */
+
+function spreadBet(line: string, overrides: Partial<FakeBetRow> = {}) {
+  return fakeBet({
+    canonicalMarketType: "SPREAD",
+    canonicalSelectionType: "PARTICIPANT",
+    canonicalParticipant: "Arsenal",
+    line: new Prisma.Decimal(line),
+    ...overrides,
+  });
+}
+
+test("H4-B2: a full-margin SPREAD WIN (Arsenal -1, wins by 2) is deferred to NO_ACTION, never auto-settled — proves this stage changes no production financial behavior for SPREAD", async () => {
+  const fake = createFakeDb({ bet: spreadBet("-1") });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: homeWinResult({ homeScore: 2, awayScore: 0 }) }));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.reasonCode, "SPREAD_AUTO_SETTLEMENT_DEFERRED");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+  assert.equal(fake._debug.playerUpdateCallCount(), 0);
+});
+
+test("H4-B2: a quarter-line SPREAD HALF_WIN (Arsenal -0.75, wins by 1) is deferred to NO_ACTION, never mapped to WIN/LOSS/VOID and never settled", async () => {
+  const fake = createFakeDb({ bet: spreadBet("-0.75") });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: homeWinResult({ homeScore: 1, awayScore: 0 }) }));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.reasonCode, "SPREAD_AUTO_SETTLEMENT_DEFERRED");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+  assert.equal(fake._debug.playerUpdateCallCount(), 0);
+});
+
+test("H4-B2: a full-margin SPREAD LOSS (Arsenal -1.5, wins by 1) is also deferred to NO_ACTION, not auto-settled as a loss either", async () => {
+  const fake = createFakeDb({ bet: spreadBet("-1.5") });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: homeWinResult({ homeScore: 1, awayScore: 0 }) }));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.reasonCode, "SPREAD_AUTO_SETTLEMENT_DEFERRED");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("H4-B2: a SPREAD push (Arsenal -1, wins by exactly 1) is also deferred to NO_ACTION, not auto-voided", async () => {
+  const fake = createFakeDb({ bet: spreadBet("-1") });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: homeWinResult({ homeScore: 1, awayScore: 0 }) }));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.reasonCode, "SPREAD_AUTO_SETTLEMENT_DEFERRED");
   assert.equal(fake._debug.transactionCreateCallCount(), 0);
 });
 

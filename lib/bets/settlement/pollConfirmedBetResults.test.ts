@@ -44,6 +44,9 @@ interface FakeBetRow {
   canonicalSelectionType: string | null;
   canonicalParticipant: string | null;
   canonicalPeriod: string | null;
+  // H4-B2 — threaded through to mapSingleBetToCanonicalSelection(); null by
+  // default (every fixture here is MONEYLINE, which has no line concept).
+  line: Prisma.Decimal | null;
   selections: FakeSelectionRow[];
 }
 
@@ -95,6 +98,7 @@ function fakeSingleBet(overrides: Partial<FakeBetRow> = {}): FakeBetRow {
     canonicalSelectionType: "HOME",
     canonicalParticipant: null,
     canonicalPeriod: "FULL_GAME",
+    line: null,
     selections: [],
     ...overrides,
   };
@@ -134,6 +138,7 @@ function fakeExpressBet(selections: FakeSelectionRow[], overrides: Partial<FakeB
     canonicalSelectionType: null,
     canonicalParticipant: null,
     canonicalPeriod: null,
+    line: null,
     selections,
     ...overrides,
   };

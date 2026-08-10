@@ -439,3 +439,472 @@ test("purity: repeated calls across every event status produce stable results (n
     assert.deepEqual(first, second, `status ${status} produced non-deterministic results`);
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/* H4-B2 — SPREAD / Asian handicap                                            */
+/* -------------------------------------------------------------------------- */
+
+function spreadSelection(participantName: string, line: string | undefined, overrides: Partial<CanonicalSelection> = {}): CanonicalSelection {
+  return selection({
+    marketType: "SPREAD",
+    selectionType: "PARTICIPANT",
+    participant: { name: participantName },
+    line,
+    ...overrides,
+  });
+}
+
+test("SPREAD: market/period/selectionType gates — SPREAD is no longer UNSUPPORTED_MARKET", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1"),
+  );
+  assert.notEqual(r.kind, "UNSUPPORTED");
+});
+
+test("SPREAD: non-PARTICIPANT selectionType is still UNSUPPORTED_SELECTION", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1", { selectionType: "HOME" }),
+  );
+  assertOutcome(r, "UNSUPPORTED", "UNSUPPORTED_SELECTION");
+});
+
+test("SPREAD: wrong period is still UNSUPPORTED_PERIOD", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1", { period: "FIRST_HALF" }),
+  );
+  assertOutcome(r, "UNSUPPORTED", "UNSUPPORTED_PERIOD");
+});
+
+/* ---- Section 4 worked examples, exactly as specified ---- */
+
+test("SPREAD Section 4: Arsenal 2 - Coventry 1, Arsenal -1 -> adjusted 0 -> VOID (push)", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1"),
+  );
+  assertOutcome(r, "VOID", "VOID_PUSH_SPREAD");
+});
+
+test("SPREAD Section 4: Arsenal 2 - Coventry 1, Arsenal -1.5 -> adjusted -0.5 -> LOSS", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1.5"),
+  );
+  assertOutcome(r, "LOSS", "LOSS_SPREAD_HOME_PARTICIPANT");
+});
+
+test("SPREAD Section 4: Arsenal 2 - Coventry 1, Coventry +1.5 -> adjusted +0.5 -> WIN (participant is never assumed home)", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Coventry City", "1.5"),
+  );
+  assertOutcome(r, "WIN", "WIN_SPREAD_AWAY_PARTICIPANT");
+});
+
+/* ---- Section 5: whole/half line results map to WIN/LOSS/VOID kinds ---- */
+
+test("SPREAD Section 5: whole/half-line WIN maps to kind WIN (not a new status)", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 3, awayScore: 0 }),
+    spreadSelection("Arsenal", "-1"),
+  );
+  assertOutcome(r, "WIN", "WIN_SPREAD_HOME_PARTICIPANT");
+});
+
+test("SPREAD Section 5: whole/half-line LOSS maps to kind LOSS", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 0, awayScore: 0 }),
+    spreadSelection("Arsenal", "-1"),
+  );
+  assertOutcome(r, "LOSS", "LOSS_SPREAD_HOME_PARTICIPANT");
+});
+
+test("SPREAD Section 5: whole/half-line PUSH maps to kind VOID, no new PUSH status introduced", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 1, awayScore: 1 }),
+    spreadSelection("Arsenal", "0"),
+  );
+  assertOutcome(r, "VOID", "VOID_PUSH_SPREAD");
+});
+
+/* ---- Section 7: Arsenal -1.25 full matrix ---- */
+
+test("SPREAD Section 7: Arsenal -1.25, wins by 2 -> full WIN", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 3, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1.25"),
+  );
+  assertOutcome(r, "WIN", "WIN_SPREAD_HOME_PARTICIPANT");
+});
+
+test("SPREAD Section 7: Arsenal -1.25, wins by 1 -> HALF_LOSS (-1 component PUSH, -1.5 component LOSS)", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1.25"),
+  );
+  assertOutcome(r, "HALF_LOSS", "HALF_LOSS_HOME_PARTICIPANT");
+});
+
+test("SPREAD Section 7: Arsenal -1.25, draws -> full LOSS", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 1, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1.25"),
+  );
+  assertOutcome(r, "LOSS", "LOSS_SPREAD_HOME_PARTICIPANT");
+});
+
+test("SPREAD Section 7: Arsenal -1.25, loses -> full LOSS", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 0, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1.25"),
+  );
+  assertOutcome(r, "LOSS", "LOSS_SPREAD_HOME_PARTICIPANT");
+});
+
+/* ---- Section 7: Arsenal -0.75 matrix ---- */
+
+test("SPREAD Section 7: Arsenal -0.75, wins by 1 -> HALF_WIN (-0.5 component WIN, -1 component PUSH)", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", "-0.75"),
+  );
+  assertOutcome(r, "HALF_WIN", "HALF_WIN_HOME_PARTICIPANT");
+});
+
+test("SPREAD Section 7: Arsenal -0.75, wins by 2 -> full WIN", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 3, awayScore: 1 }),
+    spreadSelection("Arsenal", "-0.75"),
+  );
+  assertOutcome(r, "WIN", "WIN_SPREAD_HOME_PARTICIPANT");
+});
+
+test("SPREAD Section 7: Arsenal -0.75, draws -> full LOSS", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 1, awayScore: 1 }),
+    spreadSelection("Arsenal", "-0.75"),
+  );
+  assertOutcome(r, "LOSS", "LOSS_SPREAD_HOME_PARTICIPANT");
+});
+
+/* ---- Section 8: Coventry +1.25 matrix (positive line, away participant) ---- */
+
+test("SPREAD Section 8: Coventry +1.25, loses by 1 -> HALF_WIN (+1 component PUSH, +1.5 component WIN)", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Coventry City", "1.25"),
+  );
+  assertOutcome(r, "HALF_WIN", "HALF_WIN_AWAY_PARTICIPANT");
+});
+
+test("SPREAD Section 8: Coventry +1.25, loses by 2 -> full LOSS", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 3, awayScore: 1 }),
+    spreadSelection("Coventry City", "1.25"),
+  );
+  assertOutcome(r, "LOSS", "LOSS_SPREAD_AWAY_PARTICIPANT");
+});
+
+test("SPREAD Section 8: Coventry +1.25, draws -> full WIN", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 1, awayScore: 1 }),
+    spreadSelection("Coventry City", "1.25"),
+  );
+  assertOutcome(r, "WIN", "WIN_SPREAD_AWAY_PARTICIPANT");
+});
+
+test("SPREAD Section 8: Coventry +1.25, wins -> full WIN", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 1, awayScore: 2 }),
+    spreadSelection("Coventry City", "1.25"),
+  );
+  assertOutcome(r, "WIN", "WIN_SPREAD_AWAY_PARTICIPANT");
+});
+
+/* ---- Section 8: Coventry +0.75 matrix ---- */
+
+test("SPREAD Section 8: Coventry +0.75, loses by 1 -> HALF_LOSS (+0.5 component LOSS, +1 component PUSH)", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Coventry City", "0.75"),
+  );
+  assertOutcome(r, "HALF_LOSS", "HALF_LOSS_AWAY_PARTICIPANT");
+});
+
+test("SPREAD Section 8: Coventry +0.75, draws -> full WIN", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 1, awayScore: 1 }),
+    spreadSelection("Coventry City", "0.75"),
+  );
+  assertOutcome(r, "WIN", "WIN_SPREAD_AWAY_PARTICIPANT");
+});
+
+/* ---- Section 9: full 8-line quarter matrix ---- */
+
+test("SPREAD Section 9: Arsenal -0.25, wins by 1 -> full WIN", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", "-0.25"),
+  );
+  assertOutcome(r, "WIN", "WIN_SPREAD_HOME_PARTICIPANT");
+});
+
+test("SPREAD Section 9: Arsenal -0.25, draws -> HALF_LOSS", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 1, awayScore: 1 }),
+    spreadSelection("Arsenal", "-0.25"),
+  );
+  assertOutcome(r, "HALF_LOSS", "HALF_LOSS_HOME_PARTICIPANT");
+});
+
+test("SPREAD Section 9: Arsenal -0.25, loses by 1 -> full LOSS", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 0, awayScore: 1 }),
+    spreadSelection("Arsenal", "-0.25"),
+  );
+  assertOutcome(r, "LOSS", "LOSS_SPREAD_HOME_PARTICIPANT");
+});
+
+test("SPREAD Section 9: Arsenal -1.75, wins by 2 -> HALF_WIN", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 3, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1.75"),
+  );
+  assertOutcome(r, "HALF_WIN", "HALF_WIN_HOME_PARTICIPANT");
+});
+
+test("SPREAD Section 9: Arsenal -1.75, wins by 3 -> full WIN", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 4, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1.75"),
+  );
+  assertOutcome(r, "WIN", "WIN_SPREAD_HOME_PARTICIPANT");
+});
+
+test("SPREAD Section 9: Arsenal -1.75, wins by 1 -> full LOSS", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1.75"),
+  );
+  assertOutcome(r, "LOSS", "LOSS_SPREAD_HOME_PARTICIPANT");
+});
+
+test("SPREAD Section 9: Coventry +0.25, loses by 1 -> full LOSS", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Coventry City", "0.25"),
+  );
+  assertOutcome(r, "LOSS", "LOSS_SPREAD_AWAY_PARTICIPANT");
+});
+
+test("SPREAD Section 9: Coventry +0.25, draws -> HALF_WIN", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 1, awayScore: 1 }),
+    spreadSelection("Coventry City", "0.25"),
+  );
+  assertOutcome(r, "HALF_WIN", "HALF_WIN_AWAY_PARTICIPANT");
+});
+
+test("SPREAD Section 9: Coventry +0.25, wins by 1 -> full WIN", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 1, awayScore: 2 }),
+    spreadSelection("Coventry City", "0.25"),
+  );
+  assertOutcome(r, "WIN", "WIN_SPREAD_AWAY_PARTICIPANT");
+});
+
+test("SPREAD Section 9: Coventry +1.75, loses by 2 -> HALF_LOSS", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 3, awayScore: 1 }),
+    spreadSelection("Coventry City", "1.75"),
+  );
+  assertOutcome(r, "HALF_LOSS", "HALF_LOSS_AWAY_PARTICIPANT");
+});
+
+test("SPREAD Section 9: Coventry +1.75, loses by 1 -> full WIN", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Coventry City", "1.75"),
+  );
+  assertOutcome(r, "WIN", "WIN_SPREAD_AWAY_PARTICIPANT");
+});
+
+test("SPREAD Section 9: Coventry +1.75, loses by 3 -> full LOSS", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 4, awayScore: 1 }),
+    spreadSelection("Coventry City", "1.75"),
+  );
+  assertOutcome(r, "LOSS", "LOSS_SPREAD_AWAY_PARTICIPANT");
+});
+
+/* ---- Section 10: home/away safety, multi-word teams ---- */
+
+test("SPREAD Section 10: Real Madrid (home) -0.5, wins by 1 -> WIN", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Real Madrid" }, awayParticipant: { name: "Barcelona" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Real Madrid", "-0.5"),
+  );
+  assertOutcome(r, "WIN", "WIN_SPREAD_HOME_PARTICIPANT");
+});
+
+test("SPREAD Section 10: Barcelona (away) +0.5, home wins by 1 -> LOSS (side never flipped)", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Real Madrid" }, awayParticipant: { name: "Barcelona" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Barcelona", "0.5"),
+  );
+  assertOutcome(r, "LOSS", "LOSS_SPREAD_AWAY_PARTICIPANT");
+});
+
+test("SPREAD Section 10: Manchester United (away) +1.25, loses by 1 -> HALF_WIN", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Chelsea" }, awayParticipant: { name: "Manchester United" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Manchester United", "1.25"),
+  );
+  assertOutcome(r, "HALF_WIN", "HALF_WIN_AWAY_PARTICIPANT");
+});
+
+test("SPREAD Section 10: Manchester United (home) -1.25, wins by 1 -> HALF_LOSS (same math, opposite side)", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Manchester United" }, awayParticipant: { name: "Chelsea" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Manchester United", "-1.25"),
+  );
+  assertOutcome(r, "HALF_LOSS", "HALF_LOSS_HOME_PARTICIPANT");
+});
+
+/* ---- Section 11: participant matching (reused, not reimplemented) ---- */
+
+test("SPREAD Section 11: participant matches neither side -> INVALID_DATA(PARTICIPANT_MISMATCH), never guessed", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Chelsea" } }),
+    spreadSelection("Liverpool", "-1"),
+  );
+  assertOutcome(r, "INVALID_DATA", "PARTICIPANT_MISMATCH");
+});
+
+test("SPREAD Section 11: participant matches BOTH sides -> INVALID_DATA(AMBIGUOUS_PARTICIPANT_MATCH), never guessed", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Real Madrid" }, awayParticipant: { name: "Real Madrid Castilla" } }),
+    spreadSelection("Real Madrid", "-1"),
+  );
+  assertOutcome(r, "INVALID_DATA", "AMBIGUOUS_PARTICIPANT_MATCH");
+});
+
+test("SPREAD Section 11: missing participant name -> INVALID_DATA(MISSING_PARTICIPANT_NAME)", () => {
+  const r = evaluateSelectionOutcome(eventResult(), spreadSelection("", "-1"));
+  assertOutcome(r, "INVALID_DATA", "MISSING_PARTICIPANT_NAME");
+});
+
+/* ---- Section 12: safety gates preserved for SPREAD ---- */
+
+test("SPREAD Section 12: missing score -> INVALID_DATA(MISSING_SCORE), same gate as MONEYLINE", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: null }),
+    spreadSelection("Arsenal", "-1"),
+  );
+  assertOutcome(r, "INVALID_DATA", "MISSING_SCORE");
+});
+
+test("SPREAD Section 12: invalid (non-integer) score -> INVALID_DATA(INVALID_SCORE)", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 1.5, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1"),
+  );
+  assertOutcome(r, "INVALID_DATA", "INVALID_SCORE");
+});
+
+test("SPREAD Section 12: event not completed -> WAITING, same gate as MONEYLINE", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, status: "IN_PROGRESS", homeScore: null, awayScore: null }),
+    spreadSelection("Arsenal", "-1"),
+  );
+  assertOutcome(r, "WAITING", "EVENT_NOT_COMPLETED");
+});
+
+test("SPREAD Section 12: cancelled event -> VOID(VOID_CANCELLED), same gate as MONEYLINE, not conflated with a spread push", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, status: "CANCELLED", homeScore: null, awayScore: null }),
+    spreadSelection("Arsenal", "-1"),
+  );
+  assertOutcome(r, "VOID", "VOID_CANCELLED");
+});
+
+/* ---- Section 3: valid line grid — invalid fractions fail safely ---- */
+
+test("SPREAD Section 3: off-grid line -1.33 -> INVALID_DATA(INVALID_LINE), never silently rounded", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1.33"),
+  );
+  assertOutcome(r, "INVALID_DATA", "INVALID_LINE");
+});
+
+test("SPREAD Section 3: off-grid line +0.10 -> INVALID_DATA(INVALID_LINE), never silently rounded", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", "0.10"),
+  );
+  assertOutcome(r, "INVALID_DATA", "INVALID_LINE");
+});
+
+test("SPREAD: missing line entirely -> INVALID_DATA(MISSING_LINE)", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", undefined),
+  );
+  assertOutcome(r, "INVALID_DATA", "MISSING_LINE");
+});
+
+/* ---- Critical invariants ---- */
+
+test("Invariant A: -1.25 is never rounded to -1 or -1.5 before evaluation — HALF_LOSS (wins by 1) and full LOSS (wins by 0) are genuinely distinguished", () => {
+  const winBy1 = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1.25"),
+  );
+  const draw = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 1, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1.25"),
+  );
+  assert.equal(winBy1.kind, "HALF_LOSS");
+  assert.equal(draw.kind, "LOSS");
+  assert.notDeepEqual(winBy1, draw);
+});
+
+test("Invariant C/D: HALF_WIN is never emitted as full WIN, HALF_LOSS is never emitted as full LOSS", () => {
+  const halfWin = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", "-0.75"),
+  );
+  const halfLoss = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1.25"),
+  );
+  assert.equal(halfWin.kind, "HALF_WIN");
+  assert.notEqual(halfWin.kind, "WIN");
+  assert.equal(halfLoss.kind, "HALF_LOSS");
+  assert.notEqual(halfLoss.kind, "LOSS");
+});
+
+test("Invariant E: HALF_WIN/HALF_LOSS carry no financial amount — the result shape has only kind and reasonCode", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", "-0.75"),
+  );
+  assert.deepEqual(Object.keys(r).sort(), ["kind", "reasonCode"]);
+});
+
+test("Invariant B: participant side is never flipped — same fixture, opposite participant name, opposite result", () => {
+  const forArsenal = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Arsenal", "-1.5"),
+  );
+  const forCoventry = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 }),
+    spreadSelection("Coventry City", "1.5"),
+  );
+  assert.equal(forArsenal.kind, "LOSS");
+  assert.equal(forCoventry.kind, "WIN");
+});

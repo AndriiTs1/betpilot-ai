@@ -152,6 +152,9 @@ export async function autoSettleSingleBet(
       canonicalSelectionType: true,
       canonicalParticipant: true,
       canonicalPeriod: true,
+      // H4-B2 — threaded through to mapSingleBetToCanonicalSelection() so
+      // SPREAD selections carry their line into evaluateSelectionOutcome().
+      line: true,
     },
   });
 
@@ -167,6 +170,25 @@ export async function autoSettleSingleBet(
   const selection = mapSingleBetToCanonicalSelection(bet);
   if (!selection) {
     return { kind: "REJECTED", betId, reasonCode: "MISSING_CANONICAL_METADATA" };
+  }
+
+  // H4-B2 — SPREAD is evaluator-only in this stage, deliberately not wired
+  // through to real auto-settlement yet, even for a full (non-quarter-line)
+  // WIN/LOSS/VOID outcome. Before this stage, evaluateSelectionOutcome()
+  // always returned UNSUPPORTED_MARKET for SPREAD, so
+  // lib/bets/settlement/pollConfirmedBetResults.ts's loadEligibleSingleBets()
+  // — which filters only on type/status/eventStartTime, not market type —
+  // has never actually auto-settled a SPREAD bet in production. Now that
+  // the evaluator can produce a real WIN/LOSS/VOID/HALF_WIN/HALF_LOSS for
+  // SPREAD, letting it flow through unchanged would silently start
+  // auto-settling whole/half-line SPREAD bets for the first time — a real
+  // production financial behavior change this stage does not have review
+  // for. Deferred here, checked on selection.marketType directly (not
+  // evaluation.kind), so it applies uniformly regardless of which outcome
+  // the evaluator produced. Enabling it is a distinct, later, explicitly-
+  // reviewed stage's decision (see this stage's own H4-B plan).
+  if (selection.marketType === "SPREAD") {
+    return { kind: "NO_ACTION", betId, reasonCode: "SPREAD_AUTO_SETTLEMENT_DEFERRED" };
   }
 
   const evaluation = evaluateSelectionOutcome(eventResult, selection);

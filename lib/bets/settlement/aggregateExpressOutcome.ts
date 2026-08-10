@@ -93,6 +93,28 @@ export function aggregateExpressOutcome(
   const voidedIds: string[] = [];
 
   for (const leg of legs) {
+    // H4-B2 — SPREAD is evaluator-only in this stage, deliberately not
+    // wired into EXPRESS aggregation yet — same rationale and same
+    // deferred-reason-code convention as
+    // lib/bets/settlement/autoSettleSingleBet.ts's identical guard (see
+    // that file's own comment for the full explanation of why this must
+    // be checked on the leg's own selection.marketType, not
+    // evaluation.kind). Before this stage, evaluateSelectionOutcome()
+    // always returned UNSUPPORTED_MARKET for a SPREAD leg, so a SPREAD leg
+    // has never contributed anything but the UNSUPPORTED bucket here —
+    // this preserves that exact behavior byte-for-byte, and the switch
+    // below is therefore never reached for a SPREAD leg at all. This is
+    // also what keeps HALF_WIN/HALF_LOSS out of the switch entirely: both
+    // kinds can only ever be produced from a SPREAD selection (see
+    // evaluateSelectionOutcome.ts), so this one guard is a complete,
+    // sufficient fail-closed handler for them — no HALF_WIN/HALF_LOSS
+    // switch case is needed, and the switch itself stays byte-identical.
+    if (leg.selection.marketType === "SPREAD") {
+      unsupportedIds.push(leg.id);
+      unsupportedReasons[leg.id] = "SPREAD_AUTO_SETTLEMENT_DEFERRED";
+      continue;
+    }
+
     const eventResult = eventResultsByProviderEventId.get(leg.providerEventId);
     const evaluation = eventResult ? evaluateSelectionOutcome(eventResult, leg.selection) : MISSING_RESULT_EVALUATION;
 

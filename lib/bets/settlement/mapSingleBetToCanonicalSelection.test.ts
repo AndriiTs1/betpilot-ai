@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { Prisma } from "@/lib/generated/prisma/client";
 import { mapSingleBetToCanonicalSelection, type SingleBetCanonicalFields } from "./mapSingleBetToCanonicalSelection";
 
 function fields(overrides: Partial<SingleBetCanonicalFields> = {}): SingleBetCanonicalFields {
@@ -8,6 +9,7 @@ function fields(overrides: Partial<SingleBetCanonicalFields> = {}): SingleBetCan
     canonicalSelectionType: "HOME",
     canonicalParticipant: null,
     canonicalPeriod: "FULL_GAME",
+    line: null,
     ...overrides,
   };
 }
@@ -39,10 +41,27 @@ test("mapper: canonicalParticipant is carried through as CanonicalParticipant.na
   assert.deepEqual(selection?.participant, { name: "Arsenal" });
 });
 
-test("mapper: no canonicalLine column exists on Bet — mapper never sets .line", () => {
+test("mapper: Bet.line = null maps to CanonicalSelection.line = undefined (MONEYLINE has no line concept)", () => {
   const selection = mapSingleBetToCanonicalSelection(fields());
   assert.equal(selection?.line, undefined);
 });
+
+// H4-B2 — Bet.line is now threaded through (Section 13). Exact preservation,
+// no rounding: -1.25 stays "-1.25", 0.75 stays "0.75", never coerced
+// through a native floating-point number anywhere in this path.
+for (const value of ["-1.25", "0.75", "-1.75", "1.25", "-1.5", "2.5", "0"]) {
+  test(`mapper: Bet.line = ${value} is threaded through to CanonicalSelection.line exactly, no rounding`, () => {
+    const selection = mapSingleBetToCanonicalSelection(
+      fields({
+        canonicalMarketType: "SPREAD",
+        canonicalSelectionType: "PARTICIPANT",
+        canonicalParticipant: "Arsenal",
+        line: new Prisma.Decimal(value),
+      }),
+    );
+    assert.equal(selection?.line, value);
+  });
+}
 
 test("mapper: free-text fields (Bet.event/Bet.outcome) are not even part of the input type — nothing to ignore, structurally impossible to leak in", () => {
   // SingleBetCanonicalFields has no event/outcome/sport field at all.

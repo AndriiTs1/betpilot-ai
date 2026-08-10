@@ -37,12 +37,40 @@
 // both, is never guessed — see PARTICIPANT_MISMATCH/
 // AMBIGUOUS_PARTICIPANT_MATCH below.
 
+import { Prisma } from "@/lib/generated/prisma/client";
 import type { CanonicalSelection, MarketType, Period, SelectionType } from "@/lib/odds/domain";
 import { resolveParticipantSide } from "@/lib/odds/teamNameMatcher";
 import type { CanonicalEventResult, EventResultStatus } from "./eventResultDomain";
+import { splitAsianHandicapLine } from "./asianHandicapLine";
 
-export type WinReasonCode = "WIN_HOME_PARTICIPANT" | "WIN_AWAY_PARTICIPANT" | "WIN_DRAW";
-export type LossReasonCode = "LOSS_HOME_PARTICIPANT" | "LOSS_AWAY_PARTICIPANT" | "LOSS_DRAW";
+export type WinReasonCode =
+  | "WIN_HOME_PARTICIPANT"
+  | "WIN_AWAY_PARTICIPANT"
+  | "WIN_DRAW"
+  // H4-B2 — SPREAD full win (whole/half line, or both quarter-line
+  // components win). Deliberately distinct from WIN_HOME_PARTICIPANT/
+  // WIN_AWAY_PARTICIPANT above: those mean "this side won the match
+  // outright" (MONEYLINE); these mean "this side covered the handicap
+  // line", a different question with a different answer in general.
+  | "WIN_SPREAD_HOME_PARTICIPANT"
+  | "WIN_SPREAD_AWAY_PARTICIPANT";
+export type LossReasonCode =
+  | "LOSS_HOME_PARTICIPANT"
+  | "LOSS_AWAY_PARTICIPANT"
+  | "LOSS_DRAW"
+  | "LOSS_SPREAD_HOME_PARTICIPANT"
+  | "LOSS_SPREAD_AWAY_PARTICIPANT";
+
+// H4-B2 — quarter-line Asian handicap "won half the stake, pushed the
+// other half" outcome (one component WIN, the other PUSH). This is a
+// SEMANTIC evaluation result only — it names no financial amount, mutates
+// no balance, and creates no Transaction. Whether/how it can actually be
+// settled is entirely lib/bets/settleBet.ts's concern (still fail-closed,
+// unchanged by this stage — see UnsupportedSettlementTargetError).
+export type HalfWinReasonCode = "HALF_WIN_HOME_PARTICIPANT" | "HALF_WIN_AWAY_PARTICIPANT";
+// H4-B2 — the mirror image of HalfWinReasonCode: one component LOSS, the
+// other PUSH.
+export type HalfLossReasonCode = "HALF_LOSS_HOME_PARTICIPANT" | "HALF_LOSS_AWAY_PARTICIPANT";
 
 // VOID here is a pure domain classification only — this function never
 // calls settleBet()/settlementRules.ts, moves Bet.status, or touches money.
@@ -58,7 +86,13 @@ export type VoidReasonCode =
   // (lib/odds/domain.ts's validateCanonicalSelection forbids it) — if the
   // event nonetheless ends level, neither HOME nor AWAY can honestly be
   // called a winner or loser. Void/push is the standard, safe outcome.
-  | "VOID_DRAW_TWO_WAY_MARKET";
+  | "VOID_DRAW_TWO_WAY_MARKET"
+  // H4-B2 — a SPREAD push: either a whole/half line's adjusted margin is
+  // exactly zero, or (defensively, mathematically unreachable for a
+  // genuine quarter split — see asianHandicapLine.ts) both components of a
+  // quarter line push. This stage deliberately reuses VOID rather than
+  // introducing a separate PUSH status, per the approved H4-B plan.
+  | "VOID_PUSH_SPREAD";
 
 // NOT_STARTED/IN_PROGRESS/POSTPONED all mean "no result yet, ask again
 // later" — but POSTPONED keeps its own reason code (distinct from the
@@ -84,11 +118,35 @@ export type InvalidDataReasonCode =
   // PARTICIPANT's name matched BOTH homeParticipant and awayParticipant —
   // genuinely ambiguous (e.g. a club and its reserve/B-team sharing most of
   // the same words); never resolved by guessing, order, or odds.
-  | "AMBIGUOUS_PARTICIPANT_MATCH";
+  | "AMBIGUOUS_PARTICIPANT_MATCH"
+  // H4-B2 — SPREAD selection has no line at all. Structurally shouldn't
+  // happen (lib/odds/domain.ts's validateCanonicalSelection requires
+  // SPREAD to carry a line), but this function never assumes a caller
+  // already ran that validator.
+  | "MISSING_LINE"
+  // H4-B2 — selection.line isn't a valid decimal, or its fraction isn't on
+  // the supported .00/.25/.50/.75 grid (e.g. -1.33, +0.10). Never silently
+  // rounded to the nearest supported line — see asianHandicapLine.ts.
+  | "INVALID_LINE"
+  // H4-B2 — defensive only: a quarter line whose two components evaluated
+  // to one WIN and one LOSS. Mathematically unreachable for a genuine
+  // quarter split (proven in asianHandicapLine.ts's own header comment —
+  // components differ by exactly 0.5 against an integer margin, so a
+  // WIN/LOSS pair can never occur), kept as an explicit fail-closed
+  // branch rather than silently picking a side.
+  | "INVALID_SPREAD_COMBINATION";
 
 export type SelectionOutcomeEvaluation =
   | { readonly kind: "WIN"; readonly reasonCode: WinReasonCode }
   | { readonly kind: "LOSS"; readonly reasonCode: LossReasonCode }
+  // H4-B2 — semantic-only quarter-line half outcomes. See HalfWinReasonCode/
+  // HalfLossReasonCode above: these name no financial amount and cannot
+  // (yet) reach settleBet() — lib/bets/settlement/autoSettleSingleBet.ts's
+  // existing `kind !== "WIN" && kind !== "LOSS" && kind !== "VOID"` gate
+  // already treats any other kind (including these two) as NO_ACTION,
+  // unchanged by this stage.
+  | { readonly kind: "HALF_WIN"; readonly reasonCode: HalfWinReasonCode }
+  | { readonly kind: "HALF_LOSS"; readonly reasonCode: HalfLossReasonCode }
   | { readonly kind: "VOID"; readonly reasonCode: VoidReasonCode }
   | { readonly kind: "WAITING"; readonly reasonCode: WaitingReasonCode }
   | { readonly kind: "UNSUPPORTED"; readonly reasonCode: UnsupportedReasonCode }
@@ -103,6 +161,12 @@ function win(reasonCode: WinReasonCode): SelectionOutcomeEvaluation {
 }
 function loss(reasonCode: LossReasonCode): SelectionOutcomeEvaluation {
   return { kind: "LOSS", reasonCode };
+}
+function halfWin(reasonCode: HalfWinReasonCode): SelectionOutcomeEvaluation {
+  return { kind: "HALF_WIN", reasonCode };
+}
+function halfLoss(reasonCode: HalfLossReasonCode): SelectionOutcomeEvaluation {
+  return { kind: "HALF_LOSS", reasonCode };
 }
 function voidOutcome(reasonCode: VoidReasonCode): SelectionOutcomeEvaluation {
   return { kind: "VOID", reasonCode };
@@ -119,6 +183,85 @@ function invalidData(reasonCode: InvalidDataReasonCode): SelectionOutcomeEvaluat
 
 function isSupportedMoneylineMarket(marketType: MarketType): marketType is SupportedMoneylineMarket {
   return marketType === "MONEYLINE_2WAY" || marketType === "MONEYLINE_3WAY";
+}
+
+/* -------------------------------------------------------------------------- */
+/* H4-B2 — SPREAD / Asian handicap component evaluation                       */
+/* -------------------------------------------------------------------------- */
+
+type SpreadComponentResult = "WIN" | "LOSS" | "PUSH";
+
+// adjustedMargin = participantScore - opponentScore + componentLine, exact
+// Decimal comparison against zero — never native floating point. Same rule
+// for a whole/half line (NO_SPLIT, called once) and for each half-stake
+// component of a quarter line (SPLIT, called twice).
+function evaluateSpreadComponent(
+  participantScore: number,
+  opponentScore: number,
+  componentLine: Prisma.Decimal,
+): SpreadComponentResult {
+  const adjustedMargin = componentLine.plus(participantScore - opponentScore);
+  if (adjustedMargin.greaterThan(0)) return "WIN";
+  if (adjustedMargin.isZero()) return "PUSH";
+  return "LOSS";
+}
+
+// side is the effective HOME/AWAY side the (already-resolved) participant
+// is on — never assumed, always the output of resolveParticipantSide()
+// (see evaluateSelectionOutcome() below), matching this file's existing
+// PARTICIPANT-resolution convention for MONEYLINE.
+function evaluateSpreadOutcome(
+  side: "HOME" | "AWAY",
+  participantScore: number,
+  opponentScore: number,
+  line: Prisma.Decimal,
+): SelectionOutcomeEvaluation {
+  const split = splitAsianHandicapLine(line);
+
+  if (split.kind === "INVALID_GRID") {
+    return invalidData("INVALID_LINE");
+  }
+
+  const winCode: WinReasonCode = side === "HOME" ? "WIN_SPREAD_HOME_PARTICIPANT" : "WIN_SPREAD_AWAY_PARTICIPANT";
+  const lossCode: LossReasonCode = side === "HOME" ? "LOSS_SPREAD_HOME_PARTICIPANT" : "LOSS_SPREAD_AWAY_PARTICIPANT";
+  const halfWinCode: HalfWinReasonCode = side === "HOME" ? "HALF_WIN_HOME_PARTICIPANT" : "HALF_WIN_AWAY_PARTICIPANT";
+  const halfLossCode: HalfLossReasonCode = side === "HOME" ? "HALF_LOSS_HOME_PARTICIPANT" : "HALF_LOSS_AWAY_PARTICIPANT";
+
+  if (split.kind === "NO_SPLIT") {
+    const result = evaluateSpreadComponent(participantScore, opponentScore, line);
+    if (result === "WIN") return win(winCode);
+    if (result === "LOSS") return loss(lossCode);
+    return voidOutcome("VOID_PUSH_SPREAD");
+  }
+
+  // Quarter line — evaluate each half-stake component independently, then
+  // combine per the approved H4-B plan:
+  //   WIN + WIN     -> full WIN
+  //   LOSS + LOSS   -> full LOSS
+  //   WIN + PUSH    -> HALF_WIN   (order-independent — checked both ways)
+  //   LOSS + PUSH   -> HALF_LOSS  (order-independent — checked both ways)
+  //   PUSH + PUSH   -> VOID       (defensive; unreachable for a genuine
+  //                                 quarter split — see asianHandicapLine.ts)
+  //   WIN + LOSS    -> INVALID_DATA (defensive; equally unreachable — never
+  //                                   silently resolved toward either side)
+  const [componentA, componentB] = split.components;
+  const resultA = evaluateSpreadComponent(participantScore, opponentScore, componentA);
+  const resultB = evaluateSpreadComponent(participantScore, opponentScore, componentB);
+
+  if (resultA === "WIN" && resultB === "WIN") return win(winCode);
+  if (resultA === "LOSS" && resultB === "LOSS") return loss(lossCode);
+  if ((resultA === "WIN" && resultB === "PUSH") || (resultA === "PUSH" && resultB === "WIN")) {
+    return halfWin(halfWinCode);
+  }
+  if ((resultA === "LOSS" && resultB === "PUSH") || (resultA === "PUSH" && resultB === "LOSS")) {
+    return halfLoss(halfLossCode);
+  }
+  if (resultA === "PUSH" && resultB === "PUSH") {
+    return voidOutcome("VOID_PUSH_SPREAD");
+  }
+  // resultA/resultB are WIN+LOSS or LOSS+WIN — mathematically unreachable
+  // for a genuine quarter split, never silently resolved either way.
+  return invalidData("INVALID_SPREAD_COMBINATION");
 }
 
 // PARTICIPANT is accepted for BOTH market shapes (Stage 3.5C-FIX) — once
@@ -174,13 +317,25 @@ export function evaluateSelectionOutcome(
   eventResult: CanonicalEventResult,
   selection: CanonicalSelection,
 ): SelectionOutcomeEvaluation {
-  if (!isSupportedMoneylineMarket(selection.marketType)) {
+  // H4-B2 — SPREAD joins MONEYLINE_2WAY/MONEYLINE_3WAY as a supported
+  // market. Every other market type is still UNSUPPORTED_MARKET, unchanged.
+  const isSpread = selection.marketType === "SPREAD";
+  if (!isSpread && !isSupportedMoneylineMarket(selection.marketType)) {
     return unsupported("UNSUPPORTED_MARKET");
   }
   if (selection.period !== SUPPORTED_PERIOD) {
     return unsupported("UNSUPPORTED_PERIOD");
   }
-  if (!isSupportedSelectionType(selection.marketType, selection.selectionType)) {
+  // SPREAD is only supported as selectionType PARTICIPANT — the only shape
+  // production actually constructs (lib/odds/shorthandClassifier.ts) and
+  // the only shape lib/odds/domain.ts's validateCanonicalSelection allows
+  // to carry the participant a line applies to. Anything else is
+  // UNSUPPORTED_SELECTION, same fail-closed pattern as MONEYLINE below.
+  if (isSpread) {
+    if (selection.selectionType !== "PARTICIPANT") {
+      return unsupported("UNSUPPORTED_SELECTION");
+    }
+  } else if (!isSupportedSelectionType(selection.marketType, selection.selectionType)) {
     return unsupported("UNSUPPORTED_SELECTION");
   }
 
@@ -257,6 +412,31 @@ export function evaluateSelectionOutcome(
   }
 
   const isDraw = homeScore === awayScore;
+
+  // H4-B2 — SPREAD dispatch. effectiveSelectionType is guaranteed HOME or
+  // AWAY here (never DRAW — SPREAD only accepts selectionType PARTICIPANT
+  // above, and resolveParticipantSide() never resolves to DRAW), so `side`
+  // is never assumed and never guessed — it is exactly what the same
+  // participant-resolution mechanism MONEYLINE already uses decided.
+  if (isSpread) {
+    if (selection.line === undefined) {
+      return invalidData("MISSING_LINE");
+    }
+    let line: Prisma.Decimal;
+    try {
+      line = new Prisma.Decimal(selection.line);
+    } catch {
+      return invalidData("INVALID_LINE");
+    }
+    if (!line.isFinite()) {
+      return invalidData("INVALID_LINE");
+    }
+
+    const side = effectiveSelectionType as "HOME" | "AWAY";
+    const participantScore = side === "HOME" ? homeScore : awayScore;
+    const opponentScore = side === "HOME" ? awayScore : homeScore;
+    return evaluateSpreadOutcome(side, participantScore, opponentScore, line);
+  }
 
   if (selection.marketType === "MONEYLINE_3WAY") {
     if (effectiveSelectionType === "HOME") {

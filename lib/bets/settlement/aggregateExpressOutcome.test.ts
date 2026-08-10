@@ -382,3 +382,75 @@ test("purity: identical input always returns a deep-equal result", () => {
   const r2 = aggregateExpressOutcome(legs, results);
   assert.deepEqual(r1, r2);
 });
+
+/* -------------------------------------------------------------------------- */
+/* H4-B2 — SPREAD is evaluator-only, deferred in EXPRESS aggregation         */
+/* -------------------------------------------------------------------------- */
+
+function spreadSelection(participantName: string, line: string): CanonicalSelection {
+  return {
+    sport: "UNKNOWN",
+    event: { sport: "UNKNOWN", name: "", participants: [], period: "FULL_GAME" },
+    marketType: "SPREAD",
+    period: "FULL_GAME",
+    selectionType: "PARTICIPANT",
+    participant: { name: participantName },
+    line,
+  };
+}
+
+test("SPREAD leg (full-margin WIN if evaluated) is deferred to UNSUPPORTED, never silently interpreted as WIN — proves EXPRESS behavior is unchanged from before H4-B2", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", selection: spreadSelection("Home", "-1") })];
+  // Home wins by 2 — a real SPREAD evaluation of -1 would be a full WIN,
+  // but this must never reach that conclusion in B2.
+  const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 0 })]]);
+
+  const result = aggregateExpressOutcome(legs, results);
+
+  assert.equal(result.kind, "UNSUPPORTED");
+  if (result.kind !== "UNSUPPORTED") return;
+  assert.deepEqual(result.affectedSelectionIds, ["l1"]);
+  assert.equal(result.reasonCodes["l1"], "SPREAD_AUTO_SETTLEMENT_DEFERRED");
+});
+
+test("SPREAD leg with a quarter line (would be HALF_WIN if evaluated) is deferred to UNSUPPORTED, never interpreted as WIN or LOSS", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", selection: spreadSelection("Home", "-0.75") })];
+  // Home wins by 1: -0.75 splits into [-1, -0.5] -> PUSH + WIN -> HALF_WIN
+  // if this leg were evaluated for real. It must not be.
+  const results = lookup([["e1", eventResult({ homeScore: 1, awayScore: 0 })]]);
+
+  const result = aggregateExpressOutcome(legs, results);
+
+  assert.equal(result.kind, "UNSUPPORTED");
+  if (result.kind !== "UNSUPPORTED") return;
+  assert.deepEqual(result.affectedSelectionIds, ["l1"]);
+  assert.equal(result.reasonCodes["l1"], "SPREAD_AUTO_SETTLEMENT_DEFERRED");
+});
+
+test("a SPREAD leg deferred to UNSUPPORTED masks an otherwise-winning MONEYLINE leg, same priority behavior as any other UNSUPPORTED leg", () => {
+  const legs = [
+    leg({ id: "l1", providerEventId: "e1", selection: selection("HOME") }), // will WIN
+    leg({ id: "l2", providerEventId: "e2", selection: spreadSelection("Home", "-1") }), // deferred
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 2, awayScore: 0 })],
+    ["e2", eventResult({ homeScore: 2, awayScore: 0 })],
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results);
+
+  assert.equal(result.kind, "UNSUPPORTED");
+  if (result.kind !== "UNSUPPORTED") return;
+  assert.deepEqual(result.affectedSelectionIds, ["l2"]);
+});
+
+test("a SPREAD leg never reaches evaluateSelectionOutcome's WAITING/event-lookup path either — deferred even when providerEventId has no matching result", () => {
+  const legs = [leg({ id: "l1", providerEventId: "missing-event", selection: spreadSelection("Home", "-1") })];
+  const results = lookup([]);
+
+  const result = aggregateExpressOutcome(legs, results);
+
+  assert.equal(result.kind, "UNSUPPORTED");
+  if (result.kind !== "UNSUPPORTED") return;
+  assert.equal(result.reasonCodes["l1"], "SPREAD_AUTO_SETTLEMENT_DEFERRED");
+});
