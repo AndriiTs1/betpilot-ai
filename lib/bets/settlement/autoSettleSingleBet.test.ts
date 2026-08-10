@@ -360,6 +360,17 @@ test("H4-B2: a quarter-line SPREAD HALF_WIN (Arsenal -0.75, wins by 1) is deferr
   assert.equal(fake._debug.playerUpdateCallCount(), 0);
 });
 
+test("H4-B5: a CONFIRMED quarter-line SPREAD -1.25 (Arsenal -1.25, wins by 2 — a clean full-margin WIN under the evaluator) is still deferred to NO_ACTION, never auto-settled — H4-B5 enables verification/confirmation only, not settlement", async () => {
+  const fake = createFakeDb({ bet: spreadBet("-1.25") });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: homeWinResult({ homeScore: 2, awayScore: 0 }) }));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.reasonCode, "SPREAD_AUTO_SETTLEMENT_DEFERRED");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+  assert.equal(fake._debug.playerUpdateCallCount(), 0);
+});
+
 test("H4-B2: a full-margin SPREAD LOSS (Arsenal -1.5, wins by 1) is also deferred to NO_ACTION, not auto-settled as a loss either", async () => {
   const fake = createFakeDb({ bet: spreadBet("-1.5") });
   const result = await autoSettleSingleBet(db(fake), input({ eventResult: homeWinResult({ homeScore: 1, awayScore: 0 }) }));

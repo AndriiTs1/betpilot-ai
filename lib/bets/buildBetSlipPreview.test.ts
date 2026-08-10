@@ -11,6 +11,8 @@ import { TheOddsApiProvider } from "@/lib/odds/theOddsApiProvider";
 import { createVerifiedResult, createOddsChangedResult, createFailedResult } from "@/lib/odds/verification";
 import type { VerificationResult } from "@/lib/odds/verification";
 import type { OddsProvider, ProviderHealthResult, VerifySelectionRequest } from "@/lib/odds/oddsProvider";
+import { canConfirmBetSlip } from "@/components/miniapp/canConfirmBetSlip";
+import type { BetPreview } from "@/components/miniapp/betPreviewApi";
 
 const TEST_SECRET = "test-preview-token-secret";
 
@@ -1653,6 +1655,125 @@ test("Handicap Stage H2: a positive-line SPREAD selection ('Coventry City F2(+1.
     line: previewSelection.line,
   });
   assert.equal(displayLabel, "Coventry City +1.5");
+});
+
+/* -------------------------------------------------------------------------- */
+/* H4-B5, Section 12 — real preview/confirmability path for a quarter-line   */
+/* SPREAD selection, through the REAL buildBetSlipPreview -> classifier ->   */
+/* TheOddsApiProvider chain (not a hand-built canonical selection).          */
+/* -------------------------------------------------------------------------- */
+
+test("H4-B5 CASE A: 'Arsenal F1(-1.25)' stake 10 — exact quarter line offered by the provider — VERIFIED, confirmable (real spread price, signed token)", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [{ sport: "Football", event: "Arsenal vs Coventry City", market: null, selection: "Arsenal F1(-1.25)", submittedOdds: 1.91 }],
+  };
+
+  let capturedSpreadInput: { participant: string; line: string } | null = null;
+  const provider = new TheOddsApiProvider(
+    fakeVerifyOddsFn({}),
+    undefined,
+    fakeVerifySpreadOddsFn({ "Arsenal vs Coventry City": verified(1.91, 1.91, "MyBookie.ag") }, (input) => {
+      capturedSpreadInput = { participant: input.participant, line: input.line };
+    }),
+  );
+  const service = new OddsVerificationService(provider);
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+  const previewSelection = result.preview.selections[0];
+
+  assert.deepEqual(capturedSpreadInput, { participant: "Arsenal", line: "-1.25" }, "the exact quarter line must reach the real spread verifier unchanged");
+  assert.equal(previewSelection.marketType, "SPREAD");
+  assert.equal(previewSelection.line, "-1.25");
+  assert.equal(previewSelection.oddsStatus, "VERIFIED");
+  assert.equal(previewSelection.currentOdds, 1.91);
+  assert.equal(previewSelection.bookmaker, "MyBookie.ag");
+  assert.notEqual(result.previewToken, null, "a VERIFIED quarter-line SPREAD selection must be confirmable — a signed preview token is produced");
+});
+
+test("H4-B5 CASE B: 'Arsenal -1.25 stake 10' — exact quarter line UNAVAILABLE from the provider (only -1.0/-1.5 offered) — NOT confirmable (real canConfirmBetSlip gate), no substitution, no fabricated odds", async () => {
+  // Confirmability for a real bet is decided by the SAME function the Mini
+  // App UI actually uses (components/miniapp/canConfirmBetSlip.ts), never
+  // re-derived here — that function's own oddsStatus gate
+  // (NOT_FOUND/UNAVAILABLE/PENDING all block, regardless of whether a
+  // previewToken happens to exist) is buildBetSlipPreview's real, existing,
+  // unrelated-to-this-stage confirmability rule for a SINGLE bet: a token
+  // can exist from the player's own self-reported odds even when
+  // unverified (see betPreviewApi.ts's own "Always a real token for
+  // SINGLE" comment) — oddsStatus, not token presence, is what actually
+  // blocks the Confirm button.
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [{ sport: "Football", event: "Arsenal vs Coventry City", market: null, selection: "Arsenal F1(-1.25)", submittedOdds: 1.9 }],
+  };
+
+  const provider = new TheOddsApiProvider(
+    fakeVerifyOddsFn({}),
+    undefined,
+    fakeVerifySpreadOddsFn({
+      "Arsenal vs Coventry City": {
+        matched: false,
+        withinTolerance: null,
+        sourceOdds: null,
+        submittedOdds: 1.9,
+        discrepancyPercent: null,
+        bookmaker: null,
+        note: 'Could not match spread selection "Arsenal -1.25" for "Arsenal vs Coventry City" (LINE_NOT_AVAILABLE)',
+      },
+    }),
+  );
+  const service = new OddsVerificationService(provider);
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+  const previewSelection = result.preview.selections[0];
+
+  assert.equal(previewSelection.marketType, "SPREAD");
+  assert.equal(previewSelection.line, "-1.25", "the requested line is still preserved exactly in the preview even though it couldn't be verified — never rounded/substituted");
+  assert.equal(previewSelection.oddsStatus, "NOT_FOUND");
+  assert.notEqual(previewSelection.oddsStatus, "VERIFIED", "the player's own stated odds must never be silently treated as a real provider match");
+  assert.equal(previewSelection.currentOdds, null, "no fabricated/substituted provider odds");
+  assert.equal(previewSelection.bookmaker, null, "no invented bookmaker for an unmatched line");
+
+  const confirmable = canConfirmBetSlip(true, {
+    preview: result.preview as unknown as BetPreview,
+    previewToken: result.previewToken,
+  });
+  assert.equal(confirmable, false, "an unverified quarter-line SPREAD selection must NOT be confirmable, via the real Mini App confirmability gate");
+});
+
+test("H4-B5 CASE B (no odds stated): 'Arsenal -1.25 stake 10' with no self-reported odds at all — also NOT confirmable, no token needed to prove it", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [{ sport: "Football", event: "Arsenal vs Coventry City", market: null, selection: "Arsenal F1(-1.25)", submittedOdds: null }],
+  };
+
+  const provider = new TheOddsApiProvider(
+    fakeVerifyOddsFn({}),
+    undefined,
+    fakeVerifySpreadOddsFn({
+      "Arsenal vs Coventry City": {
+        matched: false,
+        withinTolerance: null,
+        sourceOdds: null,
+        submittedOdds: null,
+        discrepancyPercent: null,
+        bookmaker: null,
+        note: 'Could not match spread selection "Arsenal -1.25" for "Arsenal vs Coventry City" (LINE_NOT_AVAILABLE)',
+      },
+    }),
+  );
+  const service = new OddsVerificationService(provider);
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+
+  const confirmable = canConfirmBetSlip(true, {
+    preview: result.preview as unknown as BetPreview,
+    previewToken: result.previewToken,
+  });
+  assert.equal(confirmable, false);
 });
 
 test("Handicap Stage H2: MONEYLINE and TOTALS previews carry marketType/participant but normalizeSelectionToEnglish's SPREAD branch never fires for them (existing display unchanged)", async () => {

@@ -16,7 +16,6 @@ import {
   verifyOdds,
   verifyTotalsOdds,
   verifySpreadOdds,
-  resolveSpreadEventMetadata,
   type OddsVerificationInput,
   type TotalsVerificationInput,
   type SpreadVerificationInput,
@@ -153,11 +152,13 @@ const CAPABILITIES: OddsProviderCapabilities = {
   // sport (unlike TOTALS, nothing in findSpreadOutcome()/verifySpreadOdds()
   // is football-specific — event resolution and outcome lookup are both
   // fully sport-generic, so no analogous sport gate was needed or added).
-  // STANDARD WHOLE/HALF LINES ONLY this stage — a requested Asian quarter
-  // line (±0.25/±0.75/±1.25/±1.75) is honestly reported as
-  // MARKET_NOT_SUPPORTED by verifySelection()'s own H1 capability gate
-  // below, never rounded/substituted/silently rejected as a different
-  // market. Asian quarter-line support is Handicap Stage H4, not this one.
+  // H4-B5 — the H1-era "standard whole/half lines only" restriction is
+  // removed: any exact decimal line (standard or Asian quarter,
+  // ±0.25/±0.75/±1.25/±1.75) is now routed to real verification.
+  // findSpreadOutcome() only ever matches an EXACT canonical line — never
+  // rounds, substitutes, or picks a nearest neighbor — so an unavailable
+  // exact quarter line still fails safely (SELECTION_NOT_FOUND), it is
+  // simply no longer rejected up front purely for being a quarter line.
   supportedMarketTypes: ["MONEYLINE_2WAY", "MONEYLINE_3WAY", "TOTALS", "SPREAD"],
   // Step 16A — true as of this step: a stated, supported football league
   // (lib/odds/footballLeagues.ts) now actually routes the request to that
@@ -172,7 +173,7 @@ const CAPABILITIES: OddsProviderCapabilities = {
   notes: [
     "Generic football/soccer with no stated league now merges across every currently supported competition (lib/odds/footballLeagues.ts / oddsVerifier.ts SPORT_KEY_ALIASES), not only the English Premier League. A football selection whose league is one of the supported names (or a recognized alias, e.g. EPL/UCL) resolves to that league's own sport_key alone; an unrecognized league returns LEAGUE_NOT_SUPPORTED rather than querying an unrelated competition.",
     "Tennis coverage is limited to the four Grand Slam tournaments, in-tournament only (oddsVerifier.ts TENNIS_SPORT_KEYS) — no year-round ATP/WTA tour coverage.",
-    "1X2/moneyline selections are verifiable for every supported sport; TOTALS (Over/Under) is verifiable for football only (Betting Markets V1, Phase 3.3); SPREAD (handicap) is verifiable for every supported sport, standard whole/half lines only (Handicap Stage H1) — Asian quarter lines, both-teams-to-score, double-chance, and team-totals markets remain out of scope.",
+    "1X2/moneyline selections are verifiable for every supported sport; TOTALS (Over/Under) is verifiable for football only (Betting Markets V1, Phase 3.3); SPREAD (handicap) is verifiable for every supported sport, including exact Asian quarter lines (±0.25/±0.75/±1.25/±1.75) as of Handicap Stage H4-B5 — both-teams-to-score, double-chance, and team-totals markets remain out of scope. Quarter-line SPREAD bets can become confirmable, but automatic settlement remains deferred for every SPREAD bet regardless (see lib/bets/settlement/autoSettleSingleBet.ts).",
     "findEvents() and getEventMarkets() are not implemented by this adapter in Step 5 — verifySelection() is the only operational method (see its own code comment below).",
   ],
 };
@@ -220,28 +221,6 @@ function resolveFootballSportResolution(leagueName: string | undefined): Footbal
   const resolved = resolveFootballLeague(leagueName);
   if (!resolved) return { kind: "UNSUPPORTED_LEAGUE" };
   return { kind: "SUPPORTED", legacySport: resolved.legacySportString };
-}
-
-// Handicap Stage H1 — the exact-shape check backing CAPABILITIES' "standard
-// whole/half lines only" restriction. Deliberately string-based, never
-// floating-point arithmetic (no `line * 2` / `Number.isInteger` check) — a
-// safety-critical gate deciding real-money confirmability should never rely
-// on binary floating-point rounding behavior, however unlikely a precision
-// issue would be for these specific small magnitudes. selection.line is
-// always LINE_INPUT_PATTERN-shaped by the time this runs (domain.ts's
-// normalizeLineString has already validated it, upstream) — optional "-",
-// digits, optional ".digits" — so a plain regex capture of the fractional
-// part is sufficient: no fractional part, or exactly one digit that is "0"
-// or "5", is the entire standard grid (0, 0.5, 1, 1.5, 2, ...); anything
-// else (a two-digit fraction like "25"/"75", or a single "1"/"2"/etc. that
-// isn't the theoretically-impossible-post-canonicalization "0"/"5") is a
-// quarter line or otherwise off-grid, and is rejected.
-function isStandardHandicapLine(canonicalLine: string): boolean {
-  const match = /^-?\d+(?:\.(\d+))?$/.exec(canonicalLine);
-  if (!match) return false;
-  const fraction = match[1];
-  if (fraction === undefined) return true;
-  return fraction === "0" || fraction === "5";
 }
 
 // Only the tokens oddsVerifier.ts's classifySingleSelection/fuzzy matching
@@ -401,16 +380,18 @@ export class TheOddsApiProvider implements OddsProvider {
   // default, not a change to the first one).
   // Handicap Stage H1 — verifySpreadOddsFn added the same way, as a third
   // independently-injectable seam.
+  //
+  // H4-B5 — the H3.1-era 4th DI seam (resolveSpreadEventMetadataFn) is
+  // removed here: it existed only to give the old H1 quarter-line capability
+  // gate a way to resolve a real event without ever reaching price lookup.
+  // Now that the gate itself is gone (see verifySelection() below), every
+  // SPREAD line — standard or quarter — resolves its event the same way,
+  // inside verifySpreadOddsFn itself, exactly like it always has for
+  // standard lines. No replacement seam is needed.
   constructor(
     private readonly verifyOddsFn: typeof verifyOdds = verifyOdds,
     private readonly verifyTotalsOddsFn: typeof verifyTotalsOdds = verifyTotalsOdds,
     private readonly verifySpreadOddsFn: typeof verifySpreadOdds = verifySpreadOdds,
-    // Handicap Stage H3.1 — same "real function, injectable override" DI
-    // pattern as the three above, for the new event-only resolution the H1
-    // quarter-line gate now uses. Every existing call site (production and
-    // test) that never passes a 4th argument keeps using the real
-    // implementation, byte-for-byte unaffected.
-    private readonly resolveSpreadEventMetadataFn: typeof resolveSpreadEventMetadata = resolveSpreadEventMetadata,
   ) {}
 
   getCapabilities(): OddsProviderCapabilities {
@@ -590,66 +571,24 @@ export class TheOddsApiProvider implements OddsProvider {
       });
     }
 
-    // Handicap Stage H1 — the standard-whole/half-line capability gate.
-    // selection.line is guaranteed a present, decimal-shaped string here —
-    // validateCanonicalSelection's own SPREAD rule (participant + line both
-    // required) already ran above and would have returned INVALID_INPUT
-    // otherwise. A quarter line (±0.25/±0.75/±1.25/±1.75) is honestly
-    // reported as unsupported by THIS adapter's CURRENT capability — never
-    // rounded to the nearest standard line, never silently reclassified
-    // away from SPREAD (selection.marketType/selectionType/participant/line
-    // are all left completely untouched; only whether to attempt provider
-    // verification is decided here). findSpreadOutcome() itself has no such
-    // restriction — deleting this one gate is the entire scope of a future
-    // Handicap Stage H4 (Asian quarter lines), not a rewrite of the lookup
-    // logic itself. reasonCode/diagnosticCode/non-confirmable outcome are
-    // byte-for-byte identical to before Handicap Stage H3.1.
-    //
-    // H3.1 — moved here (after legacySport/legacyEvent are computed;
-    // previously this fired before either existed) specifically so a
-    // quarter-line SPREAD bet still gets a real, stable, correctly-resolved
-    // event attached to its (still non-confirmable) result, via
-    // resolveSpreadEventMetadata() — the exact same line-independent
-    // resolveMatchedEvent() every standard-line SPREAD bet already uses,
-    // called with the identical "spreads" market key. Deliberately event
-    // resolution only: findSpreadOutcome() (the actual line/price lookup)
-    // is never reached here, so no quarter-line price can ever surface
-    // through this path — H4 remains entirely closed.
-    if (selection.marketType === "SPREAD" && !isStandardHandicapLine(selection.line as string)) {
-      const eventMetadata = await this.resolveSpreadEventMetadataFn(legacySport, legacyEvent);
-      // OddsCheckResult's Stage 3.1 event fields are `?: string` (absent,
-      // never `| null`) by deliberate design — see that type's own comment
-      // on why "unset" and "known null" must stay distinguishable. undefined
-      // here means resolveSpreadEventMetadata found nothing (NOT_FOUND/
-      // AMBIGUOUS/fetch failure) — the SAME honest "nothing to report"
-      // state buildMatchedEvent already treats as "no matchedEvent at all".
-      const matchedEvent = buildMatchedEvent(
-        {
-          matched: false,
-          withinTolerance: null,
-          sourceOdds: null,
-          submittedOdds: submittedOddsNumber,
-          discrepancyPercent: null,
-          bookmaker: null,
-          note: null,
-          providerEventId: eventMetadata.providerEventId ?? undefined,
-          providerSportKey: eventMetadata.providerSportKey ?? undefined,
-          eventStartTime: eventMetadata.eventStartTime ?? undefined,
-          homeTeamName: eventMetadata.homeTeamName ?? undefined,
-          awayTeamName: eventMetadata.awayTeamName ?? undefined,
-          competitionName: eventMetadata.competitionName ?? undefined,
-        },
-        selection,
-      );
-      return createFailedResult({
-        submittedOdds,
-        provider: PROVIDER_NAME,
-        checkedAt: checkedAtFor(),
-        reasonCode: "MARKET_NOT_SUPPORTED",
-        diagnosticCode: "ADAPTER_SPREAD_QUARTER_LINE_UNSUPPORTED_H1",
-        matchedEvent,
-      });
-    }
+    // H4-B5 — the old Handicap Stage H1 quarter-line capability gate lived
+    // here (rejecting ±0.25/±0.75/±1.25/±1.75 as MARKET_NOT_SUPPORTED,
+    // diagnosticCode ADAPTER_SPREAD_QUARTER_LINE_UNSUPPORTED_H1, with only
+    // event-only resolution via resolveSpreadEventMetadataFn). Removed now
+    // that persistence (H4-B1), the settlement evaluator (H4-B2), and the
+    // internal settlement primitive (H4-B3) all have real support for a
+    // quarter-line outcome — findSpreadOutcome()/verifySpreadOdds() (below)
+    // already handled arbitrary exact decimal lines with zero restriction;
+    // this gate was the ONLY thing preventing a quarter-line SPREAD
+    // selection from reaching them. Every SPREAD line, standard or quarter,
+    // now takes the exact same path below — no separate quarter-line
+    // routing, no second verifier, no rounding/nearest-line substitution
+    // (findSpreadOutcome's own exact canonical-string equality already
+    // guarantees that). Auto-settlement remains independently blocked for
+    // SPREAD regardless (lib/bets/settlement/autoSettleSingleBet.ts's own
+    // SPREAD_AUTO_SETTLEMENT_DEFERRED guard, untouched by this stage) — a
+    // quarter-line bet becoming VERIFIED/confirmable here does not make it
+    // auto-settleable.
 
     let legacyResult: OddsCheckResult;
 
@@ -669,9 +608,10 @@ export class TheOddsApiProvider implements OddsProvider {
     } else if (selection.marketType === "SPREAD") {
       // participant and line are both guaranteed present here —
       // validateCanonicalSelection's own SPREAD rule already ran above and
-      // would have returned INVALID_INPUT otherwise; the H1 quarter-line
-      // gate above has also already confirmed this line is on the standard
-      // grid.
+      // would have returned INVALID_INPUT otherwise. H4-B5 — any exact
+      // decimal line, standard or quarter, reaches verifySpreadOddsFn the
+      // same way; findSpreadOutcome() itself decides match/no-match via
+      // exact canonical-string equality, never a grid restriction here.
       const spreadInput: SpreadVerificationInput = {
         sport: legacySport,
         event: legacyEvent,
