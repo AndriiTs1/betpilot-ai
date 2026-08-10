@@ -12,7 +12,8 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:backfill-bet-selections": "tsx scripts/backfill-bet-selections.ts",
     "operator:create": "tsx scripts/create-operator.ts",
-    "player:invite": "tsx scripts/invite-player.ts"
+    "player:invite": "tsx scripts/invite-player.ts",
+    "eval:screenshots": "tsx evals/runScreenshotEval.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.70.0",

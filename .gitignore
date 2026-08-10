@@ -45,3 +45,11 @@ next-env.d.ts
 
 # Playwright MCP artifacts (console logs, page snapshots)
 .playwright-mcp/
+
+# EVAL-1 — generated evaluation run reports (evals/runScreenshotEval.ts's
+# own output). Machine-generated per-run artifacts, not source — never
+# committed, matching this repo's existing /coverage convention. The
+# directory itself stays tracked via reports/.gitkeep so `evals/` has a
+# stable location to write into on a fresh checkout.
+/evals/reports/*
+!/evals/reports/.gitkeep
