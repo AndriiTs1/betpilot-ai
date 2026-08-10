@@ -12,7 +12,15 @@
 // buildBetSlipPreview.ts is expected to start depending on this instead of
 // calling verifyOdds() directly.
 
-import { verifyOdds, verifyTotalsOdds, verifySpreadOdds, type OddsVerificationInput, type TotalsVerificationInput, type SpreadVerificationInput } from "./oddsVerifier";
+import {
+  verifyOdds,
+  verifyTotalsOdds,
+  verifySpreadOdds,
+  resolveSpreadEventMetadata,
+  type OddsVerificationInput,
+  type TotalsVerificationInput,
+  type SpreadVerificationInput,
+} from "./oddsVerifier";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { validateCanonicalSelection, type CanonicalParticipant, type CanonicalSelection, type Sport } from "./domain";
 import { resolveFootballLeague } from "./footballLeagues";
@@ -397,6 +405,12 @@ export class TheOddsApiProvider implements OddsProvider {
     private readonly verifyOddsFn: typeof verifyOdds = verifyOdds,
     private readonly verifyTotalsOddsFn: typeof verifyTotalsOdds = verifyTotalsOdds,
     private readonly verifySpreadOddsFn: typeof verifySpreadOdds = verifySpreadOdds,
+    // Handicap Stage H3.1 — same "real function, injectable override" DI
+    // pattern as the three above, for the new event-only resolution the H1
+    // quarter-line gate now uses. Every existing call site (production and
+    // test) that never passes a 4th argument keeps using the real
+    // implementation, byte-for-byte unaffected.
+    private readonly resolveSpreadEventMetadataFn: typeof resolveSpreadEventMetadata = resolveSpreadEventMetadata,
   ) {}
 
   getCapabilities(): OddsProviderCapabilities {
@@ -496,29 +510,6 @@ export class TheOddsApiProvider implements OddsProvider {
       });
     }
 
-    // Handicap Stage H1 — the standard-whole/half-line capability gate.
-    // selection.line is guaranteed a present, decimal-shaped string here —
-    // validateCanonicalSelection's own SPREAD rule (participant + line both
-    // required) already ran above and would have returned INVALID_INPUT
-    // otherwise. A quarter line (±0.25/±0.75/±1.25/±1.75) is honestly
-    // reported as unsupported by THIS adapter's CURRENT capability — never
-    // rounded to the nearest standard line, never silently reclassified
-    // away from SPREAD (selection.marketType/selectionType/participant/line
-    // are all left completely untouched; only whether to attempt provider
-    // verification is decided here). findSpreadOutcome() itself has no such
-    // restriction — deleting this one gate is the entire scope of a future
-    // Handicap Stage H4 (Asian quarter lines), not a rewrite of the lookup
-    // logic itself.
-    if (selection.marketType === "SPREAD" && !isStandardHandicapLine(selection.line as string)) {
-      return createFailedResult({
-        submittedOdds,
-        provider: PROVIDER_NAME,
-        checkedAt: checkedAtFor(),
-        reasonCode: "MARKET_NOT_SUPPORTED",
-        diagnosticCode: "ADAPTER_SPREAD_QUARTER_LINE_UNSUPPORTED_H1",
-      });
-    }
-
     if (selection.sport === "UNKNOWN") {
       return createFailedResult({
         submittedOdds,
@@ -596,6 +587,67 @@ export class TheOddsApiProvider implements OddsProvider {
         checkedAt: checkedAtFor(),
         reasonCode: "INVALID_INPUT",
         diagnosticCode: "EVENT_NAME_EMPTY",
+      });
+    }
+
+    // Handicap Stage H1 — the standard-whole/half-line capability gate.
+    // selection.line is guaranteed a present, decimal-shaped string here —
+    // validateCanonicalSelection's own SPREAD rule (participant + line both
+    // required) already ran above and would have returned INVALID_INPUT
+    // otherwise. A quarter line (±0.25/±0.75/±1.25/±1.75) is honestly
+    // reported as unsupported by THIS adapter's CURRENT capability — never
+    // rounded to the nearest standard line, never silently reclassified
+    // away from SPREAD (selection.marketType/selectionType/participant/line
+    // are all left completely untouched; only whether to attempt provider
+    // verification is decided here). findSpreadOutcome() itself has no such
+    // restriction — deleting this one gate is the entire scope of a future
+    // Handicap Stage H4 (Asian quarter lines), not a rewrite of the lookup
+    // logic itself. reasonCode/diagnosticCode/non-confirmable outcome are
+    // byte-for-byte identical to before Handicap Stage H3.1.
+    //
+    // H3.1 — moved here (after legacySport/legacyEvent are computed;
+    // previously this fired before either existed) specifically so a
+    // quarter-line SPREAD bet still gets a real, stable, correctly-resolved
+    // event attached to its (still non-confirmable) result, via
+    // resolveSpreadEventMetadata() — the exact same line-independent
+    // resolveMatchedEvent() every standard-line SPREAD bet already uses,
+    // called with the identical "spreads" market key. Deliberately event
+    // resolution only: findSpreadOutcome() (the actual line/price lookup)
+    // is never reached here, so no quarter-line price can ever surface
+    // through this path — H4 remains entirely closed.
+    if (selection.marketType === "SPREAD" && !isStandardHandicapLine(selection.line as string)) {
+      const eventMetadata = await this.resolveSpreadEventMetadataFn(legacySport, legacyEvent);
+      // OddsCheckResult's Stage 3.1 event fields are `?: string` (absent,
+      // never `| null`) by deliberate design — see that type's own comment
+      // on why "unset" and "known null" must stay distinguishable. undefined
+      // here means resolveSpreadEventMetadata found nothing (NOT_FOUND/
+      // AMBIGUOUS/fetch failure) — the SAME honest "nothing to report"
+      // state buildMatchedEvent already treats as "no matchedEvent at all".
+      const matchedEvent = buildMatchedEvent(
+        {
+          matched: false,
+          withinTolerance: null,
+          sourceOdds: null,
+          submittedOdds: submittedOddsNumber,
+          discrepancyPercent: null,
+          bookmaker: null,
+          note: null,
+          providerEventId: eventMetadata.providerEventId ?? undefined,
+          providerSportKey: eventMetadata.providerSportKey ?? undefined,
+          eventStartTime: eventMetadata.eventStartTime ?? undefined,
+          homeTeamName: eventMetadata.homeTeamName ?? undefined,
+          awayTeamName: eventMetadata.awayTeamName ?? undefined,
+          competitionName: eventMetadata.competitionName ?? undefined,
+        },
+        selection,
+      );
+      return createFailedResult({
+        submittedOdds,
+        provider: PROVIDER_NAME,
+        checkedAt: checkedAtFor(),
+        reasonCode: "MARKET_NOT_SUPPORTED",
+        diagnosticCode: "ADAPTER_SPREAD_QUARTER_LINE_UNSUPPORTED_H1",
+        matchedEvent,
       });
     }
 

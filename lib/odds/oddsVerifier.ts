@@ -1497,3 +1497,66 @@ export async function verifySpreadOdds(bet: SpreadVerificationInput): Promise<Od
     ...providerMetadata,
   };
 }
+
+/* -------------------------------------------------------------------------- */
+/* Handicap Stage H3.1 — event resolution ONLY, for a SPREAD line this        */
+/* adapter cannot yet verify (H1's quarter-line capability gate).            */
+/* -------------------------------------------------------------------------- */
+//
+// Root cause this fixes: a quarter line (e.g. "-1.25") was rejected by
+// theOddsApiProvider.ts's H1 capability gate BEFORE verifySpreadOdds() —
+// and therefore resolveMatchedEvent() above — ever ran, so the rejected
+// result carried no event data at all ("<UNKNOWN>" in preview), even though
+// event resolution has nothing to do with which line was requested.
+// resolveMatchedEvent() never reads a line in the first place (confirmed by
+// its own signature above: sport/eventText/market only) — the SAME
+// participant/event query already resolves to the SAME event regardless of
+// -1.5/-1.25/-2/etc, because nothing about line matching happens until
+// findSpreadOutcome() runs, several steps later.
+//
+// This function reuses resolveMatchedEvent() completely unmodified (no
+// second event matcher, no team-specific logic, same unique/ambiguous/
+// not-found policy findMatchingEvent() already implements) with market
+// "spreads" — the exact market key a standard-line SPREAD bet already
+// resolves against — so a quarter-line bet's event and a standard-line
+// bet's event are, by construction, resolved by the identical algorithm
+// against the identical fetched event list.
+//
+// Deliberately event-only: findSpreadOutcome() (the function that actually
+// searches for and prices a specific line) is never called here, so no
+// quarter-line price can ever be found or returned through this path —
+// that remains H4's entire, still-untouched scope. Every failure mode
+// (NO_SPORT_KEYS/FETCH_FAILED/NOT_FOUND/AMBIGUOUS) degrades to the same
+// all-null metadata, exactly as honest as extractProviderEventMetadata's
+// own all-or-nothing contract — never a partial/fabricated event.
+export interface SpreadEventOnlyMetadata {
+  readonly homeTeamName: string | null;
+  readonly awayTeamName: string | null;
+  readonly competitionName: string | null;
+  readonly eventStartTime: string | null;
+  readonly providerEventId: string | null;
+  readonly providerSportKey: string | null;
+}
+
+const NO_SPREAD_EVENT_METADATA: SpreadEventOnlyMetadata = {
+  homeTeamName: null,
+  awayTeamName: null,
+  competitionName: null,
+  eventStartTime: null,
+  providerEventId: null,
+  providerSportKey: null,
+};
+
+export async function resolveSpreadEventMetadata(sport: string, event: string): Promise<SpreadEventOnlyMetadata> {
+  const resolved = await resolveMatchedEvent(sport, event, "spreads");
+  if (resolved.kind !== "RESOLVED") return NO_SPREAD_EVENT_METADATA;
+
+  return {
+    homeTeamName: resolved.providerMetadata.homeTeamName ?? null,
+    awayTeamName: resolved.providerMetadata.awayTeamName ?? null,
+    competitionName: resolved.providerMetadata.competitionName ?? null,
+    eventStartTime: resolved.providerMetadata.eventStartTime ?? null,
+    providerEventId: resolved.providerMetadata.providerEventId ?? null,
+    providerSportKey: resolved.providerMetadata.providerSportKey ?? null,
+  };
+}

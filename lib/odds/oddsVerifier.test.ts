@@ -8,6 +8,7 @@ import {
   fetchSpreadOddsForSport,
   findSpreadOutcome,
   verifySpreadOdds,
+  resolveSpreadEventMetadata,
   type OddsVerificationInput,
   type OddsApiEvent,
   type OddsApiBookmaker,
@@ -2243,4 +2244,169 @@ test("H1.1 (20): fallback across bookmakers happens entirely within the ALREADY-
 
   assert.equal(result.matched, true, result.note ?? "expected a match");
   assert.equal(fetchCount, 1, "inspecting multiple bookmakers must never trigger additional HTTP requests — the provider response already contains all bookmakers");
+});
+
+
+/* ============================================================================
+ * Handicap Stage H3.1 — resolveSpreadEventMetadata: event resolution ONLY,
+ * completely independent of any requested line (the function signature
+ * itself has no line parameter at all). Reuses resolveMatchedEvent()
+ * unmodified — no second event matcher, same unique/ambiguous/not-found
+ * policy findMatchingEvent() already implements for every other market.
+ * ============================================================================ */
+
+// extractProviderEventMetadata (oddsVerifier.ts) is all-or-nothing: it only
+// populates provider metadata when the event ALSO carries a valid
+// commence_time — so every fixture in this section states one explicitly,
+// same convention as the pre-existing "provider event metadata round-trips"
+// test above.
+function spreadFetchEventTimed(id: string, homeTeam: string, awayTeam: string, bookmakers: OddsApiBookmaker[], commenceTime: string): unknown {
+  return { id, home_team: homeTeam, away_team: awayTeam, bookmakers, commence_time: commenceTime };
+}
+
+test("H3.1 (1): a unique participant-only query ('Arsenal') resolves the one matching event", async () => {
+  mockEvents([
+    spreadFetchEventTimed("evt-h31-unique", "Arsenal", "Coventry City", [
+      pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.85, -1.5), spreadOutcome("Coventry City", 1.95, 1.5)]),
+    ], "2026-08-15T18:00:00.000Z"),
+  ]);
+
+  const result = await resolveSpreadEventMetadata("premier league", "Arsenal");
+
+  assert.equal(result.homeTeamName, "Arsenal");
+  assert.equal(result.awayTeamName, "Coventry City");
+});
+
+test("H3.1 (2): 'Arsenal -1.25 stake 10' shape resolves the SAME event as 'Arsenal -1.5' — event resolution never reads a line at all", async () => {
+  mockEvents([
+    spreadFetchEventTimed("evt-h31-lineindep", "Arsenal", "Coventry City", [
+      pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.85, -1.5), spreadOutcome("Coventry City", 1.95, 1.5)]),
+    ], "2026-08-15T18:00:00.000Z"),
+  ]);
+
+  // resolveSpreadEventMetadata has no `line` parameter in its own type
+  // signature — this call proves it byte-for-byte, not just by inspection.
+  const resultForQuarterLineContext = await resolveSpreadEventMetadata("premier league", "Arsenal");
+
+  assert.equal(resultForQuarterLineContext.homeTeamName, "Arsenal");
+  assert.equal(resultForQuarterLineContext.awayTeamName, "Coventry City");
+});
+
+test("H3.1 (3): standard-line vs quarter-line parity — resolveSpreadEventMetadata and verifySpreadOdds (called for a standard line against the identical fixture) resolve the IDENTICAL event", async () => {
+  mockEvents([
+    spreadFetchEventTimed("evt-h31-parity", "Arsenal", "Coventry City", [
+      pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.85, -1.5), spreadOutcome("Coventry City", 1.95, 1.5)]),
+    ], "2026-08-15T18:00:00.000Z"),
+  ]);
+
+  const quarterLineEventOnly = await resolveSpreadEventMetadata("premier league", "Arsenal");
+
+  mockEvents([
+    spreadFetchEventTimed("evt-h31-parity", "Arsenal", "Coventry City", [
+      pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.85, -1.5), spreadOutcome("Coventry City", 1.95, 1.5)]),
+    ], "2026-08-15T18:00:00.000Z"),
+  ]);
+  const standardLineFull = await verifySpreadOdds({ sport: "premier league", event: "Arsenal", participant: "Arsenal", line: "-1.5", odds: null });
+
+  assert.equal(quarterLineEventOnly.homeTeamName, standardLineFull.homeTeamName);
+  assert.equal(quarterLineEventOnly.awayTeamName, standardLineFull.awayTeamName);
+  assert.equal(quarterLineEventOnly.providerEventId, standardLineFull.providerEventId);
+});
+
+test("H3.1 (4): an ambiguous participant-only query (two plausible Arsenal events) never picks one arbitrarily — degrades to all-null, never a fabricated event", async () => {
+  mockEvents([
+    spreadFetchEventTimed("evt-h31-amb-1", "Arsenal", "Coventry City", [pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.85, -1.5), spreadOutcome("Coventry City", 1.95, 1.5)])], "2026-08-15T18:00:00.000Z"),
+    spreadFetchEventTimed("evt-h31-amb-2", "Arsenal", "Fulham", [pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.7, -1.5), spreadOutcome("Fulham", 2.1, 1.5)])], "2026-08-22T18:00:00.000Z"),
+  ]);
+
+  const result = await resolveSpreadEventMetadata("premier league", "Arsenal");
+
+  assert.equal(result.homeTeamName, null);
+  assert.equal(result.awayTeamName, null);
+  assert.equal(result.providerEventId, null);
+});
+
+test("H3.1 (5): no matching event at all — NOT_FOUND, degrades to all-null, never a fabricated event", async () => {
+  mockEvents([]);
+
+  const result = await resolveSpreadEventMetadata("premier league", "Arsenal");
+
+  assert.equal(result.homeTeamName, null);
+  assert.equal(result.awayTeamName, null);
+  assert.equal(result.eventStartTime, null);
+  assert.equal(result.providerEventId, null);
+  assert.equal(result.providerSportKey, null);
+  assert.equal(result.competitionName, null);
+});
+
+test("H3.1 (6): an AWAY-side-only participant query ('Coventry City') still resolves the same event, home/away independent", async () => {
+  mockEvents([
+    spreadFetchEventTimed("evt-h31-away", "Arsenal", "Coventry City", [
+      pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.85, -1.5), spreadOutcome("Coventry City", 1.95, 1.5)]),
+    ], "2026-08-15T18:00:00.000Z"),
+  ]);
+
+  const result = await resolveSpreadEventMetadata("premier league", "Coventry City");
+
+  assert.equal(result.homeTeamName, "Arsenal");
+  assert.equal(result.awayTeamName, "Coventry City");
+});
+
+test("H3.1 (7): explicit two-team query ('Real Madrid vs Barcelona') still resolves authoritatively — participant-only fallback never weakens full-event matching", async () => {
+  mockEvents([
+    spreadFetchEventTimed("evt-h31-realbarca", "Real Madrid", "Barcelona", [
+      pinnacleSpreadBookmaker([spreadOutcome("Real Madrid", 1.9, -1), spreadOutcome("Barcelona", 1.9, 1)]),
+    ], "2026-08-16T20:00:00.000Z"),
+  ]);
+
+  const result = await resolveSpreadEventMetadata("premier league", "Real Madrid vs Barcelona");
+
+  assert.equal(result.homeTeamName, "Real Madrid");
+  assert.equal(result.awayTeamName, "Barcelona");
+});
+
+test("H3.1 (8): generic multi-team coverage — Manchester United/Chelsea (multi-word participant) resolves correctly, no team-specific code", async () => {
+  mockEvents([
+    spreadFetchEventTimed("evt-h31-mufc", "Manchester United", "Chelsea", [
+      pinnacleSpreadBookmaker([spreadOutcome("Manchester United", 1.8, -0.5), spreadOutcome("Chelsea", 2.0, 0.5)]),
+    ], "2026-08-17T15:00:00.000Z"),
+  ]);
+
+  const result = await resolveSpreadEventMetadata("premier league", "Manchester United");
+
+  assert.equal(result.homeTeamName, "Manchester United");
+  assert.equal(result.awayTeamName, "Chelsea");
+});
+
+test("H3.1 (9): provider fetch failure degrades to all-null, never throws", async () => {
+  currentHandler = async () => new Response("", { status: 500 });
+
+  const result = await resolveSpreadEventMetadata("premier league", "Arsenal");
+
+  assert.equal(result.homeTeamName, null);
+  assert.equal(result.providerEventId, null);
+});
+
+test("H3.1 (10): resolveSpreadEventMetadata never calls findSpreadOutcome — no quarter-line price can ever be found through this path (verified indirectly: a bookmaker offering a matching spread outcome is present in the fixture, but no price/bookmaker field exists anywhere on this function's return type at all)", async () => {
+  mockEvents([
+    spreadFetchEventTimed("evt-h31-noprice", "Arsenal", "Coventry City", [
+      pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.85, -1.25), spreadOutcome("Coventry City", 1.95, 1.25)]),
+    ], "2026-08-15T18:00:00.000Z"),
+  ]);
+
+  const result = await resolveSpreadEventMetadata("premier league", "Arsenal");
+
+  // Event resolves correctly...
+  assert.equal(result.homeTeamName, "Arsenal");
+  // ...but the return type structurally has no price/bookmaker/matched
+  // field at all — there is nothing here that could ever leak a
+  // quarter-line price to a caller, by construction, not by convention.
+  assert.deepEqual(Object.keys(result).sort(), [
+    "awayTeamName",
+    "competitionName",
+    "eventStartTime",
+    "homeTeamName",
+    "providerEventId",
+    "providerSportKey",
+  ]);
 });
