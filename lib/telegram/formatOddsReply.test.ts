@@ -59,6 +59,68 @@ test("formatOddsReply: NOT_FOUND renders the not-found line", () => {
   assert.match(text, /❔ Event or selection not found/);
 });
 
+/* -------------------------------------------------------------------------- */
+/* H4-B5.1 — NOT_FOUND must not conflate EVENT RESOLUTION with LINE          */
+/* AVAILABILITY. Live-proven root cause: a quarter-line SPREAD request whose */
+/* event WAS uniquely resolved (homeTeamName/awayTeamName populated) but     */
+/* whose exact line no bookmaker offers still hit the same generic "Event or */
+/* selection not found" wording as a genuinely unresolved event — reading as */
+/* if the event itself were unknown, directly under a correctly-rendered     */
+/* Event: line naming it.                                                    */
+/* -------------------------------------------------------------------------- */
+
+test("H4-B5.1: NOT_FOUND with a resolved event (homeTeamName/awayTeamName present) uses event-aware wording, never claims the event is unknown", () => {
+  const text = formatOddsReply(
+    preview({
+      selections: [
+        selection({
+          event: "Arsenal — Coventry City",
+          selection: "Arsenal -0.75",
+          oddsStatus: "NOT_FOUND",
+          currentOdds: null,
+          homeTeamName: "Arsenal",
+          awayTeamName: "Coventry City",
+        }),
+      ],
+    }),
+  );
+
+  assert.match(text, /Event:<\/b> Arsenal — Coventry City/);
+  assert.match(text, /❔ Event found, but this exact selection\/line is not offered by any bookmaker/);
+  assert.doesNotMatch(text, /Event or selection not found/);
+});
+
+test("H4-B5.1: NOT_FOUND with NO resolved event (homeTeamName/awayTeamName both null) keeps the original, genuinely-accurate wording", () => {
+  const text = formatOddsReply(
+    preview({
+      selections: [
+        selection({
+          event: "Obscure Cup Match",
+          oddsStatus: "NOT_FOUND",
+          currentOdds: null,
+          homeTeamName: null,
+          awayTeamName: null,
+        }),
+      ],
+    }),
+  );
+
+  assert.match(text, /❔ Event or selection not found/);
+  assert.doesNotMatch(text, /this exact selection\/line is not offered/);
+});
+
+test("H4-B5.1: NOT_FOUND with only ONE of homeTeamName/awayTeamName present (should not happen per buildBetSlipPreview's all-or-nothing contract, but must fail safe) keeps the original wording rather than claiming a partial resolution", () => {
+  const text = formatOddsReply(
+    preview({
+      selections: [
+        selection({ oddsStatus: "NOT_FOUND", currentOdds: null, homeTeamName: "Arsenal", awayTeamName: null }),
+      ],
+    }),
+  );
+
+  assert.match(text, /❔ Event or selection not found/);
+});
+
 test("formatOddsReply: UNAVAILABLE with a real submittedOdds reads as a provider/check failure", () => {
   const text = formatOddsReply(
     preview({ selections: [selection({ oddsStatus: "UNAVAILABLE", submittedOdds: 2.05, currentOdds: null })] }),

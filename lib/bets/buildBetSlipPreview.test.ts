@@ -1776,6 +1776,194 @@ test("H4-B5 CASE B (no odds stated): 'Arsenal -1.25 stake 10' with no self-repor
   assert.equal(confirmable, false);
 });
 
+/* -------------------------------------------------------------------------- */
+/* H4-B5.1 — event-metadata preservation on a FAILED exact-line lookup. Live */
+/* forensic audit proved lib/odds/oddsVerifier.ts's verifySpreadOdds() ALWAYS */
+/* spreads the resolved event's provider metadata into its result even when  */
+/* the specific requested line has no bookmaker price (LINE_NOT_AVAILABLE) — */
+/* the two CASE B tests above never actually proved this, because their fake */
+/* verifySpreadOddsFn stub replaces oddsVerifier.ts's real behavior wholesale */
+/* and never included homeTeamName/awayTeamName in its canned response. These */
+/* two tests close that gap: standard (C) and quarter (D) SPREAD lines alike */
+/* must both retain the real, resolved event display fields on the preview   */
+/* even when oddsStatus ends up NOT_FOUND — this is what keeps the preview   */
+/* showing "Arsenal — Coventry City" rather than a bare fallback, and is the */
+/* exact invariant Section 6/7 of the H4-B5.1 audit required be proven, not  */
+/* merely assumed.                                                           */
+/* -------------------------------------------------------------------------- */
+
+test("H4-B5.1 Section 11(A): standard SPREAD VERIFIED preserves the resolved event's homeTeamName/awayTeamName/competitionName/event display field", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [{ sport: "Football", event: "Arsenal", market: null, selection: "Arsenal -1.5", submittedOdds: null }],
+  };
+
+  const provider = new TheOddsApiProvider(
+    fakeVerifyOddsFn({}),
+    undefined,
+    fakeVerifySpreadOddsFn({
+      Arsenal: {
+        matched: true,
+        withinTolerance: true,
+        sourceOdds: 1.63,
+        submittedOdds: 1.63,
+        discrepancyPercent: 0,
+        bookmaker: "1xBet",
+        note: null,
+        providerEventId: "evt-arsenal-coventry",
+        providerSportKey: "soccer_epl",
+        eventStartTime: "2026-08-21T19:00:00.000Z",
+        homeTeamName: "Arsenal",
+        awayTeamName: "Coventry City",
+        competitionName: "Premier League",
+      },
+    }),
+  );
+  const service = new OddsVerificationService(provider);
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+  const previewSelection = result.preview.selections[0];
+
+  assert.equal(previewSelection.oddsStatus, "VERIFIED");
+  assert.equal(previewSelection.event, "Arsenal — Coventry City");
+  assert.equal(previewSelection.homeTeamName, "Arsenal");
+  assert.equal(previewSelection.awayTeamName, "Coventry City");
+  assert.equal(previewSelection.competitionName, "Premier League");
+});
+
+test("H4-B5.1 Section 11(B): quarter SPREAD VERIFIED preserves the resolved event's homeTeamName/awayTeamName/competitionName/event display field", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [{ sport: "Football", event: "Arsenal", market: null, selection: "Arsenal -1.25", submittedOdds: null }],
+  };
+
+  const provider = new TheOddsApiProvider(
+    fakeVerifyOddsFn({}),
+    undefined,
+    fakeVerifySpreadOddsFn({
+      Arsenal: {
+        matched: true,
+        withinTolerance: true,
+        sourceOdds: 1.91,
+        submittedOdds: 1.91,
+        discrepancyPercent: 0,
+        bookmaker: "MyBookie.ag",
+        note: null,
+        providerEventId: "evt-arsenal-coventry",
+        providerSportKey: "soccer_epl",
+        eventStartTime: "2026-08-21T19:00:00.000Z",
+        homeTeamName: "Arsenal",
+        awayTeamName: "Coventry City",
+        competitionName: "Premier League",
+      },
+    }),
+  );
+  const service = new OddsVerificationService(provider);
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+  const previewSelection = result.preview.selections[0];
+
+  assert.equal(previewSelection.marketType, "SPREAD");
+  assert.equal(previewSelection.line, "-1.25");
+  assert.equal(previewSelection.oddsStatus, "VERIFIED");
+  assert.equal(previewSelection.event, "Arsenal — Coventry City");
+  assert.equal(previewSelection.homeTeamName, "Arsenal");
+  assert.equal(previewSelection.awayTeamName, "Coventry City");
+  assert.equal(previewSelection.competitionName, "Premier League");
+});
+
+test("H4-B5.1 Section 11(C): standard SPREAD line unavailable (-2.5, e.g.) still preserves the resolved event's homeTeamName/awayTeamName/competitionName/event display field — never <UNKNOWN>, never dropped", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [{ sport: "Football", event: "Arsenal", market: null, selection: "Arsenal -2.5", submittedOdds: null }],
+  };
+
+  const provider = new TheOddsApiProvider(
+    fakeVerifyOddsFn({}),
+    undefined,
+    fakeVerifySpreadOddsFn({
+      Arsenal: {
+        matched: false,
+        withinTolerance: null,
+        sourceOdds: null,
+        submittedOdds: null,
+        discrepancyPercent: null,
+        bookmaker: null,
+        note: 'Could not match spread selection "Arsenal -2.5" for "Arsenal" (LINE_NOT_AVAILABLE)',
+        providerEventId: "evt-arsenal-coventry",
+        providerSportKey: "soccer_epl",
+        eventStartTime: "2026-08-21T19:00:00.000Z",
+        homeTeamName: "Arsenal",
+        awayTeamName: "Coventry City",
+        competitionName: "Premier League",
+      },
+    }),
+  );
+  const service = new OddsVerificationService(provider);
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+  const previewSelection = result.preview.selections[0];
+
+  assert.equal(previewSelection.oddsStatus, "NOT_FOUND");
+  assert.equal(previewSelection.currentOdds, null, "no fabricated odds");
+  assert.equal(previewSelection.event, "Arsenal — Coventry City", "the resolved event must still display, never fall back to the bare single-team text");
+  assert.equal(previewSelection.homeTeamName, "Arsenal");
+  assert.equal(previewSelection.awayTeamName, "Coventry City");
+  assert.equal(previewSelection.competitionName, "Premier League");
+});
+
+test("H4-B5.1 Section 11(D): quarter SPREAD line unavailable (-0.75) still preserves the resolved event's homeTeamName/awayTeamName/competitionName/event display field — never <UNKNOWN>, never dropped (the exact production scenario this audit investigated)", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [{ sport: "Football", event: "Arsenal", market: null, selection: "Arsenal -0.75", submittedOdds: null }],
+  };
+
+  const provider = new TheOddsApiProvider(
+    fakeVerifyOddsFn({}),
+    undefined,
+    fakeVerifySpreadOddsFn({
+      Arsenal: {
+        matched: false,
+        withinTolerance: null,
+        sourceOdds: null,
+        submittedOdds: null,
+        discrepancyPercent: null,
+        bookmaker: null,
+        note: 'Could not match spread selection "Arsenal -0.75" for "Arsenal" (LINE_NOT_AVAILABLE)',
+        providerEventId: "evt-arsenal-coventry",
+        providerSportKey: "soccer_epl",
+        eventStartTime: "2026-08-21T19:00:00.000Z",
+        homeTeamName: "Arsenal",
+        awayTeamName: "Coventry City",
+        competitionName: "Premier League",
+      },
+    }),
+  );
+  const service = new OddsVerificationService(provider);
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+  const previewSelection = result.preview.selections[0];
+
+  assert.equal(previewSelection.marketType, "SPREAD");
+  assert.equal(previewSelection.line, "-0.75", "the requested quarter line is preserved exactly, never rounded/substituted");
+  assert.equal(previewSelection.oddsStatus, "NOT_FOUND");
+  assert.equal(previewSelection.currentOdds, null, "no fabricated odds");
+  assert.equal(previewSelection.event, "Arsenal — Coventry City", "the resolved event must still display, never fall back to the bare single-team text or <UNKNOWN>");
+  assert.equal(previewSelection.homeTeamName, "Arsenal");
+  assert.equal(previewSelection.awayTeamName, "Coventry City");
+  assert.equal(previewSelection.competitionName, "Premier League");
+
+  const confirmable = canConfirmBetSlip(true, {
+    preview: result.preview as unknown as BetPreview,
+    previewToken: result.previewToken,
+  });
+  assert.equal(confirmable, false, "event display recovering must never make an unverified line confirmable");
+});
+
 test("Handicap Stage H2: MONEYLINE and TOTALS previews carry marketType/participant but normalizeSelectionToEnglish's SPREAD branch never fires for them (existing display unchanged)", async () => {
   const slip: ParsedBetSlip = {
     type: "EXPRESS",

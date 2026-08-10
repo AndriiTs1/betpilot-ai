@@ -29,9 +29,25 @@ const STATUS_LINES: Record<BetSelectionOddsStatus, string> = {
 // failure — both are the exact same domain status (buildBetSlipPreview.ts
 // never distinguishes them either), so this is a wording choice only, never
 // a new status.
+//
+// H4-B5.1 — a second, equally real distinction: NOT_FOUND covers both "the
+// event itself was never resolved" AND "the event WAS resolved, only this
+// exact selection/line isn't offered" (e.g. a quarter-line SPREAD request
+// no bookmaker prices) — buildBetSlipPreview.ts's own selection.event field
+// already shows the correct, fully-resolved event name ("Arsenal —
+// Coventry City") in the latter case (proven live against production odds
+// data), but the single generic "Event or selection not found" wording
+// right below it directly contradicted that, reading as if the event were
+// unknown. homeTeamName/awayTeamName are only ever populated once the
+// provider actually resolved an event (see buildBetSlipPreview.ts), so
+// their presence is the one honest signal for which case this is — never
+// re-derived from event/selection text.
 function statusLineFor(selection: BetSlipPreviewSelection): string {
   if (selection.oddsStatus === "UNAVAILABLE" && selection.submittedOdds === null) {
     return "⚠️ No submitted odds were provided, so comparison is unavailable.";
+  }
+  if (selection.oddsStatus === "NOT_FOUND" && selection.homeTeamName !== null && selection.awayTeamName !== null) {
+    return "❔ Event found, but this exact selection/line is not offered by any bookmaker";
   }
   return STATUS_LINES[selection.oddsStatus];
 }
