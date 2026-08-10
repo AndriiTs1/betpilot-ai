@@ -98,15 +98,13 @@ export class InvalidEffectiveSettlementOddsError extends Error {
   }
 }
 
-// H4-B1 — SETTLED_HALF_WIN/SETTLED_HALF_LOSS are now valid SettlementTarget
-// *type* members (see lib/bets/settlementRules.ts), but this file's payout
-// math (computeSettlementFinancials below) does not yet know how to price
-// a half-win/half-loss. Nothing in this codebase can produce this error
-// today — decideSettlementTransition already rejects HALF_* as a
-// requestedStatus shape before settleBet ever calls computeSettlementFinancials
-// — but the explicit throw below is the fail-closed second layer Section 4
-// asks for, so a HALF_* target can never silently fall through to the VOID
-// branch and settle for a zero delta.
+// H4-B1 introduced this as a fail-closed guard for SETTLED_HALF_WIN/
+// SETTLED_HALF_LOSS, before their financial math existed. H4-B3 gave both
+// real math (see computeSettlementFinancials below), so neither can reach
+// this error today. Kept as a permanent defensive branch for any FUTURE
+// SettlementTarget value added to the type before its own financial math
+// is implemented — the exact same fail-closed pattern H4-B1 established
+// for HALF_* itself, now generalized rather than removed.
 export class UnsupportedSettlementTargetError extends Error {
   readonly code = "UNSUPPORTED_SETTLEMENT_TARGET" as const;
   readonly betId: string;
@@ -208,10 +206,40 @@ function computeSettlementFinancials(
   legacyOdds: Prisma.Decimal | null,
   overrideOdds: Prisma.Decimal | null,
 ): SettlementFinancials {
-  // Fail closed, before either real branch or the VOID fallback — see
-  // UnsupportedSettlementTargetError's own comment above.
-  if (targetStatus === "SETTLED_HALF_WIN" || targetStatus === "SETTLED_HALF_LOSS") {
-    throw new UnsupportedSettlementTargetError(betId, targetStatus);
+  // H4-B3 — a quarter-line Asian handicap half-outcome is financially
+  // defined as exactly half the stake settling as a full WIN (or LOSS) and
+  // the other half settling as a VOID (this stage's own required
+  // semantics, Section 2) — so this reuses the *exact same* two
+  // computations below (SETTLED_WIN's grossPayout/netProfit shape,
+  // SETTLED_LOSS's negated-stake shape), just substituting `halfStake` for
+  // `stake`. This is deliberately NOT a new single-shot "(S/2)*(O-1)"
+  // formula: running it through SETTLED_WIN's own rounding shape (round
+  // grossPayout to the cent first, THEN derive netProfit from that already-
+  // rounded figure) is what guarantees a HALF_WIN produces the exact same
+  // cent-for-cent result a real "half-stake WIN + half-stake VOID" pair of
+  // settlements would — which can occasionally differ by a cent from a
+  // single unrounded "(S/2)*(O-1)" computation once ROUND_HALF_UP is
+  // involved on an odd stake. VOID's own delta is always exactly zero
+  // (stake is never deducted at confirmation — see SETTLED_LOSS's comment
+  // below), so the "other half settles VOID" side of the decomposition
+  // contributes nothing and never needs its own line here.
+  if (targetStatus === "SETTLED_HALF_WIN") {
+    const settlementOdds = overrideOdds ?? totalOdds ?? legacyOdds;
+    if (settlementOdds === null) {
+      throw new MissingSettlementOddsError(betId);
+    }
+
+    const halfStake = stake.dividedBy(2);
+    const grossPayout = roundMoney(halfStake.times(settlementOdds));
+    const netProfit = roundMoney(grossPayout.minus(halfStake));
+    return { delta: netProfit, transactionType: "BET_PAYOUT", grossPayout, netProfit };
+  }
+
+  if (targetStatus === "SETTLED_HALF_LOSS") {
+    // No odds required, same rule as full SETTLED_LOSS below — only the
+    // half-stake itself is ever at risk.
+    const halfStake = stake.dividedBy(2);
+    return { delta: roundMoney(halfStake.negated()), transactionType: "BET_STAKE", grossPayout: null, netProfit: null };
   }
 
   if (targetStatus === "SETTLED_WIN") {

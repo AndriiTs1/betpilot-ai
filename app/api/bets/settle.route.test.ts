@@ -233,6 +233,27 @@ test("settle route: invalid status value is rejected with 422", async () => {
   assert.equal((body.error as { requestedStatus: string }).requestedStatus, "SETTLED_DRAW");
 });
 
+// H4-B3 — settleBet()/decideSettlementTransition can now execute
+// SETTLED_HALF_WIN/SETTLED_HALF_LOSS internally (real financial math
+// exists), but the public settle route's own pre-check
+// (isSettlementTarget, unchanged by H4-B3) must still reject both exactly
+// like any other unsupported status — proving the internal-primitive
+// widening never leaked into the public API surface.
+for (const halfStatus of ["SETTLED_HALF_WIN", "SETTLED_HALF_LOSS"]) {
+  test(`settle route: ${halfStatus} is still rejected with 422 INVALID_SETTLEMENT_TARGET after H4-B3 — public API unchanged`, async () => {
+    const fake = createFakeDb();
+    const res = await handleSettleBet(settleRequest(BET_ID, { status: halfStatus }), BET_ID, fakeOptions(fake));
+    assert.equal(res.status, 422);
+    const body = await json(res);
+    assert.equal((body.error as { code: string }).code, "INVALID_SETTLEMENT_TARGET");
+    assert.equal((body.error as { requestedStatus: string }).requestedStatus, halfStatus);
+    assert.equal(
+      (body.error as { message: string }).message,
+      "status must be one of SETTLED_WIN, SETTLED_LOSS, VOID",
+    );
+  });
+}
+
 test("settle route: REJECTED as a requested status is rejected with 422, not silently treated as a lifecycle action", async () => {
   const fake = createFakeDb();
   const res = await handleSettleBet(settleRequest(BET_ID, { status: "REJECTED" }), BET_ID, fakeOptions(fake));

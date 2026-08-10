@@ -4,6 +4,7 @@ import type { BetStatus } from "@/lib/generated/prisma/client";
 import {
   decideSettlementTransition,
   isSettlementTarget,
+  isInternalSettlementTarget,
   SETTLEMENT_TARGET_STATUSES,
   InvalidSettlementTargetError,
   BetNotConfirmedForSettlementError,
@@ -216,46 +217,53 @@ test("decideSettlementTransition never throws for the three APPLY cases and the 
 });
 
 // ---------------------------------------------------------------------
-// H4-B1 — SETTLED_HALF_WIN / SETTLED_HALF_LOSS foundation.
+// SETTLED_HALF_WIN / SETTLED_HALF_LOSS — introduced (schema/type only) in
+// H4-B1, given real internal-primitive capability here in H4-B3 now that
+// computeSettlementFinancials (settleBet.ts) has real math for them.
 //
-// isSettlementTarget/SETTLEMENT_TARGET_STATUSES deliberately stay at the
-// original 3 values even though BetStatus and the SettlementTarget *type*
-// both now include the two new statuses (see settlementRules.ts's own
-// comments on SETTLEMENT_TARGET_STATUSES). This means: (a) HALF_* is
-// correctly rejected as a requestedStatus shape, from any currentStatus,
-// so it can never be *requested* through decideSettlementTransition in
-// B1; (b) HALF_* IS recognized as a terminal currentStatus, so a later,
-// different settlement request against an already-half-settled bet
-// correctly conflicts instead of being silently allowed. Same-target
-// idempotency for HALF_* (currentStatus === requestedStatus === a HALF_*
-// value) is NOT reachable here for exactly the same reason as (a) — that
-// half of terminal recognition is deferred to H4-B3 alongside real payout
-// support, not implemented as a workaround here.
+// isSettlementTarget/SETTLEMENT_TARGET_STATUSES deliberately STILL stay at
+// the original 3 values — that gate is the public settle route's own
+// pre-check (app/api/bets/[id]/settle/route.ts imports it directly), and
+// H4-B3's scope is the internal settlement primitive only, never the
+// public API surface. decideSettlementTransition itself now validates
+// requestedStatus against the wider isInternalSettlementTarget (5 values)
+// instead — see the tests below.
 // ---------------------------------------------------------------------
 
-const HALF_STATUSES: readonly BetStatus[] = ["SETTLED_HALF_WIN", "SETTLED_HALF_LOSS"];
+const HALF_STATUSES: readonly SettlementTarget[] = ["SETTLED_HALF_WIN", "SETTLED_HALF_LOSS"];
 
-test("isSettlementTarget: false for SETTLED_HALF_WIN and SETTLED_HALF_LOSS (fail closed — not yet a requestable target)", () => {
+test("isSettlementTarget: false for SETTLED_HALF_WIN and SETTLED_HALF_LOSS — the PUBLIC gate stays fail-closed even after H4-B3", () => {
   for (const status of HALF_STATUSES) {
     assert.equal(isSettlementTarget(status), false);
   }
 });
 
+test("isInternalSettlementTarget: true for SETTLED_HALF_WIN and SETTLED_HALF_LOSS — the INTERNAL primitive gate H4-B3 widened", () => {
+  for (const status of HALF_STATUSES) {
+    assert.equal(isInternalSettlementTarget(status), true);
+  }
+});
+
+test("isInternalSettlementTarget: still true for the original three targets, and false for non-target BetStatus/garbage", () => {
+  for (const target of TARGETS) {
+    assert.equal(isInternalSettlementTarget(target), true);
+  }
+  for (const value of [...NON_SETTLEMENT_BET_STATUSES, ...GARBAGE_TARGETS]) {
+    assert.equal(isInternalSettlementTarget(value), false);
+  }
+});
+
 for (const halfStatus of HALF_STATUSES) {
-  test(`decideSettlementTransition: CONFIRMED -> ${halfStatus} is an InvalidSettlementTargetError (not requestable in B1)`, () => {
-    assertThrowsAs(
-      () => decideSettlementTransition("CONFIRMED", halfStatus),
-      InvalidSettlementTargetError,
-      "INVALID_SETTLEMENT_TARGET",
-    );
+  test(`H4-B3: decideSettlementTransition: CONFIRMED -> ${halfStatus} returns APPLY (internal primitive capability, not yet public)`, () => {
+    const decision = decideSettlementTransition("CONFIRMED", halfStatus);
+    const expected: SettlementDecision = { kind: "APPLY", fromStatus: "CONFIRMED", targetStatus: halfStatus };
+    assert.deepEqual(decision, expected);
   });
 
-  test(`decideSettlementTransition: ${halfStatus} -> ${halfStatus} (repeat) is also an InvalidSettlementTargetError, not IDEMPOTENT — same-target idempotency for HALF_* is deferred to H4-B3`, () => {
-    assertThrowsAs(
-      () => decideSettlementTransition(halfStatus, halfStatus),
-      InvalidSettlementTargetError,
-      "INVALID_SETTLEMENT_TARGET",
-    );
+  test(`H4-B3: decideSettlementTransition: ${halfStatus} -> ${halfStatus} (repeat) returns IDEMPOTENT, no second mutation implied`, () => {
+    const decision = decideSettlementTransition(halfStatus, halfStatus);
+    const expected: SettlementDecision = { kind: "IDEMPOTENT", currentStatus: halfStatus, targetStatus: halfStatus };
+    assert.deepEqual(decision, expected);
   });
 
   for (const target of TARGETS) {
@@ -268,5 +276,26 @@ for (const halfStatus of HALF_STATUSES) {
       assert.equal(err.currentStatus, halfStatus);
       assert.equal(err.requestedStatus, target);
     });
+
+    test(`H4-B3: decideSettlementTransition: ${target} -> ${halfStatus} is a SettlementConflictError (cannot half-settle an already-fully-settled bet)`, () => {
+      const err = assertThrowsAs(
+        () => decideSettlementTransition(target, halfStatus),
+        SettlementConflictError,
+        "SETTLEMENT_CONFLICT",
+      );
+      assert.equal(err.currentStatus, target);
+      assert.equal(err.requestedStatus, halfStatus);
+    });
   }
+
+  test(`H4-B3: decideSettlementTransition: ${halfStatus} -> the other HALF_* status is a SettlementConflictError`, () => {
+    const other = halfStatus === "SETTLED_HALF_WIN" ? "SETTLED_HALF_LOSS" : "SETTLED_HALF_WIN";
+    const err = assertThrowsAs(
+      () => decideSettlementTransition(halfStatus, other),
+      SettlementConflictError,
+      "SETTLEMENT_CONFLICT",
+    );
+    assert.equal(err.currentStatus, halfStatus);
+    assert.equal(err.requestedStatus, other);
+  });
 }

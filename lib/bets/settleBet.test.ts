@@ -1261,3 +1261,322 @@ test("effectiveOdds: after a LOSS, a WIN request with an override is still a con
   assert.equal(fake._debug.transactions().length, 1);
   assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_LOSS");
 });
+
+// ---------------------------------------------------------------------
+// H4-B3 — SETTLED_HALF_WIN / SETTLED_HALF_LOSS financial settlement.
+//
+// Defined as exactly half the stake settling as a full WIN (or LOSS) and
+// the other half settling as a VOID — the SAME computation shape
+// SETTLED_WIN/SETTLED_LOSS already use above, just at halfStake =
+// stake/2. VOID's own delta is always exactly zero (stake is never
+// deducted at confirmation — see the VOID section above), so it never
+// needs to appear as a separate term in any assertion below.
+// ---------------------------------------------------------------------
+
+test("settleBet: CONFIRMED bet settles to SETTLED_HALF_WIN", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("2.00") }) });
+  const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_WIN" });
+
+  assert.equal(result.kind, "APPLIED");
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_HALF_WIN");
+});
+
+test("settleBet: CONFIRMED bet settles to SETTLED_HALF_LOSS", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100) }) });
+  const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_LOSS" });
+
+  assert.equal(result.kind, "APPLIED");
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_HALF_LOSS");
+});
+
+// HALF_WIN delta must equal exactly what "50 stake WIN @ O" + "50 stake
+// VOID" would produce: netProfit of a halfStake WIN, i.e.
+// roundMoney(halfStake * O) - halfStake.
+const HALF_WIN_CASES: Array<{ stake: string; odds: string; grossPayout: string; netProfit: string }> = [
+  { stake: "100", odds: "2.00", grossPayout: "100", netProfit: "50" }, // halfStake 50 * 2.00 = 100, -50 = 50
+  { stake: "100", odds: "1.50", grossPayout: "75", netProfit: "25" }, // 50 * 1.50 = 75, -50 = 25
+  { stake: "100", odds: "1.63", grossPayout: "81.5", netProfit: "31.5" }, // 50 * 1.63 = 81.5, -50 = 31.5
+  { stake: "10", odds: "2.49", grossPayout: "12.45", netProfit: "7.45" }, // 5 * 2.49 = 12.45, -5 = 7.45
+];
+
+for (const { stake, odds, grossPayout, netProfit } of HALF_WIN_CASES) {
+  test(`settleBet: HALF_WIN stake ${stake} @ ${odds} -> halfStake WIN grossPayout ${grossPayout}, netProfit/delta ${netProfit}`, async () => {
+    const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(stake), totalOdds: new Prisma.Decimal(odds) }) });
+    const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_WIN" });
+
+    assert.equal(result.kind, "APPLIED");
+    if (result.kind !== "APPLIED") return;
+    assert.equal(result.grossPayout?.toString(), grossPayout);
+    assert.equal(result.netProfit?.toString(), netProfit);
+    assert.equal(result.amount.toString(), netProfit);
+  });
+}
+
+// HALF_LOSS delta is always exactly -halfStake, independent of odds —
+// same "no odds required" rule as full SETTLED_LOSS, at half scale.
+const HALF_LOSS_CASES: Array<{ stake: string; delta: string }> = [
+  { stake: "100", delta: "-50" },
+  { stake: "10", delta: "-5" },
+];
+
+for (const { stake, delta } of HALF_LOSS_CASES) {
+  test(`settleBet: HALF_LOSS stake ${stake} -> delta ${delta}, independent of odds`, async () => {
+    const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(stake), totalOdds: null, odds: null }) });
+    const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_LOSS" });
+
+    assert.equal(result.kind, "APPLIED");
+    if (result.kind !== "APPLIED") return;
+    assert.equal(result.amount.toString(), delta);
+    assert.equal(result.grossPayout, undefined);
+    assert.equal(result.netProfit, undefined);
+  });
+}
+
+test("settleBet: HALF_WIN creates a Transaction of type BET_PAYOUT with a positive amount", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("2.00") }) });
+  await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_WIN" });
+
+  const [tx] = fake._debug.transactions();
+  assert.equal(tx.type, "BET_PAYOUT");
+  assert.equal(tx.amount.toString(), "50");
+  assert.ok(tx.amount.greaterThan(0));
+});
+
+test("settleBet: HALF_LOSS creates a Transaction of type BET_STAKE with a negative amount", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100) }) });
+  await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_LOSS" });
+
+  const [tx] = fake._debug.transactions();
+  assert.equal(tx.type, "BET_STAKE");
+  assert.equal(tx.amount.toString(), "-50");
+  assert.ok(tx.amount.lessThan(0));
+});
+
+test("settleBet: HALF_WIN balanceAfter matches the persisted currentCredit", async () => {
+  const fake = createFakeDb({
+    bet: fakeBet({ stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("2.00") }),
+    playerCurrentCredit: new Prisma.Decimal(1000),
+  });
+  const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_WIN" });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.balanceAfter.toString(), "1050"); // 1000 + 50
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "1050");
+});
+
+test("settleBet: HALF_LOSS balanceAfter matches the persisted currentCredit", async () => {
+  const fake = createFakeDb({
+    bet: fakeBet({ stake: new Prisma.Decimal(100) }),
+    playerCurrentCredit: new Prisma.Decimal(1000),
+  });
+  const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_LOSS" });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.balanceAfter.toString(), "950"); // 1000 - 50
+});
+
+test("settleBet: HALF_WIN with neither totalOdds nor legacy odds throws MissingSettlementOddsError and performs no writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ totalOdds: null, odds: null }) });
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_WIN" }),
+    (err: unknown) => err instanceof MissingSettlementOddsError,
+  );
+  assert.equal(fake._debug.playerUpdateCallCount(), 0);
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+// ---------------------------------------------------------------------
+// H4-B3 — HALF_WIN/HALF_LOSS rounding: fractional-cent intermediate,
+// exact existing Decimal/ROUND_HALF_UP policy, never native float.
+// ---------------------------------------------------------------------
+
+test("settleBet: HALF_WIN stake 10 @ odds 1.63 exercises a fractional-cent-free intermediate via Decimal (5 * 1.63 = 8.15 exactly)", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal("10"), totalOdds: new Prisma.Decimal("1.63") }) });
+  const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_WIN" });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.grossPayout?.toString(), "8.15"); // 5 * 1.63
+  assert.equal(result.netProfit?.toString(), "3.15"); // 8.15 - 5
+});
+
+test("settleBet: HALF_WIN rounding uses ROUND_HALF_UP at 2 decimal places, matching SETTLED_WIN's own policy — odd stake forcing a genuine half-cent boundary", async () => {
+  // halfStake = 33.335 (odd stake not evenly halvable to whole cents).
+  // grossPayout = roundMoney(33.335 * 1.50) = roundMoney(50.0025) = 50.00
+  // netProfit = roundMoney(50.00 - 33.335) = roundMoney(16.665) = 16.67 (HALF_UP)
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal("66.67"), totalOdds: new Prisma.Decimal("1.50") }) });
+  const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_WIN" });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  // halfStake = 33.335, grossPayout = roundMoney(50.0025) = 50, netProfit = roundMoney(16.665) = 16.67
+  assert.equal(result.grossPayout?.toString(), "50");
+  assert.equal(result.netProfit?.toString(), "16.67");
+});
+
+test("settleBet: HALF_LOSS rounding uses ROUND_HALF_UP at 2 decimal places for an odd stake", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal("66.67") }) });
+  const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_LOSS" });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  // halfStake = 33.335 -> negated -33.335 -> roundMoney HALF_UP -> -33.34
+  assert.equal(result.amount.toString(), "-33.34");
+});
+
+test("settleBet: HALF_WIN never produces a native-float artifact (stake 0.29-style precision check at half scale)", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal("0.29"), totalOdds: new Prisma.Decimal("3") }) });
+  const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_WIN" });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  // halfStake = 0.145, grossPayout = roundMoney(0.435) = 0.44 (HALF_UP), netProfit = roundMoney(0.44 - 0.145) = roundMoney(0.295) = 0.30
+  assert.equal(result.grossPayout?.toString(), "0.44");
+  assert.equal(result.netProfit?.toString(), "0.3");
+  // Never the raw native-float artifact 0.29 * 3 / 2 would produce via Number arithmetic.
+  assert.notEqual(result.grossPayout?.toString(), String((0.29 * 3) / 2));
+});
+
+// ---------------------------------------------------------------------
+// H4-B3 — idempotency
+// ---------------------------------------------------------------------
+
+test("settleBet: HALF_WIN repeated settlement returns IDEMPOTENT, no second credit mutation, no second Transaction", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("2.00") }) });
+
+  const first = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_WIN" });
+  const second = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_WIN" });
+
+  assert.equal(first.kind, "APPLIED");
+  assert.deepEqual(second, { kind: "IDEMPOTENT", betId: BET_ID, status: "SETTLED_HALF_WIN" });
+  assert.equal(fake._debug.playerUpdateCallCount(), 1);
+  assert.equal(fake._debug.transactionCreateCallCount(), 1);
+  assert.equal(fake._debug.transactions().length, 1);
+});
+
+test("settleBet: HALF_LOSS repeated settlement returns IDEMPOTENT, no second credit mutation, no second Transaction", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100) }) });
+
+  const first = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_LOSS" });
+  const second = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_LOSS" });
+
+  assert.equal(first.kind, "APPLIED");
+  assert.deepEqual(second, { kind: "IDEMPOTENT", betId: BET_ID, status: "SETTLED_HALF_LOSS" });
+  assert.equal(fake._debug.playerUpdateCallCount(), 1);
+  assert.equal(fake._debug.transactionCreateCallCount(), 1);
+  assert.equal(fake._debug.transactions().length, 1);
+});
+
+// ---------------------------------------------------------------------
+// H4-B3 — terminal conflicts. No terminal bet can be financially settled
+// twice, regardless of which terminal status came first.
+// ---------------------------------------------------------------------
+
+test("settleBet: HALF_WIN followed by a LOSS request throws SettlementConflictError and performs no further writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("2.00") }) });
+  await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_WIN" });
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_LOSS" }),
+    (err: unknown) => {
+      assert.ok(err instanceof SettlementConflictError);
+      assert.equal(err.currentStatus, "SETTLED_HALF_WIN");
+      assert.equal(err.requestedStatus, "SETTLED_LOSS");
+      return true;
+    },
+  );
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_HALF_WIN");
+  assert.equal(fake._debug.transactionCreateCallCount(), 1);
+});
+
+test("settleBet: HALF_LOSS followed by a WIN request throws SettlementConflictError and performs no further writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("2.00") }) });
+  await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_LOSS" });
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN" }),
+    (err: unknown) => {
+      assert.ok(err instanceof SettlementConflictError);
+      assert.equal(err.currentStatus, "SETTLED_HALF_LOSS");
+      assert.equal(err.requestedStatus, "SETTLED_WIN");
+      return true;
+    },
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 1);
+});
+
+test("settleBet: WIN followed by a HALF_WIN request throws SettlementConflictError and performs no further writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("2.00") }) });
+  await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN" });
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_WIN" }),
+    (err: unknown) => {
+      assert.ok(err instanceof SettlementConflictError);
+      assert.equal(err.currentStatus, "SETTLED_WIN");
+      assert.equal(err.requestedStatus, "SETTLED_HALF_WIN");
+      return true;
+    },
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 1);
+});
+
+test("settleBet: VOID followed by a HALF_LOSS request throws SettlementConflictError and performs no further writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100) }) });
+  await settleBet(db(fake), { betId: BET_ID, requestedStatus: "VOID" });
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_LOSS" }),
+    (err: unknown) => {
+      assert.ok(err instanceof SettlementConflictError);
+      assert.equal(err.currentStatus, "VOID");
+      assert.equal(err.requestedStatus, "SETTLED_HALF_LOSS");
+      return true;
+    },
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 1);
+});
+
+test("settleBet: HALF_WIN followed by a HALF_LOSS request throws SettlementConflictError (the two HALF_* statuses conflict with each other too)", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("2.00") }) });
+  await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_WIN" });
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_LOSS" }),
+    (err: unknown) => err instanceof SettlementConflictError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 1);
+});
+
+test("settleBet: PENDING cannot settle to HALF_WIN", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ status: "PENDING" }) });
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_WIN" }),
+    (err: unknown) => err instanceof BetNotConfirmedForSettlementError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("settleBet: REJECTED cannot settle to HALF_LOSS", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ status: "REJECTED" }) });
+
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_LOSS" }),
+    (err: unknown) => err instanceof BetAlreadyRejectedError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("settleBet: does not mutate the source Decimal stake input for HALF_WIN/HALF_LOSS", async () => {
+  const stake = new Prisma.Decimal("100");
+  const stakeSnapshot = stake.toString();
+  const fake = createFakeDb({ bet: fakeBet({ stake, totalOdds: new Prisma.Decimal("2.00") }) });
+
+  await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_WIN" });
+
+  assert.equal(stake.toString(), stakeSnapshot);
+});

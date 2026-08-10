@@ -61,6 +61,36 @@ export function isSettlementTarget(value: unknown): value is SettlementTarget {
   return typeof value === "string" && SETTLEMENT_TARGET_SET.has(value as SettlementTarget);
 }
 
+// H4-B3 — the internal-primitive counterpart to SETTLEMENT_TARGET_STATUSES
+// above. This is the wider, 5-value set: what settleBet.ts/
+// decideSettlementTransition may structurally ACCEPT as a requestedStatus
+// shape now that HALF_WIN/HALF_LOSS have real financial execution support
+// (computeSettlementFinancials in settleBet.ts). Deliberately a SEPARATE
+// export from isSettlementTarget/SETTLEMENT_TARGET_STATUSES, not a widening
+// of them — those stay at exactly 3 values because
+// app/api/bets/[id]/settle/route.ts imports isSettlementTarget directly for
+// its own public pre-check, and that route's acceptance is UNCHANGED by
+// H4-B3 (a distinct, later, explicitly-reviewed decision — see this
+// module's own header comment on the A/B/C distinction: this is "A",
+// internal capability, never "B", public API surface). Never imported by
+// the settle route.
+export const INTERNAL_SETTLEMENT_TARGET_STATUSES: readonly SettlementTarget[] = Object.freeze([
+  "SETTLED_WIN",
+  "SETTLED_LOSS",
+  "VOID",
+  "SETTLED_HALF_WIN",
+  "SETTLED_HALF_LOSS",
+]);
+
+const INTERNAL_SETTLEMENT_TARGET_SET: ReadonlySet<SettlementTarget> = new Set(INTERNAL_SETTLEMENT_TARGET_STATUSES);
+
+// Used only by decideSettlementTransition's own requestedStatus shape-check
+// below — never by any route. Returns true for HALF_WIN/HALF_LOSS, unlike
+// isSettlementTarget above.
+export function isInternalSettlementTarget(value: unknown): value is SettlementTarget {
+  return typeof value === "string" && INTERNAL_SETTLEMENT_TARGET_SET.has(value as SettlementTarget);
+}
+
 // APPLY: the database layer (a later stage) may perform the guarded
 // CONFIRMED -> targetStatus transition and its associated financial write.
 // IDEMPOTENT: this exact settlement already happened on some earlier
@@ -91,7 +121,7 @@ export class InvalidSettlementTargetError extends Error {
 
   constructor(currentStatus: BetStatus, requestedStatus: unknown) {
     super(
-      `Invalid settlement target ${JSON.stringify(requestedStatus)} — must be one of ${SETTLEMENT_TARGET_STATUSES.join(", ")}`,
+      `Invalid settlement target ${JSON.stringify(requestedStatus)} — must be one of ${INTERNAL_SETTLEMENT_TARGET_STATUSES.join(", ")}`,
     );
     this.name = "InvalidSettlementTargetError";
     this.currentStatus = currentStatus;
@@ -164,22 +194,25 @@ export type SettlementRuleError =
 // every other exported helper in this module exists only to support this
 // function; none of them duplicate its transition logic.
 export function decideSettlementTransition(currentStatus: BetStatus, requestedStatus: unknown): SettlementDecision {
-  if (!isSettlementTarget(requestedStatus)) {
+  // H4-B3 — widened from isSettlementTarget (3 values) to
+  // isInternalSettlementTarget (5 values): decideSettlementTransition is the
+  // internal settlement PRIMITIVE (settleBet.ts's own shape-check before it
+  // ever computes financials), not the public API surface — that's
+  // app/api/bets/[id]/settle/route.ts's own separate, unchanged
+  // isSettlementTarget pre-check. This is what makes CONFIRMED ->
+  // SETTLED_HALF_WIN/SETTLED_HALF_LOSS a real, callable APPLY decision now
+  // that computeSettlementFinancials (settleBet.ts) has real math for them,
+  // without widening what an operator/route request may ask for.
+  if (!isInternalSettlementTarget(requestedStatus)) {
     throw new InvalidSettlementTargetError(currentStatus, requestedStatus);
   }
 
-  // H4-B1 — widened to also recognize SETTLED_HALF_WIN/SETTLED_HALF_LOSS as
-  // terminal currentStatus values, both because BetStatus now has 8 members
-  // (the exhaustiveCheck guard below requires it) and because Section 5
-  // explicitly wants a HALF_* currentStatus to correctly conflict against a
-  // later different settlement request rather than falling through to
-  // BetNotConfirmedForSettlementError or the exhaustiveness error. Note
-  // this branch is reachable for a HALF_* currentStatus today only via a
-  // direct/manual DB write (nothing in this codebase can produce it yet);
-  // "same-target idempotency" for HALF_* (currentStatus === requestedStatus
-  // === a HALF_* value) is NOT reachable here, because requestedStatus must
-  // first pass isSettlementTarget, which stays at 3 values — that half of
-  // terminal recognition is deferred to H4-B3 alongside real payout support.
+  // Terminal currentStatus recognition — includes SETTLED_HALF_WIN/
+  // SETTLED_HALF_LOSS since H4-B1 (both for the BetStatus exhaustiveCheck
+  // guard below and for correct conflict detection). As of H4-B3, with
+  // requestedStatus now also able to be a HALF_* value, this branch is
+  // fully reachable for HALF_* same-target idempotency too — not just
+  // different-target conflict as it was before H4-B3's widening above.
   if (
     currentStatus === "SETTLED_WIN" ||
     currentStatus === "SETTLED_LOSS" ||
