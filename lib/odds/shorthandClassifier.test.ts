@@ -161,6 +161,122 @@ test("classifyBettingSelectionText: ordinary moneyline text is never classified 
 });
 
 /* -------------------------------------------------------------------------- */
+/* H5-A3 — "Asian total" natural-language vocabulary (EN/RU/UA). Closes the  */
+/* H5-A1-audited gap: quarter lines already worked through the existing      */
+/* "тб"/"тотал больше"/"over" forms — only the ASIAN-prefixed and Ukrainian   */
+/* "більше"/"менше" phrasing was unrecognized. Generic rule, never a special */
+/* case for 2.25/2.75 specifically.                                          */
+/* -------------------------------------------------------------------------- */
+
+test("classifyBettingSelectionText: every required EN/RU/UA 'Asian total' OVER phrase, exact quarter line captured, never invented/rounded", () => {
+  const cases: Array<[string, string]> = [
+    ["Asian total over 2.25", "2.25"],
+    ["Asian total over 3.25", "3.25"],
+    ["азиатский тотал больше 2.25", "2.25"],
+    ["азиатский тотал больше 3.25", "3.25"],
+    ["тотал більше 2.25", "2.25"],
+    ["азійський тотал більше 2.25", "2.25"],
+    ["азійський тотал більше 3.25", "3.25"],
+  ];
+  for (const [input, expectedLine] of cases) {
+    const result = classifyBettingSelectionText(input);
+    assert.equal(result.marketType, "TOTALS", `"${input}"`);
+    assert.equal(result.selectionType, "OVER", `"${input}"`);
+    assert.equal(result.embeddedLine, expectedLine, `"${input}"`);
+    assert.notEqual(result.marketType, "MONEYLINE_2WAY", `"${input}" must never fall through to MONEYLINE_2WAY`);
+    assert.notEqual(result.marketType, "SPREAD", `"${input}" must never be confused with SPREAD`);
+  }
+});
+
+test("classifyBettingSelectionText: every required EN/RU/UA 'Asian total' UNDER phrase, exact quarter line captured", () => {
+  const cases: Array<[string, string]> = [
+    ["Asian total under 2.75", "2.75"],
+    ["Asian total under 3.75", "3.75"],
+    ["азиатский тотал меньше 2.75", "2.75"],
+    ["тотал менше 2.75", "2.75"],
+    ["азійський тотал менше 2.75", "2.75"],
+    ["азійський тотал менше 3.75", "3.75"],
+  ];
+  for (const [input, expectedLine] of cases) {
+    const result = classifyBettingSelectionText(input);
+    assert.equal(result.marketType, "TOTALS", `"${input}"`);
+    assert.equal(result.selectionType, "UNDER", `"${input}"`);
+    assert.equal(result.embeddedLine, expectedLine, `"${input}"`);
+    assert.notEqual(result.marketType, "MONEYLINE_2WAY", `"${input}" must never fall through to MONEYLINE_2WAY`);
+    assert.notEqual(result.marketType, "SPREAD", `"${input}" must never be confused with SPREAD`);
+  }
+});
+
+test("classifyBettingSelectionText: 'Asian total' vocabulary works generically for standard (non-quarter) lines too, not special-cased to 2.25/2.75", () => {
+  assert.equal(classifyBettingSelectionText("Asian total over 2.5").embeddedLine, "2.5");
+  assert.equal(classifyBettingSelectionText("азиатский тотал больше 3").embeddedLine, "3");
+  assert.equal(classifyBettingSelectionText("тотал більше 2.5").embeddedLine, "2.5");
+});
+
+test("classifyBettingSelectionText: 'Asian total' phrasing is case-insensitive and tolerant of whitespace, matching the existing classifier convention", () => {
+  assert.equal(classifyBettingSelectionText("ASIAN TOTAL OVER 2.25").selectionType, "OVER");
+  assert.equal(classifyBettingSelectionText("  Asian Total Over 2.25  ").selectionType, "OVER");
+  assert.equal(classifyBettingSelectionText("АЗІЙСЬКИЙ ТОТАЛ БІЛЬШЕ 2.25").selectionType, "OVER");
+});
+
+test("classifyBettingSelectionText: bare 'Asian total over'/'тотал більше' with NO embedded number is still recognized as TOTALS with embeddedLine null — never an invented/default line", () => {
+  for (const input of ["Asian total over", "азиатский тотал больше", "азійський тотал більше", "тотал менше"]) {
+    const result = classifyBettingSelectionText(input);
+    assert.equal(result.marketType, "TOTALS", `"${input}"`);
+    assert.equal(result.embeddedLine, null, `"${input}" must never invent a line`);
+  }
+});
+
+test("classifyBettingSelectionText: existing non-Asian TOTALS forms are completely unaffected by the new vocabulary", () => {
+  for (const [input, direction, line] of [
+    ["Over 2.5", "OVER", "2.5"],
+    ["Under 3", "UNDER", "3"],
+    ["Over 2.25", "OVER", "2.25"],
+    ["Under 2.75", "UNDER", "2.75"],
+    ["ТБ 2.5", "OVER", "2.5"],
+    ["ТМ 3", "UNDER", "3"],
+    ["ТБ 2.25", "OVER", "2.25"],
+    ["ТМ 2.75", "UNDER", "2.75"],
+    ["тотал больше 2.25", "OVER", "2.25"],
+    ["тотал меньше 2.75", "UNDER", "2.75"],
+  ] as const) {
+    const result = classifyBettingSelectionText(input);
+    assert.equal(result.marketType, "TOTALS", `"${input}"`);
+    assert.equal(result.selectionType, direction, `"${input}"`);
+    assert.equal(result.embeddedLine, line, `"${input}"`);
+  }
+});
+
+test("classifyBettingSelectionText: SPREAD shorthand/natural-language remains unaffected by the new TOTALS vocabulary", () => {
+  const a = classifyBettingSelectionText("Arsenal -1.5");
+  assert.equal(a.marketType, "SPREAD");
+  assert.equal(a.participantName, "Arsenal");
+  assert.equal(a.embeddedLine, "-1.5");
+
+  const b = classifyBettingSelectionText("Arsenal -0.75");
+  assert.equal(b.marketType, "SPREAD");
+  assert.equal(b.embeddedLine, "-0.75");
+
+  const c = classifyBettingSelectionText("фора Arsenal -1.25");
+  assert.equal(c.marketType, "SPREAD");
+  assert.equal(c.participantName, "Arsenal");
+  assert.equal(c.embeddedLine, "-1.25");
+});
+
+test("classifyBettingSelectionText: ordinary MONEYLINE participant text remains unaffected by the new TOTALS vocabulary", () => {
+  for (const input of ["Real Madrid Win", "Arsenal", "Fenerbahce"]) {
+    assert.notEqual(classifyBettingSelectionText(input).marketType, "TOTALS", `"${input}"`);
+    assert.notEqual(classifyBettingSelectionText(input).marketType, "SPREAD", `"${input}"`);
+  }
+});
+
+test("classifyBettingSelectionText: matching stays anchored — text merely CONTAINING 'over'/'under'/'больше'/'меньше'/'більше'/'менше' mid-string is never classified as TOTALS", () => {
+  for (const input of ["Hangover 2.5", "Undertaker", "The Overwatch Team", "не больше 2.5", "gameover"]) {
+    assert.notEqual(classifyBettingSelectionText(input).marketType, "TOTALS", `"${input}"`);
+  }
+});
+
+/* -------------------------------------------------------------------------- */
 /* Team totals — ИТБ/ИТМ, new                                                 */
 /* -------------------------------------------------------------------------- */
 

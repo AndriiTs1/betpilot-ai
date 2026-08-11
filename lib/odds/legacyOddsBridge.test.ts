@@ -1168,3 +1168,96 @@ test("H4-B5.4 (L): SPREAD quarter line regression — a normal two-team event wi
   assert.equal(request.selection.line, "-0.75");
   assert.equal(request.selection.event.name, "Arsenal vs Coventry City");
 });
+
+/* -------------------------------------------------------------------------- */
+/* H5-A3 — "Asian total" natural-language vocabulary, full deterministic     */
+/* request-mapping path (legacySelectionToCanonicalRequest — the exact       */
+/* boundary buildBetSlipPreview.ts calls per selection). No live Claude/      */
+/* network call anywhere — the same deterministic-only convention every      */
+/* other request-mapping test in this file already uses.                    */
+/* -------------------------------------------------------------------------- */
+
+test("H5-A3 EN: 'Asian total over 2.25 stake 10' shape -> canonical TOTALS/OVER/2.25", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal vs Coventry City",
+    selection: "Asian total over 2.25",
+    submittedOdds: null,
+  });
+  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.selectionType, "OVER");
+  assert.equal(request.selection.line, "2.25");
+});
+
+test("H5-A3 RU: 'азиатский тотал меньше 2.75 ставка 10' shape -> canonical TOTALS/UNDER/2.75", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Ковентрі",
+    selection: "азиатский тотал меньше 2.75",
+    submittedOdds: null,
+  });
+  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.selectionType, "UNDER");
+  assert.equal(request.selection.line, "2.75");
+});
+
+test("H5-A3 UA: 'азійський тотал більше 3.25 ставка 10' shape -> canonical TOTALS/OVER/3.25", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Ковентрі",
+    selection: "азійський тотал більше 3.25",
+    submittedOdds: null,
+  });
+  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.selectionType, "OVER");
+  assert.equal(request.selection.line, "3.25");
+});
+
+test("H5-A3: bare UA 'тотал більше'/'тотал менше' (no asian modifier) also reach canonical TOTALS end-to-end", () => {
+  const over = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal vs Coventry City",
+    selection: "тотал більше 2.25",
+    submittedOdds: null,
+  });
+  assert.equal(over.selection.marketType, "TOTALS");
+  assert.equal(over.selection.selectionType, "OVER");
+  assert.equal(over.selection.line, "2.25");
+
+  const under = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal vs Coventry City",
+    selection: "тотал менше 2.75",
+    submittedOdds: null,
+  });
+  assert.equal(under.selection.marketType, "TOTALS");
+  assert.equal(under.selection.selectionType, "UNDER");
+  assert.equal(under.selection.line, "2.75");
+});
+
+test("H5-A3: 'Asian total over' with NO line anywhere (neither embedded nor separately stated) produces line: undefined — validateCanonicalSelection's existing 'TOTALS requires line' rule rejects it downstream, no invented/default line", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal vs Coventry City",
+    selection: "Asian total over",
+    submittedOdds: null,
+  });
+  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.line, undefined);
+});
+
+test("H5-A3 regression: the event resolves identically regardless of which Asian total phrasing was used — never a second event matcher", () => {
+  const en = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal vs Coventry City",
+    selection: "Asian total over 2.25",
+    submittedOdds: null,
+  });
+  const ru = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal vs Coventry City",
+    selection: "азиатский тотал больше 2.25",
+    submittedOdds: null,
+  });
+  assert.equal(en.selection.event.name, ru.selection.event.name);
+});

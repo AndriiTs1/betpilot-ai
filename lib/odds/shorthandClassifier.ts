@@ -121,8 +121,31 @@ function parseLineSuffix(remainder: string): LineSuffixResult {
   return { ok: true, value: match[1] ?? match[2] ?? match[3] ?? null };
 }
 
-const OVER_WORD_PATTERN = new RegExp(`^(?:тб|тотал\\s+больше|больше|over)(.*)$`, "i");
-const UNDER_WORD_PATTERN = new RegExp(`^(?:тм|тотал\\s+меньше|меньше|under)(.*)$`, "i");
+// H5-A3 — natural-language "Asian total" vocabulary, closing the gap H5-A1's
+// audit found: quarter TOTALS lines (2.25/2.75/...) already classified fine
+// through the existing "тб"/"тотал больше"/"over" forms (LINE_NUMBER never
+// had a whole/half-only grid restriction) — only the ASIAN-prefixed and
+// Ukrainian "більше"/"менше" phrasing was unrecognized, unrelated to which
+// line value follows. Same optional-modifier idiom HANDICAP_MARKER_SOURCE
+// already established for SPREAD below: "(азиатская/азиатский/азійська/
+// азійський/asian) " is an optional prefix, never required, onto either the
+// existing RU "тотал больше/меньше" base (now also accepting the Ukrainian
+// "більше"/"менше" spelling) or a new EN "total over/under" base — so
+// "тотал більше 2.25" (bare, no modifier) and "asian total over 2.25"
+// (modifier + "total over", the literal EN phrasing this stage was asked
+// for) both work from the exact same generic rule, never a per-line special
+// case. The bare "over"/"under"/"больше"/"меньше"/"тб"/"тм" forms are
+// untouched.
+const TOTALS_ASIAN_MODIFIER_SOURCE = "(?:(?:азиатская|азиатский|азійська|азійський|asian)\\s+)?";
+
+const OVER_WORD_PATTERN = new RegExp(
+  `^(?:${TOTALS_ASIAN_MODIFIER_SOURCE}(?:тотал\\s+(?:больше|більше)|total\\s+over)|тб|больше|більше|over)(.*)$`,
+  "i",
+);
+const UNDER_WORD_PATTERN = new RegExp(
+  `^(?:${TOTALS_ASIAN_MODIFIER_SOURCE}(?:тотал\\s+(?:меньше|менше)|total\\s+under)|тм|меньше|менше|under)(.*)$`,
+  "i",
+);
 const OVER_LETTER_PATTERN = new RegExp(`^o${LINE_NUMBER}$`, "i");
 const UNDER_LETTER_PATTERN = new RegExp(`^u${LINE_NUMBER}$`, "i");
 
