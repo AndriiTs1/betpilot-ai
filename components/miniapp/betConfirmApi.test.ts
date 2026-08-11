@@ -389,7 +389,7 @@ test("buildOddsChangedReconfirm: the returned preview carries the fresh token, n
   assert.deepEqual(result.preview.preview, failure.refreshedPreview);
 });
 
-test("buildOddsChangedReconfirm: the message shows both the old submitted odds and the new current odds", () => {
+test("buildOddsChangedReconfirm: UI-E2 presentation — fixed title/body/footer, and the changed selection carries the old and new odds", () => {
   const stale = stalePreviewSuccess(); // submittedOdds 2.1
   const failure: import("./betConfirmApi").BetConfirmOddsChangedFailure = {
     kind: "odds_changed",
@@ -399,12 +399,20 @@ test("buildOddsChangedReconfirm: the message shows both the old submitted odds a
 
   const result = buildOddsChangedReconfirm(stale, failure);
 
-  assert.match(result.message, /2\.10/);
-  assert.match(result.message, /1\.95/);
-  assert.match(result.message, /Real Madrid vs Barcelona/);
+  assert.equal(result.title, "Odds updated");
+  assert.equal(
+    result.body,
+    "One or more selections have new odds. Your total odds and potential win have been recalculated.",
+  );
+  assert.equal(result.footer, "Please review the updated odds before confirming.");
+
+  assert.equal(result.changedSelections.length, 1);
+  assert.equal(result.changedSelections[0].event, "Real Madrid vs Barcelona");
+  assert.equal(result.changedSelections[0].from, "2.10");
+  assert.equal(result.changedSelections[0].to, "1.95");
 });
 
-test("buildOddsChangedReconfirm: a null stale preview (no prior preview in state) still produces a safe message, old odds shown as unknown", () => {
+test("buildOddsChangedReconfirm: a null stale preview (no prior preview in state) still produces a safe changed-selection entry, old odds shown as unknown", () => {
   const failure: import("./betConfirmApi").BetConfirmOddsChangedFailure = {
     kind: "odds_changed",
     refreshedPreview: refreshedSinglePreviewBody() as import("./betPreviewApi").BetPreview,
@@ -414,8 +422,70 @@ test("buildOddsChangedReconfirm: a null stale preview (no prior preview in state
   const result = buildOddsChangedReconfirm(null, failure);
 
   assert.equal(result.preview.previewToken, "fresh-token-xyz");
-  assert.match(result.message, /—/); // unknown old odds rendered as em dash, not a crash
-  assert.match(result.message, /1\.95/);
+  assert.equal(result.changedSelections.length, 1);
+  assert.equal(result.changedSelections[0].from, "—"); // unknown old odds rendered as em dash, not a crash
+  assert.equal(result.changedSelections[0].to, "1.95");
+});
+
+// ---------------------------------------------------------------------
+// UI-E2 — only genuinely changed selections are included; an unchanged
+// selection (e.g. RB Leipzig 1.53 -> 1.53) must never appear as noise.
+// Uses the exact submittedOdds === currentOdds numeric comparison already
+// serialized by the server (no tolerance, no Number()/parseFloat()).
+// ---------------------------------------------------------------------
+
+function twoLegStalePreview(): import("./betPreviewApi").BetPreviewSuccess {
+  const base = stalePreviewSuccess();
+  return {
+    preview: {
+      ...base.preview,
+      selections: [
+        base.preview.selections[0],
+        {
+          ...base.preview.selections[0],
+          event: "RB Leipzig vs Gladbach",
+          selection: "RB Leipzig Win",
+          submittedOdds: 1.53,
+          currentOdds: 1.53,
+          oddsStatus: "VERIFIED",
+        },
+      ],
+    },
+    previewToken: base.previewToken,
+  };
+}
+
+function twoLegRefreshedPreviewBody() {
+  const base = refreshedSinglePreviewBody();
+  return {
+    ...base,
+    selections: [
+      base.selections[0],
+      {
+        ...base.selections[0],
+        event: "RB Leipzig vs Gladbach",
+        selection: "RB Leipzig Win",
+        submittedOdds: 1.53,
+        currentOdds: 1.53,
+        oddsStatus: "VERIFIED",
+      },
+    ],
+  };
+}
+
+test("buildOddsChangedReconfirm: an unchanged selection (RB Leipzig 1.53 -> 1.53) is filtered out, only the genuinely changed selection is listed", () => {
+  const stale = twoLegStalePreview();
+  const failure: import("./betConfirmApi").BetConfirmOddsChangedFailure = {
+    kind: "odds_changed",
+    refreshedPreview: twoLegRefreshedPreviewBody() as import("./betPreviewApi").BetPreview,
+    refreshedPreviewToken: "fresh-token-xyz",
+  };
+
+  const result = buildOddsChangedReconfirm(stale, failure);
+
+  assert.equal(result.changedSelections.length, 1);
+  assert.equal(result.changedSelections[0].event, "Real Madrid vs Barcelona");
+  assert.ok(!result.changedSelections.some((change) => change.event === "RB Leipzig vs Gladbach"));
 });
 
 test("getBetConfirmErrorMessage: odds_changed has a defensive fallback message even though forms intercept it first", () => {

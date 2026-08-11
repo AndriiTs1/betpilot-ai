@@ -13,6 +13,7 @@ import {
   shouldResetPreviewAfterConfirmFailure,
   buildOddsChangedReconfirm,
   type AnyConfirmedBet,
+  type OddsChangedReconfirmUpdate,
 } from "./betConfirmApi";
 import { OddsStatus, PreviewCard } from "./BetPreviewCard";
 import type { BetPreviewSuccess } from "./betPreviewApi";
@@ -77,6 +78,11 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
   // BetTextForm — never rendered, decoded, logged, or persisted.
   const [preview, setPreview] = useState<BetPreviewSuccess | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // UI-E2 — set only when the most recent confirm attempt came back
+  // ODDS_CHANGED_RECONFIRM_REQUIRED; renders as an amber informational
+  // card instead of the red `error` paragraph. Cleared everywhere `error`
+  // is cleared, so it can never outlive the state that set it.
+  const [oddsChangedInfo, setOddsChangedInfo] = useState<OddsChangedReconfirmUpdate | null>(null);
 
   const isMountedRef = useRef(true);
   const requestTokenRef = useRef(0);
@@ -127,6 +133,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
     }
 
     setError(null);
+    setOddsChangedInfo(null);
     setPreview(null);
     setFile(selected);
     setPreviewUrlTracked(URL.createObjectURL(selected));
@@ -151,6 +158,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
     setPreviewUrlTracked(null);
     setPreview(null);
     setError(null);
+    setOddsChangedInfo(null);
     setPhase("idle");
   }
 
@@ -174,6 +182,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
 
     setPhase("recognizing");
     setError(null);
+    setOddsChangedInfo(null);
 
     const result = await fetchBetScreenshotPreview(tg.initData, file);
 
@@ -210,6 +219,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
     setPreviewUrlTracked(null);
     setPreview(null);
     setError(null);
+    setOddsChangedInfo(null);
     setPhase("idle");
   }
 
@@ -233,6 +243,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
 
     setPhase("confirming");
     setError(null);
+    setOddsChangedInfo(null);
 
     const result = await fetchBetConfirm(tg.initData, previewToken, controller.signal);
 
@@ -250,10 +261,10 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
       // the odds data updates) so the existing "Confirm bet" button is what
       // the player must explicitly tap again.
       if (result.failure.kind === "odds_changed") {
-        const { preview: refreshedPreview, message } = buildOddsChangedReconfirm(preview, result.failure);
-        setPreview(refreshedPreview);
+        const update = buildOddsChangedReconfirm(preview, result.failure);
+        setPreview(update.preview);
         setPhase("ready");
-        setError(message);
+        setOddsChangedInfo(update);
         triggerHaptic("warning-light");
         return;
       }
@@ -428,10 +439,33 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
             <PreviewCard preview={preview.preview} />
             <OddsStatus preview={preview.preview} />
 
-            {error && (
-              <p role="alert" className="mt-3 whitespace-pre-line text-sm text-red-400">
-                {error}
-              </p>
+            {oddsChangedInfo ? (
+              <div
+                role="alert"
+                className="mt-3 rounded-2xl p-4"
+                style={{ background: "rgba(255,255,255,0.03)", border: "1px solid #E8B84A33" }}
+              >
+                <p className="text-sm font-semibold" style={{ color: "#E8B84A" }}>
+                  {oddsChangedInfo.title}
+                </p>
+                <p className="mt-1 text-xs leading-relaxed text-slate-400">{oddsChangedInfo.body}</p>
+                {oddsChangedInfo.changedSelections.length > 0 && (
+                  <ul className="mt-2 space-y-1">
+                    {oddsChangedInfo.changedSelections.map((change, index) => (
+                      <li key={`${change.event}-${index}`} className="text-xs" style={{ color: "#E8B84A" }}>
+                        {change.event} / {change.from} → {change.to}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <p className="mt-2 text-xs leading-relaxed text-slate-400">{oddsChangedInfo.footer}</p>
+              </div>
+            ) : (
+              error && (
+                <p role="alert" className="mt-3 whitespace-pre-line text-sm text-red-400">
+                  {error}
+                </p>
+              )
             )}
 
             <button

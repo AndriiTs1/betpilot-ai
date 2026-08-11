@@ -8,6 +8,7 @@ import {
   shouldResetPreviewAfterConfirmFailure,
   buildOddsChangedReconfirm,
   type AnyConfirmedBet,
+  type OddsChangedReconfirmUpdate,
 } from "./betConfirmApi";
 import { OddsStatus, PreviewCard } from "./BetPreviewCard";
 import { canConfirmBetSlip, getConfirmButtonLabel } from "./canConfirmBetSlip";
@@ -72,6 +73,12 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
   // betPreviewApi.ts itself exports. Reset everywhere `error` is reset, so
   // it can never outlive the failure that set it.
   const [isTimeoutError, setIsTimeoutError] = useState(false);
+  // UI-E2 — set only when the most recent confirm attempt came back
+  // ODDS_CHANGED_RECONFIRM_REQUIRED; renders as an amber informational
+  // card instead of the red `error` paragraph. Cleared everywhere `error`
+  // is cleared, so it can never outlive the state that set it (same
+  // discipline as isTimeoutError above).
+  const [oddsChangedInfo, setOddsChangedInfo] = useState<OddsChangedReconfirmUpdate | null>(null);
 
   // inFlightRef guards against a double click firing two requests: React
   // state updates aren't guaranteed to be visible to a second synchronous
@@ -128,6 +135,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     setPhase("previewing");
     setError(null);
     setIsTimeoutError(false);
+    setOddsChangedInfo(null);
 
     const result = await fetchBetPreview(tg.initData, message.trim());
 
@@ -168,6 +176,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     setPhase("editing");
     setError(null);
     setIsTimeoutError(false);
+    setOddsChangedInfo(null);
   }
 
   async function handleConfirm() {
@@ -203,6 +212,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     setPhase("confirming");
     setError(null);
     setIsTimeoutError(false);
+    setOddsChangedInfo(null);
 
     let result;
     try {
@@ -233,10 +243,10 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
       // explicitly tap again — this is the exact same control-flow shape
       // every other ready-state confirm already goes through.
       if (result.failure.kind === "odds_changed") {
-        const { preview: refreshedPreview, message } = buildOddsChangedReconfirm(preview, result.failure);
-        setPreview(refreshedPreview);
+        const update = buildOddsChangedReconfirm(preview, result.failure);
+        setPreview(update.preview);
         setPhase("ready");
-        setError(message);
+        setOddsChangedInfo(update);
         triggerHaptic("warning-light");
         return;
       }
@@ -344,10 +354,33 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
           <PreviewCard preview={preview.preview} />
           <OddsStatus preview={preview.preview} />
 
-          {error && (
-            <p role="alert" className="mt-3 whitespace-pre-line text-sm text-red-400">
-              {error}
-            </p>
+          {oddsChangedInfo ? (
+            <div
+              role="alert"
+              className="mt-3 rounded-2xl p-4"
+              style={{ background: "rgba(255,255,255,0.03)", border: "1px solid #E8B84A33" }}
+            >
+              <p className="text-sm font-semibold" style={{ color: "#E8B84A" }}>
+                {oddsChangedInfo.title}
+              </p>
+              <p className="mt-1 text-xs leading-relaxed text-slate-400">{oddsChangedInfo.body}</p>
+              {oddsChangedInfo.changedSelections.length > 0 && (
+                <ul className="mt-2 space-y-1">
+                  {oddsChangedInfo.changedSelections.map((change, index) => (
+                    <li key={`${change.event}-${index}`} className="text-xs" style={{ color: "#E8B84A" }}>
+                      {change.event} / {change.from} → {change.to}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="mt-2 text-xs leading-relaxed text-slate-400">{oddsChangedInfo.footer}</p>
+            </div>
+          ) : (
+            error && (
+              <p role="alert" className="mt-3 whitespace-pre-line text-sm text-red-400">
+                {error}
+              </p>
+            )
           )}
 
           <button
