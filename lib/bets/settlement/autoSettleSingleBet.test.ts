@@ -294,8 +294,13 @@ for (const [label, overrides] of NO_ACTION_STATUS_CASES) {
   });
 }
 
+// H5-A2 — TOTALS is no longer UNSUPPORTED_MARKET (see the dedicated H5-A2
+// section below for its own fail-closed coverage); BOTH_TEAMS_TO_SCORE
+// (still genuinely out of scope) replaces it here so this test still
+// proves what it always proved: a real, unmodeled market returns
+// UNSUPPORTED_MARKET, unattempted.
 test("B: UNSUPPORTED_MARKET -> NO_ACTION", async () => {
-  const fake = createFakeDb({ bet: fakeBet({ canonicalMarketType: "TOTALS", canonicalSelectionType: "OVER" }) });
+  const fake = createFakeDb({ bet: fakeBet({ canonicalMarketType: "BOTH_TEAMS_TO_SCORE", canonicalSelectionType: "YES" }) });
   const result = await autoSettleSingleBet(db(fake), input());
 
   assert.equal(result.kind, "NO_ACTION");
@@ -848,4 +853,237 @@ test("G: the input eventResult object is not mutated", async () => {
   await autoSettleSingleBet(db(fake), theInput);
 
   assert.deepEqual(theInput.eventResult, eventResultCopy);
+});
+
+/* -------------------------------------------------------------------------- */
+/* H5-A2 — SINGLE TOTALS auto-settlement ENABLED. Same generic pipeline as   */
+/* SPREAD (H4-B6) — no TOTALS-specific code exists anywhere in                */
+/* autoSettleSingleBet.ts; every WIN/LOSS/VOID/HALF_WIN/HALF_LOSS outcome    */
+/* the evaluator can now produce for TOTALS reaches real settleBet()         */
+/* financial settlement through the exact same generic mapping.             */
+/* -------------------------------------------------------------------------- */
+
+function totalsBet(direction: "OVER" | "UNDER", line: string, overrides: Partial<FakeBetRow> = {}) {
+  return fakeBet({
+    canonicalMarketType: "TOTALS",
+    canonicalSelectionType: direction,
+    canonicalParticipant: null,
+    line: new Prisma.Decimal(line),
+    ...overrides,
+  });
+}
+
+async function assertTotalsSettles(
+  fakeDbBet: FakeBetRow,
+  homeScore: number,
+  awayScore: number,
+  expectedStatus: BetStatus,
+  expectedOutcome: "WIN" | "LOSS" | "VOID" | "HALF_WIN" | "HALF_LOSS",
+) {
+  const fake = createFakeDb({ bet: fakeDbBet });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: arsenalCoventryResult(homeScore, awayScore) }));
+
+  assert.equal(result.kind, "SETTLED", `expected SETTLED, got ${JSON.stringify(result)}`);
+  if (result.kind !== "SETTLED") return;
+  assert.equal(result.outcome, expectedOutcome);
+  assert.equal(result.finalStatus, expectedStatus);
+  assert.equal(fake._debug.getBet(BET_ID)?.status, expectedStatus);
+  assert.equal(fake._debug.transactionCreateCallCount(), 1);
+}
+
+/* --- Standard (whole/half) lines ----------------------------------------- */
+
+test("H5-A2 standard: Over 2.5, 3 total goals -> SETTLED_WIN", async () => {
+  await assertTotalsSettles(totalsBet("OVER", "2.5"), 2, 1, "SETTLED_WIN", "WIN");
+});
+
+test("H5-A2 standard: Under 2.5, 3 total goals -> SETTLED_LOSS", async () => {
+  await assertTotalsSettles(totalsBet("UNDER", "2.5"), 2, 1, "SETTLED_LOSS", "LOSS");
+});
+
+test("H5-A2 standard: Over 3, exactly 3 total goals -> VOID (push)", async () => {
+  await assertTotalsSettles(totalsBet("OVER", "3"), 2, 1, "VOID", "VOID");
+});
+
+/* --- Quarter lines --------------------------------------------------------*/
+
+test("H5-A2 quarter: Over 2.25, 3 total goals -> SETTLED_WIN", async () => {
+  await assertTotalsSettles(totalsBet("OVER", "2.25"), 2, 1, "SETTLED_WIN", "WIN");
+});
+
+test("H5-A2 quarter: Over 2.25, 2 total goals -> SETTLED_HALF_LOSS", async () => {
+  await assertTotalsSettles(totalsBet("OVER", "2.25"), 1, 1, "SETTLED_HALF_LOSS", "HALF_LOSS");
+});
+
+test("H5-A2 quarter: Under 2.25, 2 total goals -> SETTLED_HALF_WIN", async () => {
+  await assertTotalsSettles(totalsBet("UNDER", "2.25"), 1, 1, "SETTLED_HALF_WIN", "HALF_WIN");
+});
+
+test("H5-A2 quarter: Over 2.75, 3 total goals -> SETTLED_HALF_WIN", async () => {
+  await assertTotalsSettles(totalsBet("OVER", "2.75"), 2, 1, "SETTLED_HALF_WIN", "HALF_WIN");
+});
+
+test("H5-A2 quarter: Under 2.75, 3 total goals -> SETTLED_HALF_LOSS", async () => {
+  await assertTotalsSettles(totalsBet("UNDER", "2.75"), 2, 1, "SETTLED_HALF_LOSS", "HALF_LOSS");
+});
+
+/* --- Financial integration proofs, exact worked examples ----------------- */
+
+test("H5-A2 financial: stake 100 @ 2.00, HALF_WIN -> credit delta +50, Transaction BET_PAYOUT +50", async () => {
+  const fake = createFakeDb({
+    bet: totalsBet("OVER", "2.75", { stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("2.00"), odds: new Prisma.Decimal("2.00") }),
+  });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: arsenalCoventryResult(2, 1) }));
+
+  assert.equal(result.kind, "SETTLED");
+  if (result.kind !== "SETTLED") return;
+  assert.equal(result.finalStatus, "SETTLED_HALF_WIN");
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "50");
+  assert.equal(fake._debug.transactions()[0]?.type, "BET_PAYOUT");
+  assert.equal(fake._debug.transactions()[0]?.amount.toString(), "50");
+});
+
+test("H5-A2 financial: stake 100, HALF_LOSS -> credit delta -50, Transaction BET_STAKE -50", async () => {
+  const fake = createFakeDb({ bet: totalsBet("UNDER", "2.75", { stake: new Prisma.Decimal(100) }) });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: arsenalCoventryResult(2, 1) }));
+
+  assert.equal(result.kind, "SETTLED");
+  if (result.kind !== "SETTLED") return;
+  assert.equal(result.finalStatus, "SETTLED_HALF_LOSS");
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "-50");
+  assert.equal(fake._debug.transactions()[0]?.type, "BET_STAKE");
+  assert.equal(fake._debug.transactions()[0]?.amount.toString(), "-50");
+});
+
+test("H5-A2 financial: full WIN/LOSS/VOID TOTALS outcomes reuse existing settleBet financial behavior unchanged", async () => {
+  // WIN: stake 100 @ 2.10 (fakeBet's own default odds) -> netProfit 110.
+  const winFake = createFakeDb({ bet: totalsBet("OVER", "2.5", { stake: new Prisma.Decimal(100) }) });
+  await autoSettleSingleBet(db(winFake), input({ eventResult: arsenalCoventryResult(2, 1) }));
+  assert.equal(winFake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "110");
+  assert.equal(winFake._debug.transactions()[0]?.type, "BET_PAYOUT");
+
+  // LOSS: stake deducted in full, negative delta.
+  const lossFake = createFakeDb({ bet: totalsBet("UNDER", "2.5", { stake: new Prisma.Decimal(100) }) });
+  await autoSettleSingleBet(db(lossFake), input({ eventResult: arsenalCoventryResult(2, 1) }));
+  assert.equal(lossFake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "-100");
+  assert.equal(lossFake._debug.transactions()[0]?.type, "BET_STAKE");
+
+  // VOID: zero delta, but a real Transaction row still exists for audit.
+  const voidFake = createFakeDb({ bet: totalsBet("OVER", "3", { stake: new Prisma.Decimal(100) }) });
+  await autoSettleSingleBet(db(voidFake), input({ eventResult: arsenalCoventryResult(2, 1) }));
+  assert.equal(voidFake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "0");
+  assert.equal(voidFake._debug.transactionCreateCallCount(), 1);
+});
+
+/* --- Idempotency ----------------------------------------------------------*/
+
+test("H5-A2 idempotency: a HALF_WIN TOTALS bet settled twice creates exactly one Transaction and one balance mutation", async () => {
+  const fake = createFakeDb({ bet: totalsBet("OVER", "2.75", { stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("2.00") }) });
+  const eventResult = arsenalCoventryResult(2, 1);
+
+  const first = await autoSettleSingleBet(db(fake), input({ eventResult }));
+  assert.equal(first.kind, "SETTLED");
+  if (first.kind !== "SETTLED") return;
+  assert.equal(first.idempotent, false);
+
+  const balanceAfterFirst = fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString();
+  const txCountAfterFirst = fake._debug.transactionCreateCallCount();
+
+  const second = await autoSettleSingleBet(db(fake), input({ eventResult }));
+  assert.equal(second.kind, "SETTLED");
+  if (second.kind !== "SETTLED") return;
+  assert.equal(second.idempotent, true);
+  assert.equal(second.finalStatus, "SETTLED_HALF_WIN");
+
+  assert.equal(fake._debug.transactionCreateCallCount(), txCountAfterFirst);
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), balanceAfterFirst);
+});
+
+test("H5-A2 idempotency: a HALF_LOSS TOTALS bet settled twice creates exactly one Transaction and one balance mutation", async () => {
+  const fake = createFakeDb({ bet: totalsBet("UNDER", "2.75", { stake: new Prisma.Decimal(100) }) });
+  const eventResult = arsenalCoventryResult(2, 1);
+
+  const first = await autoSettleSingleBet(db(fake), input({ eventResult }));
+  assert.equal(first.kind, "SETTLED");
+  if (first.kind !== "SETTLED") return;
+
+  const balanceAfterFirst = fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString();
+  const txCountAfterFirst = fake._debug.transactionCreateCallCount();
+
+  const second = await autoSettleSingleBet(db(fake), input({ eventResult }));
+  assert.equal(second.kind, "SETTLED");
+  if (second.kind !== "SETTLED") return;
+  assert.equal(second.idempotent, true);
+
+  assert.equal(fake._debug.transactionCreateCallCount(), txCountAfterFirst);
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), balanceAfterFirst);
+});
+
+/* --- Fail-closed ------------------------------------------------------- */
+
+test("H5-A2 fail-closed: missing line -> NO_ACTION MISSING_LINE, zero writes", async () => {
+  const fake = createFakeDb({ bet: totalsBet("OVER", "2.5", { line: null }) });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: arsenalCoventryResult(2, 1) }));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.reasonCode, "MISSING_LINE");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+  assert.equal(fake._debug.playerUpdateCallCount(), 0);
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "CONFIRMED");
+});
+
+test("H5-A2 fail-closed: off-grid line (2.33) -> NO_ACTION INVALID_LINE, zero writes, never rounded to the nearest supported line", async () => {
+  const fake = createFakeDb({ bet: totalsBet("OVER", "2.33") });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: arsenalCoventryResult(2, 1) }));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.reasonCode, "INVALID_LINE");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("H5-A2 fail-closed: invalid selectionType (PARTICIPANT, not OVER/UNDER) -> NO_ACTION UNSUPPORTED_SELECTION, zero writes", async () => {
+  const fake = createFakeDb({ bet: totalsBet("OVER", "2.5", { canonicalSelectionType: "PARTICIPANT", canonicalParticipant: "Arsenal" }) });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: arsenalCoventryResult(2, 1) }));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.reasonCode, "UNSUPPORTED_SELECTION");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("H5-A2 fail-closed: missing score -> NO_ACTION MISSING_SCORE, zero writes", async () => {
+  const fake = createFakeDb({ bet: totalsBet("OVER", "2.5") });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: { ...arsenalCoventryResult(2, 1), homeScore: null } }));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.reasonCode, "MISSING_SCORE");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("H5-A2 fail-closed: invalid event result (blank participant name) -> NO_ACTION INVALID_EVENT_RESULT, zero writes", async () => {
+  const fake = createFakeDb({ bet: totalsBet("OVER", "2.5") });
+  const result = await autoSettleSingleBet(
+    db(fake),
+    input({
+      eventResult: { status: "COMPLETED", homeParticipant: { name: "" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 1 },
+    }),
+  );
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.reasonCode, "INVALID_EVENT_RESULT");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("H5-A2 fail-closed: wrong period -> NO_ACTION UNSUPPORTED_PERIOD, zero writes", async () => {
+  const fake = createFakeDb({ bet: totalsBet("OVER", "2.5", { canonicalPeriod: "FIRST_HALF" }) });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: arsenalCoventryResult(2, 1) }));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.reasonCode, "UNSUPPORTED_PERIOD");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
 });

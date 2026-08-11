@@ -240,10 +240,15 @@ test("CANCELLED status leg with no LOSS elsewhere -> overall VOID (evaluator's o
 /* UNSUPPORTED / INVALID_DATA                                                 */
 /* -------------------------------------------------------------------------- */
 
+// H5-A2 — TOTALS is no longer a generically-UNSUPPORTED_MARKET example (see
+// the dedicated H5-A2 section below for its own explicit deferred-reason
+// coverage); BOTH_TEAMS_TO_SCORE (still genuinely out of scope) replaces it
+// here so this test still proves what it always proved: a real, unmodeled
+// market produces UNSUPPORTED_MARKET.
 test("UNSUPPORTED: no LOSS, one leg's market is unsupported -> overall UNSUPPORTED", () => {
   const legs = [
     leg({ id: "l1", providerEventId: "e1" }),
-    leg({ id: "l2", providerEventId: "e2", selection: { ...selection("HOME"), marketType: "TOTALS", selectionType: "OVER" } }),
+    leg({ id: "l2", providerEventId: "e2", selection: { ...selection("HOME"), marketType: "BOTH_TEAMS_TO_SCORE", selectionType: "YES" } }),
   ];
   const results = lookup([
     ["e1", eventResult({ homeScore: 2, awayScore: 0 })],
@@ -453,4 +458,103 @@ test("a SPREAD leg never reaches evaluateSelectionOutcome's WAITING/event-lookup
   assert.equal(result.kind, "UNSUPPORTED");
   if (result.kind !== "UNSUPPORTED") return;
   assert.equal(result.reasonCodes["l1"], "SPREAD_AUTO_SETTLEMENT_DEFERRED");
+});
+
+/* -------------------------------------------------------------------------- */
+/* H5-A2 — TOTALS is evaluator-supported for SINGLE now, but deliberately    */
+/* still deferred in EXPRESS aggregation, mirroring the SPREAD guard exactly */
+/* (including for quarter-line legs that WOULD produce HALF_WIN/HALF_LOSS).  */
+/* -------------------------------------------------------------------------- */
+
+function totalsSelection(direction: "OVER" | "UNDER", line: string): CanonicalSelection {
+  return {
+    sport: "UNKNOWN",
+    event: { sport: "UNKNOWN", name: "", participants: [], period: "FULL_GAME" },
+    marketType: "TOTALS",
+    period: "FULL_GAME",
+    selectionType: direction,
+    line,
+  };
+}
+
+test("an ordinary (whole-line) TOTALS leg is deferred to UNSUPPORTED, never silently interpreted as WIN — EXPRESS TOTALS settlement is not implemented by this stage", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", selection: totalsSelection("OVER", "2.5") })];
+  // 3 total goals — a real TOTALS evaluation of Over 2.5 would be a full
+  // WIN, but this must never reach that conclusion in EXPRESS.
+  const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 1 })]]);
+
+  const result = aggregateExpressOutcome(legs, results);
+
+  assert.equal(result.kind, "UNSUPPORTED");
+  if (result.kind !== "UNSUPPORTED") return;
+  assert.deepEqual(result.affectedSelectionIds, ["l1"]);
+  assert.equal(result.reasonCodes["l1"], "TOTALS_AUTO_SETTLEMENT_DEFERRED");
+});
+
+test("a quarter-line TOTALS leg that WOULD produce HALF_WIN if evaluated is deferred to UNSUPPORTED instead — the exact silent-vanishing hazard this guard exists to prevent", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", selection: totalsSelection("UNDER", "2.25") })];
+  // 2 total goals: Under 2.25 splits into [2, 2.5] -> PUSH + WIN -> HALF_WIN
+  // if this leg were evaluated for real. It must not be — and, critically,
+  // it must not silently vanish from every tracking bucket either (see this
+  // guard's own comment in aggregateExpressOutcome.ts).
+  const results = lookup([["e1", eventResult({ homeScore: 1, awayScore: 1 })]]);
+
+  const result = aggregateExpressOutcome(legs, results);
+
+  assert.equal(result.kind, "UNSUPPORTED");
+  if (result.kind !== "UNSUPPORTED") return;
+  assert.deepEqual(result.affectedSelectionIds, ["l1"]);
+  assert.equal(result.reasonCodes["l1"], "TOTALS_AUTO_SETTLEMENT_DEFERRED");
+});
+
+test("a quarter-line TOTALS leg that WOULD produce HALF_LOSS if evaluated is deferred to UNSUPPORTED instead", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", selection: totalsSelection("OVER", "2.25") })];
+  // 2 total goals: Over 2.25 splits into [2, 2.5] -> PUSH + LOSS -> HALF_LOSS
+  // if this leg were evaluated for real. It must not be.
+  const results = lookup([["e1", eventResult({ homeScore: 1, awayScore: 1 })]]);
+
+  const result = aggregateExpressOutcome(legs, results);
+
+  assert.equal(result.kind, "UNSUPPORTED");
+  if (result.kind !== "UNSUPPORTED") return;
+  assert.deepEqual(result.affectedSelectionIds, ["l1"]);
+  assert.equal(result.reasonCodes["l1"], "TOTALS_AUTO_SETTLEMENT_DEFERRED");
+});
+
+test("a TOTALS leg deferred to UNSUPPORTED masks an otherwise-winning MONEYLINE leg, same priority behavior as any other UNSUPPORTED leg", () => {
+  const legs = [
+    leg({ id: "l1", providerEventId: "e1", selection: selection("HOME") }), // will WIN
+    leg({ id: "l2", providerEventId: "e2", selection: totalsSelection("OVER", "2.5") }), // deferred
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 2, awayScore: 0 })],
+    ["e2", eventResult({ homeScore: 2, awayScore: 1 })],
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results);
+
+  assert.equal(result.kind, "UNSUPPORTED");
+  if (result.kind !== "UNSUPPORTED") return;
+  assert.deepEqual(result.affectedSelectionIds, ["l2"]);
+});
+
+test("a TOTALS leg never reaches evaluateSelectionOutcome's WAITING/event-lookup path either — deferred even when providerEventId has no matching result", () => {
+  const legs = [leg({ id: "l1", providerEventId: "missing-event", selection: totalsSelection("OVER", "2.5") })];
+  const results = lookup([]);
+
+  const result = aggregateExpressOutcome(legs, results);
+
+  assert.equal(result.kind, "UNSUPPORTED");
+  if (result.kind !== "UNSUPPORTED") return;
+  assert.equal(result.reasonCodes["l1"], "TOTALS_AUTO_SETTLEMENT_DEFERRED");
+});
+
+test("zero financial aggregation occurs for a TOTALS leg — the returned UNSUPPORTED result carries no effectiveOdds/winningSelectionIds/voidedSelectionIds at all", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", selection: totalsSelection("OVER", "2.5"), odds: new Prisma.Decimal("1.90") })];
+  const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 1 })]]);
+
+  const result = aggregateExpressOutcome(legs, results);
+
+  assert.equal(result.kind, "UNSUPPORTED");
+  assert.deepEqual(Object.keys(result).sort(), ["affectedSelectionIds", "kind", "reasonCodes"]);
 });

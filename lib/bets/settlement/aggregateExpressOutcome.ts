@@ -99,19 +99,48 @@ export function aggregateExpressOutcome(
     // lib/bets/settlement/autoSettleSingleBet.ts's identical guard (see
     // that file's own comment for the full explanation of why this must
     // be checked on the leg's own selection.marketType, not
-    // evaluation.kind). Before this stage, evaluateSelectionOutcome()
-    // always returned UNSUPPORTED_MARKET for a SPREAD leg, so a SPREAD leg
-    // has never contributed anything but the UNSUPPORTED bucket here —
-    // this preserves that exact behavior byte-for-byte, and the switch
-    // below is therefore never reached for a SPREAD leg at all. This is
-    // also what keeps HALF_WIN/HALF_LOSS out of the switch entirely: both
-    // kinds can only ever be produced from a SPREAD selection (see
-    // evaluateSelectionOutcome.ts), so this one guard is a complete,
-    // sufficient fail-closed handler for them — no HALF_WIN/HALF_LOSS
-    // switch case is needed, and the switch itself stays byte-identical.
+    // evaluation.kind). Before H4-B2, evaluateSelectionOutcome() always
+    // returned UNSUPPORTED_MARKET for a SPREAD leg, so a SPREAD leg has
+    // never contributed anything but the UNSUPPORTED bucket here — this
+    // preserves that exact behavior byte-for-byte, and the switch below is
+    // therefore never reached for a SPREAD leg at all. Combined with the
+    // TOTALS guard immediately below (H5-A2), this is what keeps HALF_WIN/
+    // HALF_LOSS out of the switch entirely: those two kinds can currently
+    // only ever be produced by a SPREAD or TOTALS selection (see
+    // evaluateSelectionOutcome.ts) — both intercepted here before
+    // evaluateSelectionOutcome() is even called — so together these two
+    // guards remain a complete, sufficient fail-closed handler for them; no
+    // HALF_WIN/HALF_LOSS switch case is needed, and the switch itself stays
+    // byte-identical. Any FUTURE market that can also produce HALF_WIN/
+    // HALF_LOSS must add its own guard here the same way, or add real
+    // switch cases — this comment is the trip-wire for that.
     if (leg.selection.marketType === "SPREAD") {
       unsupportedIds.push(leg.id);
       unsupportedReasons[leg.id] = "SPREAD_AUTO_SETTLEMENT_DEFERRED";
+      continue;
+    }
+
+    // H5-A2 — TOTALS joins the SPREAD guard above, same rationale, same
+    // deferred-reason-code convention, checked the same way (on the leg's
+    // own selection.marketType, not evaluation.kind — required BEFORE
+    // evaluateSelectionOutcome() ever gains real TOTALS support, which this
+    // stage's own change to evaluateSelectionOutcome.ts does in the same
+    // commit). Root cause this guards against: the switch below has no
+    // "case HALF_WIN"/"case HALF_LOSS" at all — it was only ever safe
+    // because SPREAD (the sole prior HALF_* producer) was already
+    // intercepted above, before evaluateSelectionOutcome() was even called.
+    // Now that evaluateSelectionOutcome() can also produce HALF_WIN/
+    // HALF_LOSS for a TOTALS quarter line, an unguarded TOTALS leg reaching
+    // that switch would silently fall through every case (no default
+    // branch either), contributing to none of the tracking arrays below —
+    // effectively vanishing from the whole EXPRESS bet's aggregation
+    // instead of correctly blocking it. This guard is what prevents that:
+    // TOTALS is turned away here, same as SPREAD, before the switch is ever
+    // reached — EXPRESS TOTALS settlement (standard or quarter) remains
+    // completely out of scope for this stage.
+    if (leg.selection.marketType === "TOTALS") {
+      unsupportedIds.push(leg.id);
+      unsupportedReasons[leg.id] = "TOTALS_AUTO_SETTLEMENT_DEFERRED";
       continue;
     }
 
