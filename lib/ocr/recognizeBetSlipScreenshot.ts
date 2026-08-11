@@ -8,6 +8,7 @@ import {
   createDetectionCopy,
   cropToRegion,
   type ImageDimensions,
+  type NormalizedRegion,
 } from "./screenshotPreprocessing";
 import type { OcrProvider, OcrResult } from "./ocrTypes";
 
@@ -22,7 +23,13 @@ import type { OcrProvider, OcrResult } from "./ocrTypes";
 
 export type RegionDetectionSummary =
   | { outcome: "skipped_small_image" }
-  | { outcome: "region_found"; confidence: number }
+  // SCREENSHOT QA-1.1 — region/cropWidthPx/cropHeightPx are diagnostic-only
+  // additions (temporary): the normalized region the model returned and the
+  // pixel bounds it would produce, computed independently below purely for
+  // observability. Never fed back into any decision — the actual crop a
+  // few lines down still goes through the real, completely unmodified
+  // cropToRegion()/clampAndPadRegion() in screenshotPreprocessing.ts.
+  | { outcome: "region_found"; confidence: number; region: NormalizedRegion; cropWidthPx: number; cropHeightPx: number }
   | { outcome: "region_not_found" }
   | { outcome: "region_invalid" }
   | { outcome: "region_timeout" }
@@ -41,6 +48,12 @@ export interface ScreenshotPipelineDiagnostics {
   // always was — by the OCR call itself.
   metadataDecodeFailed: boolean;
   metadataMs: number;
+  // SCREENSHOT QA-1.1 — a diagnostic-only mirror of
+  // looksLikeFullScreenScreenshot()'s own return value (unchanged function,
+  // called exactly as before below) — false whenever dimensions couldn't be
+  // read at all, matching that function's own "dimensions required"
+  // contract.
+  looksLikeFullScreenScreenshot: boolean;
   regionDetection: RegionDetectionSummary;
   regionDetectionMs: number | null;
   cropMs: number | null;
@@ -70,10 +83,28 @@ export interface RecognizeBetSlipScreenshotParams {
 
 const SKIPPED_REGION_DETECTION: RegionDetectionSummary = { outcome: "skipped_small_image" };
 
-function summarizeRegionOutcome(outcome: RegionDetectionOutcome): RegionDetectionSummary {
+// SCREENSHOT QA-1.1 — `dimensions` param added solely so the FOUND case can
+// report cropWidthPx/cropHeightPx (diagnostic-only, see RegionDetectionSummary
+// above). The bounds math below intentionally mirrors cropToRegion()'s own
+// left/top/right/bottom computation (screenshotPreprocessing.ts) so the
+// reported numbers match what actually gets extracted — but it is a
+// completely independent, read-only computation; it never calls into or
+// alters cropToRegion() itself.
+function summarizeRegionOutcome(outcome: RegionDetectionOutcome, dimensions: ImageDimensions): RegionDetectionSummary {
   switch (outcome.kind) {
-    case "FOUND":
-      return { outcome: "region_found", confidence: outcome.confidence };
+    case "FOUND": {
+      const left = Math.round(outcome.region.x * dimensions.width);
+      const top = Math.round(outcome.region.y * dimensions.height);
+      const right = Math.min(dimensions.width, Math.round((outcome.region.x + outcome.region.width) * dimensions.width));
+      const bottom = Math.min(dimensions.height, Math.round((outcome.region.y + outcome.region.height) * dimensions.height));
+      return {
+        outcome: "region_found",
+        confidence: outcome.confidence,
+        region: outcome.region,
+        cropWidthPx: Math.max(1, right - left),
+        cropHeightPx: Math.max(1, bottom - top),
+      };
+    }
     case "NOT_FOUND":
       return { outcome: "region_not_found" };
     case "INVALID":
@@ -97,6 +128,7 @@ export async function recognizeBetSlipScreenshot(
     imageHeight: dimensions?.height ?? null,
     metadataDecodeFailed: dimensions === null,
     metadataMs,
+    looksLikeFullScreenScreenshot: dimensions !== null && looksLikeFullScreenScreenshot(dimensions),
   };
 
   if (dimensions && exceedsMaxDimension(dimensions)) {
@@ -144,7 +176,7 @@ export async function recognizeBetSlipScreenshot(
       timeoutMs: params.regionDetectionTimeoutMs,
     });
     regionDetectionMs = outcome.durationMs;
-    regionSummary = summarizeRegionOutcome(outcome);
+    regionSummary = summarizeRegionOutcome(outcome, dimensions);
 
     if (outcome.kind === "FOUND") {
       const cropStartedAt = Date.now();

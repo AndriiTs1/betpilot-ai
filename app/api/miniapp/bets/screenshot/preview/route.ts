@@ -19,6 +19,7 @@ import {
 import type { OcrFailure, OcrProvider } from "@/lib/ocr/ocrTypes";
 import { ALLOWED_MIME_TYPES, MAX_FILE_SIZE_BYTES, detectImageSignature, type AllowedMimeType } from "@/lib/uploads/imageValidation";
 import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
+import { logScreenshotQa1Diagnostic, computeQa1OcrIndicators } from "@/lib/logging/screenshotQa1Diagnostic";
 import { createRequestRateLimiter, safeCheckAndRecord, type RequestRateLimiter } from "@/lib/rateLimit/requestRateLimiter";
 import { rateLimitedResponse } from "@/lib/rateLimit/rateLimitResponse";
 
@@ -353,6 +354,18 @@ export async function handleScreenshotPreview(
         });
       }
 
+      // SCREENSHOT QA-1.1 — temporary, side-effect-only diagnostic (see
+      // lib/logging/screenshotQa1Diagnostic.ts's own header for scope/
+      // safety). Stage A: fires as soon as mimeType/dimensions are known,
+      // regardless of what happens next.
+      logScreenshotQa1Diagnostic({
+        stage: "preprocessing",
+        mimeType,
+        imageWidth: recognition.diagnostics.imageWidth,
+        imageHeight: recognition.diagnostics.imageHeight,
+        looksLikeFullScreenScreenshot: recognition.diagnostics.looksLikeFullScreenScreenshot,
+      });
+
       if (recognition.kind === "IMAGE_TOO_LARGE") {
         logScreenshotPipelineEvent("image_too_large", {
           imageWidth: recognition.diagnostics.imageWidth ?? undefined,
@@ -363,6 +376,20 @@ export async function handleScreenshotPreview(
 
       logRegionDetectionOutcome(recognition.diagnostics);
 
+      // SCREENSHOT QA-1.1 — Stage B.
+      {
+        const region = recognition.diagnostics.regionDetection;
+        logScreenshotQa1Diagnostic({
+          stage: "region_detection",
+          attempted: region.outcome !== "skipped_small_image",
+          outcome: region.outcome,
+          region: region.outcome === "region_found" ? region.region : null,
+          cropWidthPx: region.outcome === "region_found" ? region.cropWidthPx : null,
+          cropHeightPx: region.outcome === "region_found" ? region.cropHeightPx : null,
+          fallbackToFullImage: region.outcome !== "region_found",
+        });
+      }
+
       const ocrResult = recognition.ocrResult;
 
       if (ocrResult.kind === "FAILURE") {
@@ -370,10 +397,33 @@ export async function handleScreenshotPreview(
         // never the image bytes or any OCR text (there is none to log here).
         console.error("POST /api/miniapp/bets/screenshot/preview: OCR failed:", ocrResult.code);
         logScreenshotPipelineEvent("ocr_failed", { durationMs: ocrResult.durationMs, failureCode: ocrResult.code });
+        // SCREENSHOT QA-1.1 — Stage C, only for the one failure code that
+        // means "OCR ran and genuinely found nothing" (NO_TEXT_FOUND); every
+        // other OCR failure code (timeout/provider error/unsupported/empty)
+        // has no text signal to report at all and is already distinctly
+        // covered by the ocr_failed event just above.
+        if (ocrResult.code === "NO_TEXT_FOUND") {
+          logScreenshotQa1Diagnostic({
+            stage: "ocr",
+            normalizedTextLength: 0,
+            containsBayern: false,
+            containsStuttgart: false,
+            containsOdds142: false,
+            containsStake100: false,
+            containsP1: false,
+          });
+        }
         return mapOcrFailureToResponse(ocrResult);
       }
 
       logScreenshotPipelineEvent("ocr_succeeded", { durationMs: ocrResult.durationMs });
+
+      // SCREENSHOT QA-1.1 — Stage C (success path).
+      logScreenshotQa1Diagnostic({
+        stage: "ocr",
+        normalizedTextLength: ocrResult.normalizedText.length,
+        ...computeQa1OcrIndicators(ocrResult.normalizedText),
+      });
 
       const parseBetSlip = options.parseBetSlip ?? parseBetSlipMessage;
 
@@ -387,6 +437,38 @@ export async function handleScreenshotPreview(
         return NextResponse.json({ error: "AI_UNAVAILABLE" }, { status: 502 });
       }
       const parserDurationMs = Date.now() - parserStartedAt;
+
+      // SCREENSHOT QA-1.1 — Stage D. Fires exactly once for every reachable
+      // parser outcome (valid, timeout, or any other rejection) — never for
+      // the `catch` block above (a thrown exception, already distinctly
+      // covered by the existing parser_failed event), since that path never
+      // produces a `parsed` value to describe.
+      logScreenshotQa1Diagnostic(
+        parsed.valid
+          ? {
+              stage: "parser",
+              valid: true,
+              errorCode: null,
+              type: parsed.type,
+              stake: parsed.stake,
+              selections: parsed.selections.map((s) => ({
+                sport: s.sport,
+                event: s.event,
+                market: s.market,
+                selection: s.selection,
+                line: s.line ?? null,
+                odds: s.submittedOdds,
+              })),
+            }
+          : {
+              stage: "parser",
+              valid: false,
+              errorCode: parsed.code ?? "unspecified",
+              type: null,
+              stake: null,
+              selections: null,
+            },
+      );
 
       if (!parsed.valid) {
         // parsed.error can contain provider/model/timeout/SDK detail — log it

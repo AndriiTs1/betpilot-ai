@@ -11,6 +11,7 @@ import type { OcrProvider, OcrResult } from "@/lib/ocr/ocrTypes";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import type { RegionDetectionOutcome } from "@/lib/ocr/regionDetection";
 import { createRequestRateLimiter, type RequestRateLimiter } from "@/lib/rateLimit/requestRateLimiter";
+import { SCREENSHOT_QA1_DIAGNOSTIC_MARKER } from "@/lib/logging/screenshotQa1Diagnostic";
 
 // Stage 14.3 — this route now runs upload validation -> OCR
 // (recognizeScreenshot, injectable) -> bet parsing (parseBetSlipMessage in
@@ -1129,7 +1130,7 @@ test("screenshot preview: a rejected verifyOddsFn logs odds_verification_failed 
   assert.equal(oddsEvent!.oddsVerificationStatus, "UNAVAILABLE");
 });
 
-test("screenshot preview: no logged event ever contains OCR text, event/selection/stake/odds content, initData, tokens, or headers", async () => {
+test("screenshot preview: no PERMANENT logged event ever contains OCR text, event/selection/stake/odds content, initData, tokens, or headers", async () => {
   const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
   const request = buildRequest(initData, jpegBytes(), "image/jpeg");
 
@@ -1165,7 +1166,18 @@ test("screenshot preview: no logged event ever contains OCR text, event/selectio
     "Bearer",
   ];
 
-  const rawLoggedText = JSON.stringify(loggedLines);
+  // SCREENSHOT QA-1.1 — scoped to the PERMANENT structured log
+  // (logScreenshotPipelineEvent, lib/logging/structuredLog.ts) only. That
+  // module's own header comment still guarantees it can never carry OCR
+  // text or parsed bet content — nothing about it changed. The separate,
+  // explicitly-marked, explicitly-temporary [SCREENSHOT_QA1_DIAGNOSTIC]
+  // channel (lib/logging/screenshotQa1Diagnostic.ts) is a deliberate,
+  // narrowly-scoped exception with its own contract and its own dedicated
+  // tests below (it legitimately carries event/selection/market/line/odds/
+  // stake — the player's own already-disclosed bet content — but is proven
+  // there to still never carry any of the true secrets in `forbidden`).
+  const permanentLoggedLines = loggedLines.filter((args) => args[0] !== SCREENSHOT_QA1_DIAGNOSTIC_MARKER);
+  const rawLoggedText = JSON.stringify(permanentLoggedLines);
   for (const value of forbidden) {
     assert.equal(rawLoggedText.includes(value), false, `logged output must never contain: ${value}`);
   }
@@ -1180,6 +1192,270 @@ test("screenshot preview: no logged event ever contains OCR text, event/selectio
       );
     }
   }
+});
+
+// ---------------------------------------------------------------------
+// SCREENSHOT QA-1.1 — temporary, side-effect-only diagnostic
+// (lib/logging/screenshotQa1Diagnostic.ts). Added to answer one specific
+// question (which pipeline stage first diverges from the expected bet, for
+// a screenshot that can't be reproduced locally since ANTHROPIC_API_KEY is
+// a Sensitive Vercel env var) — every test below either proves a stage's
+// diagnostic shape is correct, or proves the diagnostic can never change
+// the response/leak a true secret.
+// ---------------------------------------------------------------------
+
+function qa1Diagnostics(): Array<{ stage: string; [key: string]: unknown }> {
+  const diagnostics: Array<{ stage: string; [key: string]: unknown }> = [];
+  for (const args of loggedLines) {
+    if (args[0] !== SCREENSHOT_QA1_DIAGNOSTIC_MARKER) continue;
+    const parsed = JSON.parse(String(args[1]));
+    diagnostics.push(parsed);
+  }
+  return diagnostics;
+}
+
+test("QA-1.1 diagnostic: full-image direct OCR path logs region_detection as skipped, not attempted, with a full fallback", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  await handleScreenshotPreview(request, baseOptions());
+
+  const diagnostics = qa1Diagnostics();
+  const preprocessing = diagnostics.find((d) => d.stage === "preprocessing");
+  const region = diagnostics.find((d) => d.stage === "region_detection");
+
+  assert.ok(preprocessing, "expected a preprocessing diagnostic");
+  assert.ok(region, "expected a region_detection diagnostic");
+  assert.equal(region!.attempted, false);
+  assert.equal(region!.outcome, "skipped_small_image");
+  assert.equal(region!.region, null);
+  assert.equal(region!.fallbackToFullImage, true);
+});
+
+test("QA-1.1 diagnostic: region-detection + crop path logs the returned region and computed crop pixel dimensions", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const largeBytes = new Uint8Array(
+    await sharp({ create: { width: 1600, height: 1000, channels: 3, background: { r: 40, g: 40, b: 40 } } })
+      .jpeg()
+      .toBuffer(),
+  );
+  const request = buildRequest(initData, largeBytes, "image/jpeg");
+
+  const detectRegion = fakeDetectRegion({
+    kind: "FOUND",
+    region: { x: 0.1, y: 0.2, width: 0.5, height: 0.3 },
+    confidence: 0.92,
+    reason: "test",
+    durationMs: 5,
+  });
+
+  await handleScreenshotPreview(request, baseOptions({ detectRegion }));
+
+  const diagnostics = qa1Diagnostics();
+  const region = diagnostics.find((d) => d.stage === "region_detection");
+
+  assert.ok(region, "expected a region_detection diagnostic");
+  assert.equal(region!.attempted, true);
+  assert.equal(region!.outcome, "region_found");
+  assert.deepEqual(region!.region, { x: 0.1, y: 0.2, width: 0.5, height: 0.3 });
+  assert.equal(typeof region!.cropWidthPx, "number");
+  assert.equal(typeof region!.cropHeightPx, "number");
+  assert.ok((region!.cropWidthPx as number) > 0);
+  assert.ok((region!.cropHeightPx as number) > 0);
+  assert.equal(region!.fallbackToFullImage, false);
+});
+
+test("QA-1.1 diagnostic: a region-detection failure (NOT_FOUND) logs fallbackToFullImage: true, no region coordinates", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const largeBytes = new Uint8Array(
+    await sharp({ create: { width: 1600, height: 1000, channels: 3, background: { r: 40, g: 40, b: 40 } } })
+      .jpeg()
+      .toBuffer(),
+  );
+  const request = buildRequest(initData, largeBytes, "image/jpeg");
+
+  const detectRegion = fakeDetectRegion({ kind: "NOT_FOUND", reason: "test", durationMs: 5 });
+
+  await handleScreenshotPreview(request, baseOptions({ detectRegion }));
+
+  const diagnostics = qa1Diagnostics();
+  const region = diagnostics.find((d) => d.stage === "region_detection");
+
+  assert.ok(region, "expected a region_detection diagnostic");
+  assert.equal(region!.attempted, true);
+  assert.equal(region!.outcome, "region_not_found");
+  assert.equal(region!.region, null);
+  assert.equal(region!.cropWidthPx, null);
+  assert.equal(region!.cropHeightPx, null);
+  assert.equal(region!.fallbackToFullImage, true);
+});
+
+test("QA-1.1 diagnostic: OCR returning NO_TEXT_FOUND logs an ocr stage with zero length and every content indicator false", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  await handleScreenshotPreview(
+    request,
+    baseOptions({
+      ocrProvider: fakeOcrProvider(() => ({
+        kind: "FAILURE",
+        code: "NO_TEXT_FOUND",
+        provider: "fake-ocr-provider",
+        durationMs: 1,
+        safeMessage: "no text",
+      })),
+    }),
+  );
+
+  const diagnostics = qa1Diagnostics();
+  const ocr = diagnostics.find((d) => d.stage === "ocr");
+
+  assert.ok(ocr, "expected an ocr diagnostic");
+  assert.equal(ocr!.normalizedTextLength, 0);
+  assert.equal(ocr!.containsBayern, false);
+  assert.equal(ocr!.containsStuttgart, false);
+  assert.equal(ocr!.containsOdds142, false);
+  assert.equal(ocr!.containsStake100, false);
+  assert.equal(ocr!.containsP1, false);
+  // No parser diagnostic — the route never reaches the parser call on an OCR failure.
+  assert.equal(diagnostics.some((d) => d.stage === "parser"), false);
+});
+
+test("QA-1.1 diagnostic: OCR usable but the bet parser rejects logs a parser diagnostic with valid:false and no bet content", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  await handleScreenshotPreview(
+    request,
+    baseOptions({
+      ocrProvider: fakeOcrProvider(() => ocrSuccess("Бавария Штутгарт П1 1.42 100")),
+      parseBetSlip: fakeParseBetSlip({ valid: false, error: "rejected" }),
+    }),
+  );
+
+  const diagnostics = qa1Diagnostics();
+  const ocr = diagnostics.find((d) => d.stage === "ocr");
+  const parser = diagnostics.find((d) => d.stage === "parser");
+
+  assert.ok(ocr, "expected an ocr diagnostic");
+  assert.equal(ocr!.containsP1, true);
+  assert.equal(ocr!.containsOdds142, true);
+  assert.equal(ocr!.containsStake100, true);
+
+  assert.ok(parser, "expected a parser diagnostic");
+  assert.equal(parser!.valid, false);
+  assert.equal(parser!.errorCode, "unspecified");
+  assert.equal(parser!.type, null);
+  assert.equal(parser!.selections, null);
+});
+
+test("QA-1.1 diagnostic: a valid parse logs the exact structured bet fields (type/sport/event/selection/market/line/odds/stake)", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  const slip = singleSlip({
+    selections: [
+      {
+        sport: "Football",
+        event: "Bayern Munich vs VfB Stuttgart",
+        market: "Moneyline",
+        selection: "Bayern Munich",
+        submittedOdds: 1.42,
+      },
+    ],
+    stake: 100,
+  });
+
+  await handleScreenshotPreview(
+    request,
+    baseOptions({
+      ocrProvider: fakeOcrProvider(() => ocrSuccess("Bayern Munich vs Stuttgart 1.42 100")),
+      parseBetSlip: fakeParseBetSlip(slip),
+    }),
+  );
+
+  const diagnostics = qa1Diagnostics();
+  const parser = diagnostics.find((d) => d.stage === "parser");
+
+  assert.ok(parser, "expected a parser diagnostic");
+  assert.equal(parser!.valid, true);
+  assert.equal(parser!.errorCode, null);
+  assert.equal(parser!.type, "SINGLE");
+  assert.equal(parser!.stake, 100);
+  assert.deepEqual(parser!.selections, [
+    {
+      sport: "Football",
+      event: "Bayern Munich vs VfB Stuttgart",
+      market: "Moneyline",
+      selection: "Bayern Munich",
+      line: null,
+      odds: 1.42,
+    },
+  ]);
+});
+
+test("QA-1.1 diagnostic: never logs the raw OCR transcript, initData, tokens, or headers — even though it legitimately logs parsed bet content", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  const secretOcrMarker = "SUPER_SECRET_OCR_MARKER_9182_Бавария";
+  const secretSlip = singleSlip({
+    selections: [
+      { sport: "Football", event: "Bayern Munich vs VfB Stuttgart", market: null, selection: "Bayern Munich", submittedOdds: 1.42 },
+    ],
+    stake: 100,
+  });
+
+  await handleScreenshotPreview(
+    request,
+    baseOptions({
+      ocrProvider: fakeOcrProvider(() => ocrSuccess(secretOcrMarker)),
+      parseBetSlip: fakeParseBetSlip(secretSlip),
+    }),
+  );
+
+  const qa1LoggedText = JSON.stringify(loggedLines.filter((args) => args[0] === SCREENSHOT_QA1_DIAGNOSTIC_MARKER));
+  const trulyForbidden = [secretOcrMarker, initData, BOT_TOKEN, PREVIEW_TOKEN_SECRET, "authorization", "Bearer"];
+  for (const value of trulyForbidden) {
+    assert.equal(qa1LoggedText.includes(value), false, `QA-1.1 diagnostic must never contain: ${value}`);
+  }
+
+  // It DOES legitimately contain the bet content — that's the whole point.
+  assert.ok(qa1LoggedText.includes("Bayern Munich vs VfB Stuttgart"));
+});
+
+test("QA-1.1 diagnostic: diagnostic logging is side-effect-only — response status/body are identical with console.log mocked to a no-op vs capturing", async () => {
+  // Deliberately the OCR-failure path (a deterministic, token-free response
+  // — { error: "IMAGE_NOT_RECOGNIZED" }), not the full success path: a
+  // successful preview mints a fresh random previewId/previewToken on every
+  // call by design (lib/bets/buildBetSlipPreview.ts), so two separate
+  // successful runs would legitimately differ in body regardless of
+  // logging — that non-determinism belongs to preview-token generation, not
+  // to this diagnostic, and would make this test meaningless either way.
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const ocrProvider = fakeOcrProvider(() => ({
+    kind: "FAILURE",
+    code: "NO_TEXT_FOUND",
+    provider: "fake-ocr-provider",
+    durationMs: 1,
+    safeMessage: "no text",
+  }));
+
+  async function runOnce(): Promise<{ status: number; body: unknown }> {
+    const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+    const response = await handleScreenshotPreview(request, baseOptions({ ocrProvider, rateLimiter: freshLimiter() }));
+    return { status: response.status, body: await response.json() };
+  }
+
+  const withCapturing = await runOnce();
+
+  console.log = () => {
+    // no-op — proves nothing about the response depends on console.log's
+    // own side effect (a diagnostic call whose return value is never read).
+  };
+  const withNoOp = await runOnce();
+
+  assert.deepEqual(withCapturing, withNoOp);
 });
 
 // ---------------------------------------------------------------------
