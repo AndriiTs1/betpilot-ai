@@ -25,6 +25,9 @@ interface FakeSelectionRow {
   canonicalSelectionType: string | null;
   canonicalParticipant: string | null;
   canonicalPeriod: string | null;
+  // X2 — BetSelection.line, mirroring autoSettleExpressBet.ts's now-widened
+  // select projection so this fake DB's shape stays truthful to production.
+  line: Prisma.Decimal | null;
   odds: Prisma.Decimal | null;
 }
 
@@ -116,6 +119,7 @@ function fakeSelection(overrides: Partial<FakeSelectionRow> = {}): FakeSelection
     canonicalSelectionType: "HOME",
     canonicalParticipant: null,
     canonicalPeriod: "FULL_GAME",
+    line: null,
     odds: new Prisma.Decimal("2.00"),
     ...overrides,
   };

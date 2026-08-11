@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { Prisma } from "@/lib/generated/prisma/client";
 import {
   mapExpressSelectionToCanonicalSelection,
   type ExpressSelectionCanonicalFields,
@@ -11,6 +12,7 @@ function fields(overrides: Partial<ExpressSelectionCanonicalFields> = {}): Expre
     canonicalSelectionType: "HOME",
     canonicalParticipant: null,
     canonicalPeriod: "FULL_GAME",
+    line: null,
     ...overrides,
   };
 }
@@ -44,7 +46,65 @@ test("mapper: canonicalParticipant is carried through as CanonicalParticipant.na
   assert.deepEqual(selection?.participant, { name: "Arsenal" });
 });
 
-test("mapper: no canonicalLine column exists on BetSelection — mapper never sets .line", () => {
+/* -------------------------------------------------------------------------- */
+/* X2 — BetSelection.line read-wiring. Same conversion pattern as            */
+/* mapSingleBetToCanonicalSelection.ts's own `line` field: Prisma.Decimal's  */
+/* own .toString() only, never Number()/parseFloat()/toFixed(). This alone   */
+/* does not enable SPREAD/TOTALS EXPRESS settlement — the deferral guards in */
+/* aggregateExpressOutcome.ts are untouched and still turn those legs away.  */
+/* -------------------------------------------------------------------------- */
+
+test("X2 (A): EXPRESS SPREAD persisted line -1.5 -> canonical selection line \"-1.5\"", () => {
+  const selection = mapExpressSelectionToCanonicalSelection(
+    fields({ canonicalMarketType: "SPREAD", canonicalSelectionType: "PARTICIPANT", canonicalParticipant: "Arsenal", line: new Prisma.Decimal("-1.5") }),
+  );
+  assert.equal(selection?.line, "-1.5");
+});
+
+test("X2 (B): EXPRESS SPREAD quarter line -1.25 -> canonical selection line \"-1.25\"", () => {
+  const selection = mapExpressSelectionToCanonicalSelection(
+    fields({ canonicalMarketType: "SPREAD", canonicalSelectionType: "PARTICIPANT", canonicalParticipant: "Arsenal", line: new Prisma.Decimal("-1.25") }),
+  );
+  assert.equal(selection?.line, "-1.25");
+});
+
+test("X2 (C): EXPRESS TOTALS line 2.5 -> canonical selection line \"2.5\"", () => {
+  const selection = mapExpressSelectionToCanonicalSelection(
+    fields({ canonicalMarketType: "TOTALS", canonicalSelectionType: "OVER", line: new Prisma.Decimal("2.5") }),
+  );
+  assert.equal(selection?.line, "2.5");
+});
+
+test("X2 (D): EXPRESS TOTALS quarter line 2.25 -> canonical selection line \"2.25\"", () => {
+  const selection = mapExpressSelectionToCanonicalSelection(
+    fields({ canonicalMarketType: "TOTALS", canonicalSelectionType: "OVER", line: new Prisma.Decimal("2.25") }),
+  );
+  assert.equal(selection?.line, "2.25");
+});
+
+test("X2 (E): null persisted line -> canonical selection line undefined", () => {
+  const selection = mapExpressSelectionToCanonicalSelection(
+    fields({ canonicalMarketType: "TOTALS", canonicalSelectionType: "OVER", line: null }),
+  );
+  assert.equal(selection?.line, undefined);
+});
+
+test("X2 (F): a persisted Decimal equivalent to 3.00 maps to a valid canonical line via Decimal.toString(), never native floating point", () => {
+  const selection = mapExpressSelectionToCanonicalSelection(
+    fields({ canonicalMarketType: "TOTALS", canonicalSelectionType: "OVER", line: new Prisma.Decimal("3.00") }),
+  );
+  // Prisma.Decimal("3.00").toString() is "3" (decimal.js normalizes trailing
+  // zeros on construction) — this is the exact same representation
+  // mapSingleBetToCanonicalSelection.ts already produces for the identical
+  // input, proven in that module's own test suite. Asserting the numeric
+  // value (not a specific string) is what actually matters here: whatever
+  // string comes out must still represent exactly 3, with no floating-point
+  // drift introduced by this mapper.
+  assert.ok(selection?.line !== undefined);
+  assert.equal(new Prisma.Decimal(selection!.line!).toNumber(), 3);
+});
+
+test("mapper: MONEYLINE leg with no persisted line -> canonical selection line stays undefined (unaffected by X2)", () => {
   const selection = mapExpressSelectionToCanonicalSelection(fields());
   assert.equal(selection?.line, undefined);
 });

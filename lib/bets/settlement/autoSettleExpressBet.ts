@@ -187,6 +187,12 @@ export async function autoSettleExpressBet(
           canonicalSelectionType: true,
           canonicalParticipant: true,
           canonicalPeriod: true,
+          // X2 — BetSelection.line, threaded through to
+          // mapExpressSelectionToCanonicalSelection() so a future SPREAD/
+          // TOTALS evaluator can read it. SPREAD/TOTALS legs are still
+          // turned away by aggregateExpressOutcome.ts's own deferral guards
+          // before this value is ever used in a settlement decision.
+          line: true,
           odds: true,
         },
       },

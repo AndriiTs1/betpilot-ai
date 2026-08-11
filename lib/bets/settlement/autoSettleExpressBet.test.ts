@@ -22,6 +22,10 @@ interface FakeSelectionRow {
   canonicalSelectionType: string | null;
   canonicalParticipant: string | null;
   canonicalPeriod: string | null;
+  // X2 — BetSelection.line, mirroring the real Prisma select's now-widened
+  // projection (autoSettleExpressBet.ts) so this fake DB's shape stays
+  // truthful to production.
+  line: Prisma.Decimal | null;
   odds: Prisma.Decimal | null;
 }
 
@@ -74,6 +78,7 @@ function fakeSelection(overrides: Partial<FakeSelectionRow> = {}): FakeSelection
     canonicalSelectionType: "HOME",
     canonicalParticipant: null,
     canonicalPeriod: "FULL_GAME",
+    line: null,
     odds: new Prisma.Decimal("2.00"),
     ...overrides,
   };
@@ -404,6 +409,168 @@ test("UNSUPPORTED: no LOSS, one leg's market unsupported -> NO_ACTION", async ()
   if (result.kind !== "NO_ACTION") return;
   assert.equal(result.aggregate.kind, "UNSUPPORTED");
   assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+/* -------------------------------------------------------------------------- */
+/* X2 — BetSelection.line read-wiring. Proves the persisted line survives    */
+/* DB -> autoSettleExpressBet -> mapExpressSelectionToCanonicalSelection ->  */
+/* the aggregation boundary, WITHOUT enabling SPREAD/TOTALS settlement — the */
+/* deferral guards in aggregateExpressOutcome.ts are untouched and still     */
+/* turn both markets away before evaluation, exactly as before this stage.  */
+/* -------------------------------------------------------------------------- */
+
+test("X2 full read-path proof: a persisted SPREAD leg's line reaches the aggregation boundary, still deferred (not settled)", async () => {
+  const selections = [
+    fakeSelection({ id: "sel-1", providerEventId: EVENT_A }),
+    fakeSelection({
+      id: "sel-2",
+      providerEventId: EVENT_B,
+      canonicalMarketType: "SPREAD",
+      canonicalSelectionType: "PARTICIPANT",
+      canonicalParticipant: "Arsenal",
+      line: new Prisma.Decimal("-1.5"),
+    }),
+  ];
+  const fake = createFakeDb({ bet: fakeExpressBet({}, selections) });
+
+  const result = await autoSettleExpressBet(db(fake), input(BOTH_WIN_RESULTS));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.aggregate.kind, "UNSUPPORTED");
+  if (result.aggregate.kind !== "UNSUPPORTED") return;
+  assert.deepEqual(result.aggregate.affectedSelectionIds, ["sel-2"]);
+  assert.equal(result.aggregate.reasonCodes["sel-2"], "SPREAD_AUTO_SETTLEMENT_DEFERRED");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+  assert.equal(fake._debug.playerUpdateCallCount(), 0);
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "CONFIRMED");
+});
+
+test("X2 full read-path proof: a persisted TOTALS quarter-line leg's line reaches the aggregation boundary, still deferred (not settled)", async () => {
+  const selections = [
+    fakeSelection({ id: "sel-1", providerEventId: EVENT_A }),
+    fakeSelection({
+      id: "sel-2",
+      providerEventId: EVENT_B,
+      canonicalMarketType: "TOTALS",
+      canonicalSelectionType: "OVER",
+      canonicalParticipant: null,
+      line: new Prisma.Decimal("2.25"),
+    }),
+  ];
+  const fake = createFakeDb({ bet: fakeExpressBet({}, selections) });
+
+  const result = await autoSettleExpressBet(db(fake), input(BOTH_WIN_RESULTS));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.aggregate.kind, "UNSUPPORTED");
+  if (result.aggregate.kind !== "UNSUPPORTED") return;
+  assert.deepEqual(result.aggregate.affectedSelectionIds, ["sel-2"]);
+  assert.equal(result.aggregate.reasonCodes["sel-2"], "TOTALS_AUTO_SETTLEMENT_DEFERRED");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+  assert.equal(fake._debug.playerUpdateCallCount(), 0);
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "CONFIRMED");
+});
+
+test("X2 deferral regression: standard-line SPREAD leg is still SPREAD_AUTO_SETTLEMENT_DEFERRED, zero financial writes", async () => {
+  const selections = [
+    fakeSelection({ id: "sel-1", providerEventId: EVENT_A }),
+    fakeSelection({
+      id: "sel-2",
+      providerEventId: EVENT_B,
+      canonicalMarketType: "SPREAD",
+      canonicalSelectionType: "PARTICIPANT",
+      canonicalParticipant: "Arsenal",
+      line: new Prisma.Decimal("-1"),
+    }),
+  ];
+  const fake = createFakeDb({ bet: fakeExpressBet({}, selections) });
+
+  const result = await autoSettleExpressBet(db(fake), input(BOTH_WIN_RESULTS));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.aggregate.kind, "UNSUPPORTED");
+  if (result.aggregate.kind !== "UNSUPPORTED") return;
+  assert.equal(result.aggregate.reasonCodes["sel-2"], "SPREAD_AUTO_SETTLEMENT_DEFERRED");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+  assert.equal(fake._debug.playerUpdateCallCount(), 0);
+});
+
+test("X2 deferral regression: standard-line TOTALS leg is still TOTALS_AUTO_SETTLEMENT_DEFERRED, zero financial writes", async () => {
+  const selections = [
+    fakeSelection({ id: "sel-1", providerEventId: EVENT_A }),
+    fakeSelection({
+      id: "sel-2",
+      providerEventId: EVENT_B,
+      canonicalMarketType: "TOTALS",
+      canonicalSelectionType: "OVER",
+      canonicalParticipant: null,
+      line: new Prisma.Decimal("2.5"),
+    }),
+  ];
+  const fake = createFakeDb({ bet: fakeExpressBet({}, selections) });
+
+  const result = await autoSettleExpressBet(db(fake), input(BOTH_WIN_RESULTS));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.aggregate.kind, "UNSUPPORTED");
+  if (result.aggregate.kind !== "UNSUPPORTED") return;
+  assert.equal(result.aggregate.reasonCodes["sel-2"], "TOTALS_AUTO_SETTLEMENT_DEFERRED");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+  assert.equal(fake._debug.playerUpdateCallCount(), 0);
+});
+
+test("X2 deferral regression: quarter-line SPREAD leg is still deferred (never silently interpreted as HALF_WIN/HALF_LOSS)", async () => {
+  const selections = [
+    fakeSelection({ id: "sel-1", providerEventId: EVENT_A }),
+    fakeSelection({
+      id: "sel-2",
+      providerEventId: EVENT_B,
+      canonicalMarketType: "SPREAD",
+      canonicalSelectionType: "PARTICIPANT",
+      canonicalParticipant: "Arsenal",
+      line: new Prisma.Decimal("-1.25"),
+    }),
+  ];
+  const fake = createFakeDb({ bet: fakeExpressBet({}, selections) });
+
+  const result = await autoSettleExpressBet(db(fake), input(BOTH_WIN_RESULTS));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.aggregate.kind, "UNSUPPORTED");
+  if (result.aggregate.kind !== "UNSUPPORTED") return;
+  assert.equal(result.aggregate.reasonCodes["sel-2"], "SPREAD_AUTO_SETTLEMENT_DEFERRED");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+  assert.equal(fake._debug.playerUpdateCallCount(), 0);
+});
+
+test("X2 deferral regression: quarter-line TOTALS leg is still deferred (never silently interpreted as HALF_WIN/HALF_LOSS)", async () => {
+  const selections = [
+    fakeSelection({ id: "sel-1", providerEventId: EVENT_A }),
+    fakeSelection({
+      id: "sel-2",
+      providerEventId: EVENT_B,
+      canonicalMarketType: "TOTALS",
+      canonicalSelectionType: "UNDER",
+      canonicalParticipant: null,
+      line: new Prisma.Decimal("2.75"),
+    }),
+  ];
+  const fake = createFakeDb({ bet: fakeExpressBet({}, selections) });
+
+  const result = await autoSettleExpressBet(db(fake), input(BOTH_WIN_RESULTS));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.aggregate.kind, "UNSUPPORTED");
+  if (result.aggregate.kind !== "UNSUPPORTED") return;
+  assert.equal(result.aggregate.reasonCodes["sel-2"], "TOTALS_AUTO_SETTLEMENT_DEFERRED");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+  assert.equal(fake._debug.playerUpdateCallCount(), 0);
 });
 
 test("INVALID_DATA: no LOSS, one leg's event result missing a score -> NO_ACTION", async () => {

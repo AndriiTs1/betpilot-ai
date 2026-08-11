@@ -21,7 +21,19 @@
 // placeholder (sport "UNKNOWN", name "", participants []), never parsed
 // from BetSelection.event/.outcome (which aren't even accepted as inputs
 // here, so there is no way for them to leak into a decision).
+//
+// X2 — BetSelection.line threaded through, same pattern as
+// mapSingleBetToCanonicalSelection.ts's own `line` field: converted with
+// Prisma.Decimal's own .toString() (decimal.js, no rounding, no reformatting
+// beyond what's already stored — never Number()/parseFloat()/toFixed()), so
+// -1.25 stays "-1.25" and 2.5 stays "2.5". This alone does not enable SPREAD/
+// TOTALS EXPRESS settlement — aggregateExpressOutcome.ts's own
+// SPREAD_AUTO_SETTLEMENT_DEFERRED/TOTALS_AUTO_SETTLEMENT_DEFERRED guards are
+// unchanged and still turn those legs away before this value is ever read
+// for a settlement decision. This is purely making the already-persisted
+// value available to a future evaluator, not a behavior change.
 
+import { Prisma } from "@/lib/generated/prisma/client";
 import { isMarketType, isPeriod, isSelectionType, type CanonicalSelection } from "@/lib/odds/domain";
 
 export interface ExpressSelectionCanonicalFields {
@@ -29,12 +41,14 @@ export interface ExpressSelectionCanonicalFields {
   readonly canonicalSelectionType: string | null;
   readonly canonicalParticipant: string | null;
   readonly canonicalPeriod: string | null;
+  // X2 — BetSelection.line (Decimal(5,2), see prisma/schema.prisma).
+  readonly line: Prisma.Decimal | null;
 }
 
 export function mapExpressSelectionToCanonicalSelection(
   selection: ExpressSelectionCanonicalFields,
 ): CanonicalSelection | null {
-  const { canonicalMarketType, canonicalSelectionType, canonicalPeriod, canonicalParticipant } = selection;
+  const { canonicalMarketType, canonicalSelectionType, canonicalPeriod, canonicalParticipant, line } = selection;
 
   if (canonicalMarketType === null || !isMarketType(canonicalMarketType)) return null;
   if (canonicalSelectionType === null || !isSelectionType(canonicalSelectionType)) return null;
@@ -52,5 +66,6 @@ export function mapExpressSelectionToCanonicalSelection(
     period: canonicalPeriod,
     selectionType: canonicalSelectionType,
     participant: canonicalParticipant !== null ? { name: canonicalParticipant } : undefined,
+    line: line !== null ? line.toString() : undefined,
   };
 }
