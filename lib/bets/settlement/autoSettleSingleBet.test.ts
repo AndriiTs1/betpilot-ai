@@ -325,7 +325,10 @@ test("B: INVALID_DATA (missing score on COMPLETED) -> NO_ACTION", async () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* H4-B2 — SPREAD is evaluator-only, deferred here regardless of outcome     */
+/* H4-B6 — SINGLE SPREAD auto-settlement ENABLED. The H4-B2/H4-B5 deferral   */
+/* guard is gone; every WIN/LOSS/VOID/HALF_WIN/HALF_LOSS outcome the         */
+/* evaluator can produce for SPREAD now reaches real settleBet() financial   */
+/* settlement, exactly like every other market.                             */
 /* -------------------------------------------------------------------------- */
 
 function spreadBet(line: string, overrides: Partial<FakeBetRow> = {}) {
@@ -338,56 +341,330 @@ function spreadBet(line: string, overrides: Partial<FakeBetRow> = {}) {
   });
 }
 
-test("H4-B2: a full-margin SPREAD WIN (Arsenal -1, wins by 2) is deferred to NO_ACTION, never auto-settled — proves this stage changes no production financial behavior for SPREAD", async () => {
-  const fake = createFakeDb({ bet: spreadBet("-1") });
-  const result = await autoSettleSingleBet(db(fake), input({ eventResult: homeWinResult({ homeScore: 2, awayScore: 0 }) }));
+// Arsenal (home) vs Coventry City (away) — the fixture this whole H4-B5.x
+// production investigation used throughout, reused here for continuity.
+function arsenalCoventryResult(homeScore: number, awayScore: number): CanonicalEventResult {
+  return {
+    status: "COMPLETED",
+    homeParticipant: { name: "Arsenal" },
+    awayParticipant: { name: "Coventry City" },
+    homeScore,
+    awayScore,
+  };
+}
+
+function coventryBet(line: string, overrides: Partial<FakeBetRow> = {}) {
+  return spreadBet(line, { canonicalParticipant: "Coventry City", ...overrides });
+}
+
+async function assertSpreadSettles(
+  fakeDbBet: FakeBetRow,
+  homeScore: number,
+  awayScore: number,
+  expectedStatus: BetStatus,
+  expectedOutcome: "WIN" | "LOSS" | "VOID" | "HALF_WIN" | "HALF_LOSS",
+) {
+  const fake = createFakeDb({ bet: fakeDbBet });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: arsenalCoventryResult(homeScore, awayScore) }));
+
+  assert.equal(result.kind, "SETTLED", `expected SETTLED, got ${JSON.stringify(result)}`);
+  if (result.kind !== "SETTLED") return;
+  assert.equal(result.outcome, expectedOutcome);
+  assert.equal(result.finalStatus, expectedStatus);
+  assert.equal(fake._debug.getBet(BET_ID)?.status, expectedStatus);
+  assert.equal(fake._debug.transactionCreateCallCount(), 1);
+}
+
+/* --- Standard lines --------------------------------------------------- */
+
+test("H4-B6 standard: Arsenal -1.5, wins by 2 -> SETTLED_WIN", async () => {
+  await assertSpreadSettles(spreadBet("-1.5"), 2, 0, "SETTLED_WIN", "WIN");
+});
+
+test("H4-B6 standard: Arsenal -1.5, wins by 1 -> SETTLED_LOSS", async () => {
+  await assertSpreadSettles(spreadBet("-1.5"), 1, 0, "SETTLED_LOSS", "LOSS");
+});
+
+test("H4-B6 standard: Arsenal -1, wins by 2 -> SETTLED_WIN", async () => {
+  await assertSpreadSettles(spreadBet("-1"), 2, 0, "SETTLED_WIN", "WIN");
+});
+
+test("H4-B6 standard: Arsenal -1, wins by 1 -> VOID (push)", async () => {
+  await assertSpreadSettles(spreadBet("-1"), 1, 0, "VOID", "VOID");
+});
+
+test("H4-B6 standard: Arsenal -1, draw -> SETTLED_LOSS", async () => {
+  await assertSpreadSettles(spreadBet("-1"), 0, 0, "SETTLED_LOSS", "LOSS");
+});
+
+test("H4-B6 standard: Coventry +1.5, loses by 1 -> SETTLED_WIN", async () => {
+  await assertSpreadSettles(coventryBet("1.5"), 1, 0, "SETTLED_WIN", "WIN");
+});
+
+test("H4-B6 standard: Coventry +1.5, loses by 2 -> SETTLED_LOSS", async () => {
+  await assertSpreadSettles(coventryBet("1.5"), 2, 0, "SETTLED_LOSS", "LOSS");
+});
+
+/* --- Quarter lines ------------------------------------------------------ */
+
+test("H4-B6 quarter: Arsenal -1.25, wins by 2 -> SETTLED_WIN", async () => {
+  await assertSpreadSettles(spreadBet("-1.25"), 2, 0, "SETTLED_WIN", "WIN");
+});
+
+test("H4-B6 quarter: Arsenal -1.25, wins by 1 -> SETTLED_HALF_LOSS", async () => {
+  await assertSpreadSettles(spreadBet("-1.25"), 1, 0, "SETTLED_HALF_LOSS", "HALF_LOSS");
+});
+
+test("H4-B6 quarter: Arsenal -1.25, draw -> SETTLED_LOSS", async () => {
+  await assertSpreadSettles(spreadBet("-1.25"), 0, 0, "SETTLED_LOSS", "LOSS");
+});
+
+test("H4-B6 quarter: Arsenal -0.75, wins by 2 -> SETTLED_WIN", async () => {
+  await assertSpreadSettles(spreadBet("-0.75"), 2, 0, "SETTLED_WIN", "WIN");
+});
+
+test("H4-B6 quarter: Arsenal -0.75, wins by 1 -> SETTLED_HALF_WIN", async () => {
+  await assertSpreadSettles(spreadBet("-0.75"), 1, 0, "SETTLED_HALF_WIN", "HALF_WIN");
+});
+
+test("H4-B6 quarter: Arsenal -0.75, draw -> SETTLED_LOSS", async () => {
+  await assertSpreadSettles(spreadBet("-0.75"), 0, 0, "SETTLED_LOSS", "LOSS");
+});
+
+test("H4-B6 quarter: Coventry +1.25, loses by 1 -> SETTLED_HALF_WIN", async () => {
+  await assertSpreadSettles(coventryBet("1.25"), 1, 0, "SETTLED_HALF_WIN", "HALF_WIN");
+});
+
+test("H4-B6 quarter: Coventry +1.25, loses by 2 -> SETTLED_LOSS", async () => {
+  await assertSpreadSettles(coventryBet("1.25"), 2, 0, "SETTLED_LOSS", "LOSS");
+});
+
+test("H4-B6 quarter: Coventry +1.25, draw -> SETTLED_WIN", async () => {
+  await assertSpreadSettles(coventryBet("1.25"), 0, 0, "SETTLED_WIN", "WIN");
+});
+
+test("H4-B6 quarter: Coventry +1.25, Coventry wins by 1 -> SETTLED_WIN", async () => {
+  await assertSpreadSettles(coventryBet("1.25"), 0, 1, "SETTLED_WIN", "WIN");
+});
+
+test("H4-B6 quarter: Coventry +0.75, loses by 1 -> SETTLED_HALF_LOSS", async () => {
+  await assertSpreadSettles(coventryBet("0.75"), 1, 0, "SETTLED_HALF_LOSS", "HALF_LOSS");
+});
+
+test("H4-B6 quarter: Coventry +0.75, draw -> SETTLED_WIN", async () => {
+  await assertSpreadSettles(coventryBet("0.75"), 0, 0, "SETTLED_WIN", "WIN");
+});
+
+/* --- Additional quarter-grid regression: ±0.25, ±1.75 ------------------- */
+
+test("H4-B6 quarter-grid: Arsenal -0.25, wins by 1 -> SETTLED_WIN", async () => {
+  await assertSpreadSettles(spreadBet("-0.25"), 1, 0, "SETTLED_WIN", "WIN");
+});
+
+test("H4-B6 quarter-grid: Coventry +0.25, draw -> SETTLED_HALF_WIN", async () => {
+  await assertSpreadSettles(coventryBet("0.25"), 0, 0, "SETTLED_HALF_WIN", "HALF_WIN");
+});
+
+test("H4-B6 quarter-grid: Arsenal -1.75, wins by 2 -> SETTLED_HALF_WIN", async () => {
+  await assertSpreadSettles(spreadBet("-1.75"), 2, 0, "SETTLED_HALF_WIN", "HALF_WIN");
+});
+
+test("H4-B6 quarter-grid: Coventry +1.75, loses by 2 -> SETTLED_HALF_LOSS", async () => {
+  await assertSpreadSettles(coventryBet("1.75"), 2, 0, "SETTLED_HALF_LOSS", "HALF_LOSS");
+});
+
+/* -------------------------------------------------------------------------- */
+/* H4-B6 — financial integration proofs. Not merely which target was        */
+/* requested: the actual settleBet()-computed credit delta and Transaction   */
+/* row, reached end-to-end through autoSettleSingleBet(), for the exact      */
+/* worked examples this stage's own task spec names.                        */
+/* -------------------------------------------------------------------------- */
+
+test("H4-B6 financial: stake 100 @ 2.00, HALF_WIN -> credit delta +50, Transaction BET_PAYOUT +50", async () => {
+  const fake = createFakeDb({
+    bet: spreadBet("-0.75", { stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("2.00"), odds: new Prisma.Decimal("2.00") }),
+  });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: arsenalCoventryResult(1, 0) }));
+
+  assert.equal(result.kind, "SETTLED");
+  if (result.kind !== "SETTLED") return;
+  assert.equal(result.finalStatus, "SETTLED_HALF_WIN");
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "50");
+  assert.equal(fake._debug.transactions()[0]?.type, "BET_PAYOUT");
+  assert.equal(fake._debug.transactions()[0]?.amount.toString(), "50");
+});
+
+test("H4-B6 financial: stake 100, HALF_LOSS -> credit delta -50, Transaction BET_STAKE -50", async () => {
+  const fake = createFakeDb({ bet: spreadBet("-1.25", { stake: new Prisma.Decimal(100) }) });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: arsenalCoventryResult(1, 0) }));
+
+  assert.equal(result.kind, "SETTLED");
+  if (result.kind !== "SETTLED") return;
+  assert.equal(result.finalStatus, "SETTLED_HALF_LOSS");
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "-50");
+  assert.equal(fake._debug.transactions()[0]?.type, "BET_STAKE");
+  assert.equal(fake._debug.transactions()[0]?.amount.toString(), "-50");
+});
+
+test("H4-B6 financial: full WIN/LOSS/VOID SPREAD outcomes continue using existing settleBet financial behavior unchanged", async () => {
+  // WIN: stake 100 @ 2.10 (fakeBet's own default odds) -> netProfit 110.
+  const winFake = createFakeDb({ bet: spreadBet("-1.5", { stake: new Prisma.Decimal(100) }) });
+  await autoSettleSingleBet(db(winFake), input({ eventResult: arsenalCoventryResult(2, 0) }));
+  assert.equal(winFake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "110");
+  assert.equal(winFake._debug.transactions()[0]?.type, "BET_PAYOUT");
+
+  // LOSS: stake deducted in full, negative delta.
+  const lossFake = createFakeDb({ bet: spreadBet("-1.5", { stake: new Prisma.Decimal(100) }) });
+  await autoSettleSingleBet(db(lossFake), input({ eventResult: arsenalCoventryResult(1, 0) }));
+  assert.equal(lossFake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "-100");
+  assert.equal(lossFake._debug.transactions()[0]?.type, "BET_STAKE");
+
+  // VOID: zero delta, but a real Transaction row still exists for audit.
+  const voidFake = createFakeDb({ bet: spreadBet("-1", { stake: new Prisma.Decimal(100) }) });
+  await autoSettleSingleBet(db(voidFake), input({ eventResult: arsenalCoventryResult(1, 0) }));
+  assert.equal(voidFake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "0");
+  assert.equal(voidFake._debug.transactionCreateCallCount(), 1);
+});
+
+/* -------------------------------------------------------------------------- */
+/* H4-B6 — idempotency: repeated settlement of a HALF_WIN/HALF_LOSS SPREAD   */
+/* bet produces zero duplicate Transaction rows and zero double balance      */
+/* mutation, exactly like the pre-existing WIN idempotency proof.            */
+/* -------------------------------------------------------------------------- */
+
+test("H4-B6 idempotency: a HALF_WIN SPREAD bet settled twice creates exactly one Transaction and one balance mutation", async () => {
+  const fake = createFakeDb({ bet: spreadBet("-0.75", { stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("2.00") }) });
+  const eventResult = arsenalCoventryResult(1, 0);
+
+  const first = await autoSettleSingleBet(db(fake), input({ eventResult }));
+  assert.equal(first.kind, "SETTLED");
+  if (first.kind !== "SETTLED") return;
+  assert.equal(first.idempotent, false);
+
+  const balanceAfterFirst = fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString();
+  const txCountAfterFirst = fake._debug.transactionCreateCallCount();
+
+  const second = await autoSettleSingleBet(db(fake), input({ eventResult }));
+  assert.equal(second.kind, "SETTLED");
+  if (second.kind !== "SETTLED") return;
+  assert.equal(second.idempotent, true);
+  assert.equal(second.finalStatus, "SETTLED_HALF_WIN");
+
+  assert.equal(fake._debug.transactionCreateCallCount(), txCountAfterFirst);
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), balanceAfterFirst);
+});
+
+test("H4-B6 idempotency: a HALF_LOSS SPREAD bet settled twice creates exactly one Transaction and one balance mutation", async () => {
+  const fake = createFakeDb({ bet: spreadBet("-1.25", { stake: new Prisma.Decimal(100) }) });
+  const eventResult = arsenalCoventryResult(1, 0);
+
+  const first = await autoSettleSingleBet(db(fake), input({ eventResult }));
+  assert.equal(first.kind, "SETTLED");
+  if (first.kind !== "SETTLED") return;
+
+  const balanceAfterFirst = fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString();
+  const txCountAfterFirst = fake._debug.transactionCreateCallCount();
+
+  const second = await autoSettleSingleBet(db(fake), input({ eventResult }));
+  assert.equal(second.kind, "SETTLED");
+  if (second.kind !== "SETTLED") return;
+  assert.equal(second.idempotent, true);
+
+  assert.equal(fake._debug.transactionCreateCallCount(), txCountAfterFirst);
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), balanceAfterFirst);
+});
+
+/* -------------------------------------------------------------------------- */
+/* H4-B6 — fail-closed: every evaluator INVALID_DATA/UNSUPPORTED reason for  */
+/* SPREAD must still produce ZERO financial writes, exactly as it already    */
+/* does for MONEYLINE. Never guess a result.                                 */
+/* -------------------------------------------------------------------------- */
+
+test("H4-B6 fail-closed: missing line -> NO_ACTION MISSING_LINE, zero writes", async () => {
+  const fake = createFakeDb({ bet: spreadBet("-1", { line: null }) });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: arsenalCoventryResult(2, 0) }));
 
   assert.equal(result.kind, "NO_ACTION");
   if (result.kind !== "NO_ACTION") return;
-  assert.equal(result.reasonCode, "SPREAD_AUTO_SETTLEMENT_DEFERRED");
+  assert.equal(result.reasonCode, "MISSING_LINE");
   assert.equal(fake._debug.transactionCreateCallCount(), 0);
   assert.equal(fake._debug.playerUpdateCallCount(), 0);
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "CONFIRMED");
 });
 
-test("H4-B2: a quarter-line SPREAD HALF_WIN (Arsenal -0.75, wins by 1) is deferred to NO_ACTION, never mapped to WIN/LOSS/VOID and never settled", async () => {
-  const fake = createFakeDb({ bet: spreadBet("-0.75") });
-  const result = await autoSettleSingleBet(db(fake), input({ eventResult: homeWinResult({ homeScore: 1, awayScore: 0 }) }));
+test("H4-B6 fail-closed: off-grid line (-1.33) -> NO_ACTION INVALID_LINE, zero writes, never rounded to the nearest supported line", async () => {
+  const fake = createFakeDb({ bet: spreadBet("-1.33") });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: arsenalCoventryResult(2, 0) }));
 
   assert.equal(result.kind, "NO_ACTION");
   if (result.kind !== "NO_ACTION") return;
-  assert.equal(result.reasonCode, "SPREAD_AUTO_SETTLEMENT_DEFERRED");
+  assert.equal(result.reasonCode, "INVALID_LINE");
   assert.equal(fake._debug.transactionCreateCallCount(), 0);
-  assert.equal(fake._debug.playerUpdateCallCount(), 0);
 });
 
-test("H4-B5: a CONFIRMED quarter-line SPREAD -1.25 (Arsenal -1.25, wins by 2 — a clean full-margin WIN under the evaluator) is still deferred to NO_ACTION, never auto-settled — H4-B5 enables verification/confirmation only, not settlement", async () => {
-  const fake = createFakeDb({ bet: spreadBet("-1.25") });
-  const result = await autoSettleSingleBet(db(fake), input({ eventResult: homeWinResult({ homeScore: 2, awayScore: 0 }) }));
+test("H4-B6 fail-closed: participant mismatch (canonicalParticipant matches neither team) -> NO_ACTION PARTICIPANT_MISMATCH, zero writes", async () => {
+  const fake = createFakeDb({ bet: spreadBet("-1.5", { canonicalParticipant: "Real Madrid" }) });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: arsenalCoventryResult(2, 0) }));
 
   assert.equal(result.kind, "NO_ACTION");
   if (result.kind !== "NO_ACTION") return;
-  assert.equal(result.reasonCode, "SPREAD_AUTO_SETTLEMENT_DEFERRED");
+  assert.equal(result.reasonCode, "PARTICIPANT_MISMATCH");
   assert.equal(fake._debug.transactionCreateCallCount(), 0);
-  assert.equal(fake._debug.playerUpdateCallCount(), 0);
 });
 
-test("H4-B2: a full-margin SPREAD LOSS (Arsenal -1.5, wins by 1) is also deferred to NO_ACTION, not auto-settled as a loss either", async () => {
+test("H4-B6 fail-closed: ambiguous participant (name overlaps both teams) -> NO_ACTION AMBIGUOUS_PARTICIPANT_MATCH, zero writes", async () => {
+  const fake = createFakeDb({ bet: spreadBet("-1.5", { canonicalParticipant: "City" }) });
+  const result = await autoSettleSingleBet(
+    db(fake),
+    input({
+      eventResult: {
+        status: "COMPLETED",
+        homeParticipant: { name: "Manchester City" },
+        awayParticipant: { name: "Coventry City" },
+        homeScore: 2,
+        awayScore: 0,
+      },
+    }),
+  );
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.reasonCode, "AMBIGUOUS_PARTICIPANT_MATCH");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("H4-B6 fail-closed: invalid score (missing) on a SPREAD bet -> NO_ACTION MISSING_SCORE, zero writes", async () => {
   const fake = createFakeDb({ bet: spreadBet("-1.5") });
-  const result = await autoSettleSingleBet(db(fake), input({ eventResult: homeWinResult({ homeScore: 1, awayScore: 0 }) }));
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: { ...arsenalCoventryResult(2, 0), homeScore: null } }));
 
   assert.equal(result.kind, "NO_ACTION");
   if (result.kind !== "NO_ACTION") return;
-  assert.equal(result.reasonCode, "SPREAD_AUTO_SETTLEMENT_DEFERRED");
+  assert.equal(result.reasonCode, "MISSING_SCORE");
   assert.equal(fake._debug.transactionCreateCallCount(), 0);
 });
 
-test("H4-B2: a SPREAD push (Arsenal -1, wins by exactly 1) is also deferred to NO_ACTION, not auto-voided", async () => {
-  const fake = createFakeDb({ bet: spreadBet("-1") });
-  const result = await autoSettleSingleBet(db(fake), input({ eventResult: homeWinResult({ homeScore: 1, awayScore: 0 }) }));
+test("H4-B6 fail-closed: invalid event result (blank participant names) on a SPREAD bet -> NO_ACTION INVALID_EVENT_RESULT, zero writes", async () => {
+  const fake = createFakeDb({ bet: spreadBet("-1.5") });
+  const result = await autoSettleSingleBet(
+    db(fake),
+    input({
+      eventResult: { status: "COMPLETED", homeParticipant: { name: "" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 0 },
+    }),
+  );
 
   assert.equal(result.kind, "NO_ACTION");
   if (result.kind !== "NO_ACTION") return;
-  assert.equal(result.reasonCode, "SPREAD_AUTO_SETTLEMENT_DEFERRED");
+  assert.equal(result.reasonCode, "INVALID_EVENT_RESULT");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("H4-B6 fail-closed: SPREAD with an unsupported selectionType (not PARTICIPANT) -> NO_ACTION UNSUPPORTED_SELECTION, zero writes", async () => {
+  const fake = createFakeDb({ bet: spreadBet("-1.5", { canonicalSelectionType: "HOME" }) });
+  const result = await autoSettleSingleBet(db(fake), input({ eventResult: arsenalCoventryResult(2, 0) }));
+
+  assert.equal(result.kind, "NO_ACTION");
+  if (result.kind !== "NO_ACTION") return;
+  assert.equal(result.reasonCode, "UNSUPPORTED_SELECTION");
   assert.equal(fake._debug.transactionCreateCallCount(), 0);
 });
 

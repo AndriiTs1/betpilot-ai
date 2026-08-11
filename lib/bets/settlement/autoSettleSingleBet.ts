@@ -52,7 +52,9 @@ export type AutoSettleSingleBetResult =
   | {
       readonly kind: "SETTLED";
       readonly betId: string;
-      readonly outcome: "WIN" | "LOSS" | "VOID";
+      // H4-B6 — HALF_WIN/HALF_LOSS joined WIN/LOSS/VOID: SINGLE SPREAD can
+      // now reach real financial settlement (see settlementTargetFor below).
+      readonly outcome: "WIN" | "LOSS" | "VOID" | "HALF_WIN" | "HALF_LOSS";
       readonly previousStatus: string;
       readonly finalStatus: SettlementTarget;
       readonly idempotent: boolean;
@@ -79,7 +81,23 @@ export interface AutoSettleSingleBetInput {
 // through the existing, unrelated confirm route first; REJECTED is
 // terminal) — this is a cheap short-circuit that mirrors settlementRules.ts
 // exactly, not new business logic layered on top of it.
-const ELIGIBLE_BET_STATUSES: ReadonlySet<string> = new Set(["CONFIRMED", "SETTLED_WIN", "SETTLED_LOSS", "VOID"]);
+//
+// H4-B6 — SETTLED_HALF_WIN/SETTLED_HALF_LOSS added alongside SETTLED_WIN/
+// SETTLED_LOSS/VOID: now that SINGLE SPREAD can reach real settlement, a
+// bet already half-settled must remain eligible for a REPEATED settlement
+// attempt (e.g. a re-run poll cycle) so settleBet()'s own idempotency check
+// can run and correctly return IDEMPOTENT — mirroring decideSettlementTransition's
+// (settlementRules.ts) already-widened terminal-status recognition exactly.
+// Without this, a second call after a HALF_WIN/HALF_LOSS would be rejected
+// here as UNSUPPORTED_BET_STATUS before ever reaching that idempotency path.
+const ELIGIBLE_BET_STATUSES: ReadonlySet<string> = new Set([
+  "CONFIRMED",
+  "SETTLED_WIN",
+  "SETTLED_LOSS",
+  "VOID",
+  "SETTLED_HALF_WIN",
+  "SETTLED_HALF_LOSS",
+]);
 
 export interface AutoSettlementEligibilityInput {
   readonly type: string;
@@ -120,9 +138,19 @@ export function validateAutoSettlementEligibility(
 /* Evaluator outcome -> settlement target                                     */
 /* -------------------------------------------------------------------------- */
 
-function settlementTargetFor(outcome: "WIN" | "LOSS" | "VOID"): SettlementTarget {
+// H4-B6 — widened from WIN/LOSS/VOID to also map HALF_WIN/HALF_LOSS, now
+// that settleBet()'s computeSettlementFinancials (H4-B3) has real,
+// exhaustively-tested Decimal math for SETTLED_HALF_WIN/SETTLED_HALF_LOSS
+// and decideSettlementTransition (settlementRules.ts, H4-B3) already
+// structurally accepts them as an internal requestedStatus via
+// isInternalSettlementTarget. This function performs NO financial
+// computation itself — it only names which existing settleBet() target
+// corresponds to which evaluator outcome; the money is settleBet()'s alone.
+function settlementTargetFor(outcome: "WIN" | "LOSS" | "VOID" | "HALF_WIN" | "HALF_LOSS"): SettlementTarget {
   if (outcome === "WIN") return "SETTLED_WIN";
   if (outcome === "LOSS") return "SETTLED_LOSS";
+  if (outcome === "HALF_WIN") return "SETTLED_HALF_WIN";
+  if (outcome === "HALF_LOSS") return "SETTLED_HALF_LOSS";
   return "VOID";
 }
 
@@ -172,28 +200,29 @@ export async function autoSettleSingleBet(
     return { kind: "REJECTED", betId, reasonCode: "MISSING_CANONICAL_METADATA" };
   }
 
-  // H4-B2 — SPREAD is evaluator-only in this stage, deliberately not wired
-  // through to real auto-settlement yet, even for a full (non-quarter-line)
-  // WIN/LOSS/VOID outcome. Before this stage, evaluateSelectionOutcome()
-  // always returned UNSUPPORTED_MARKET for SPREAD, so
-  // lib/bets/settlement/pollConfirmedBetResults.ts's loadEligibleSingleBets()
-  // — which filters only on type/status/eventStartTime, not market type —
-  // has never actually auto-settled a SPREAD bet in production. Now that
-  // the evaluator can produce a real WIN/LOSS/VOID/HALF_WIN/HALF_LOSS for
-  // SPREAD, letting it flow through unchanged would silently start
-  // auto-settling whole/half-line SPREAD bets for the first time — a real
-  // production financial behavior change this stage does not have review
-  // for. Deferred here, checked on selection.marketType directly (not
-  // evaluation.kind), so it applies uniformly regardless of which outcome
-  // the evaluator produced. Enabling it is a distinct, later, explicitly-
-  // reviewed stage's decision (see this stage's own H4-B plan).
-  if (selection.marketType === "SPREAD") {
-    return { kind: "NO_ACTION", betId, reasonCode: "SPREAD_AUTO_SETTLEMENT_DEFERRED" };
-  }
-
+  // H4-B6 — the H4-B2/H4-B5 SPREAD deferral (`selection.marketType ===
+  // "SPREAD" -> NO_ACTION SPREAD_AUTO_SETTLEMENT_DEFERRED`) is removed here:
+  // it existed only because settleBet()/settlementRules.ts had no financial
+  // execution support for SETTLED_HALF_WIN/SETTLED_HALF_LOSS yet. H4-B3 gave
+  // both real, exhaustively-tested Decimal math (settleBet.test.ts), and
+  // H4-B5/H4-B5.x production-verified SPREAD provider matching end-to-end
+  // (standard and quarter lines, exact-line safety, no rounding/nearest-line
+  // guessing). Every WIN/LOSS/VOID/HALF_WIN/HALF_LOSS outcome the evaluator
+  // can now produce for SPREAD — for standard AND quarter lines alike — is
+  // handled uniformly below, exactly like every other market this function
+  // already settles. EXPRESS SPREAD is a separate, independent guard in
+  // lib/bets/settlement/aggregateExpressOutcome.ts, untouched by this
+  // change. Any evaluation kind still outside the five settleable outcomes
+  // (WAITING/UNSUPPORTED/INVALID_DATA) remains NO_ACTION, unchanged.
   const evaluation = evaluateSelectionOutcome(eventResult, selection);
 
-  if (evaluation.kind !== "WIN" && evaluation.kind !== "LOSS" && evaluation.kind !== "VOID") {
+  if (
+    evaluation.kind !== "WIN" &&
+    evaluation.kind !== "LOSS" &&
+    evaluation.kind !== "VOID" &&
+    evaluation.kind !== "HALF_WIN" &&
+    evaluation.kind !== "HALF_LOSS"
+  ) {
     return { kind: "NO_ACTION", betId, reasonCode: evaluation.reasonCode };
   }
 
