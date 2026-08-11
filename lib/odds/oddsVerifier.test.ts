@@ -1433,6 +1433,33 @@ test("Phase 3.1 lookup: fallback bookmaker behavior remains correct — no Pinna
   assert.equal(result.isFallbackBookmaker, true);
 });
 
+/* -------------------------------------------------------------------------- */
+/* H4-B5.6 — TOTALS regression: normalizeLineString is shared by             */
+/* findTotalsOutcome too (via canonicalizeProviderPoint), so the same         */
+/* trailing-zero equivalence must hold here, with the same exact-line        */
+/* safety guarantee (2.25 must never equal 2.5; 2.75 must never equal 3).    */
+/* This stage does not implement Asian Totals — only decimal-string          */
+/* representation equivalence for the totals lines already supported.       */
+/* -------------------------------------------------------------------------- */
+
+test("H4-B5.6 TOTALS: requested '2.0' matches a provider point of 2 (whole-number trailing zero)", () => {
+  const event = totalsEvent("Arsenal", "Chelsea", [pinnacleTotalsBookmaker([totalsOutcome("Over", 1.85, 2)])]);
+  assert.equal(findTotalsOutcome(event, "OVER", "2.0").kind, "MATCHED");
+});
+
+test("H4-B5.6 TOTALS: requested '2.50' matches a provider point of 2.5 (half-line trailing zero)", () => {
+  const event = totalsEvent("Arsenal", "Chelsea", [pinnacleTotalsBookmaker([totalsOutcome("Over", 1.85, 2.5)])]);
+  assert.equal(findTotalsOutcome(event, "OVER", "2.50").kind, "MATCHED");
+});
+
+test("H4-B5.6 TOTALS: exact-line safety preserved — 2.25 never matches a provider point of 2.5, and 2.75 never matches 3", () => {
+  const quarterEvent = totalsEvent("Arsenal", "Chelsea", [pinnacleTotalsBookmaker([totalsOutcome("Over", 1.85, 2.5)])]);
+  assert.equal(findTotalsOutcome(quarterEvent, "OVER", "2.25").kind, "LINE_NOT_AVAILABLE");
+
+  const threeEvent = totalsEvent("Arsenal", "Chelsea", [pinnacleTotalsBookmaker([totalsOutcome("Over", 1.85, 3)])]);
+  assert.equal(findTotalsOutcome(threeEvent, "OVER", "2.75").kind, "LINE_NOT_AVAILABLE");
+});
+
 /* ============================================================================
  * Betting Markets V1, Phase 3.3 — verifyTotalsOdds(): the full fetch ->
  * event-match -> findTotalsOutcome pipeline, mirroring verifyOdds()'s own
@@ -1831,6 +1858,94 @@ test("findSpreadOutcome: fallback bookmaker behavior — no Pinnacle present, fa
   assert.equal(result.bookmaker, "Bet365");
   assert.equal(result.price, 1.8);
   assert.equal(result.isFallbackBookmaker, true);
+});
+
+/* -------------------------------------------------------------------------- */
+/* H4-B5.6 — live production bug fix: a requested line of "-2.0" and a       */
+/* provider point of -2 (a JS number, which canonicalizes via String(-2) ->  */
+/* "-2", never "-2.0") must MATCH — they are the identical handicap line.    */
+/* Uses deterministic fixtures only (never live odds), per this stage's own  */
+/* instruction.                                                              */
+/* -------------------------------------------------------------------------- */
+
+test("H4-B5.6: requested '-2.0' matches a provider point of -2 (the exact live production bug) — bookmaker Pinnacle, price 1.93", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.93, -2), spreadOutcome("Coventry City", 1.92, 2)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-2.0");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.price, 1.93);
+  assert.equal(result.bookmaker, "Pinnacle");
+  assert.equal(result.point, "-2", "the canonical point is the trailing-zero-stripped form, matching what the provider itself canonicalizes to");
+});
+
+test("H4-B5.6: requested '-2.00' (two trailing zeros) also matches a provider point of -2", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.93, -2), spreadOutcome("Coventry City", 1.92, 2)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-2.00");
+  assert.equal(result.kind, "MATCHED");
+});
+
+test("H4-B5.6: requested '+2.0' (redundant leading plus AND trailing zero) matches a provider point of 2", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 2.1, 2), spreadOutcome("Coventry City", 1.7, -2)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "+2.0");
+  assert.equal(result.kind, "MATCHED");
+});
+
+test("H4-B5.6: requested '-1.50' matches a provider point of -1.5 (half-line trailing zero)", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.63, -1.5), spreadOutcome("Coventry City", 2.49, 1.5)]),
+  ]);
+
+  const result = findSpreadOutcome(event, "Arsenal", "-1.50");
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.price, 1.63);
+});
+
+test("H4-B5.6: quarter lines are completely unaffected by trailing-zero canonicalization — '-1.25' has no trailing zero to strip, still matches exactly, and a genuinely-added trailing zero ('-1.250') still canonicalizes correctly", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.91, -1.25), spreadOutcome("Coventry City", 1.85, 1.25)]),
+  ]);
+
+  assert.equal(findSpreadOutcome(event, "Arsenal", "-1.25").kind, "MATCHED");
+  assert.equal(findSpreadOutcome(event, "Arsenal", "-1.250").kind, "MATCHED", "a genuinely present trailing zero on a quarter line still canonicalizes and matches");
+  assert.equal(findSpreadOutcome(event, "Coventry City", "1.25").kind, "MATCHED");
+});
+
+test("H4-B5.6: exact-line safety is fully preserved — trailing-zero canonicalization never causes a nearest-line/cross-line match", () => {
+  const event = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.63, -1.5), spreadOutcome("Coventry City", 2.49, 1.5)]),
+  ]);
+
+  // requested -2.0, provider only offers -1.5 -> NO MATCH
+  assert.equal(findSpreadOutcome(event, "Arsenal", "-2.0").kind, "LINE_NOT_AVAILABLE");
+
+  const quarterEvent = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.91, -1.25), spreadOutcome("Coventry City", 1.85, 1.25)]),
+  ]);
+  // requested -1.25, provider only offers -1.5 -> NO MATCH
+  assert.equal(findSpreadOutcome(quarterEvent, "Arsenal", "-1.5").kind, "LINE_NOT_AVAILABLE");
+
+  const wholeEvent = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.9, -1), spreadOutcome("Coventry City", 1.9, 1)]),
+  ]);
+  // requested -1.25, provider only offers -1 -> NO MATCH
+  assert.equal(findSpreadOutcome(wholeEvent, "Arsenal", "-1.25").kind, "LINE_NOT_AVAILABLE");
+
+  const halfEvent = spreadEvent("Arsenal", "Coventry City", [
+    pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.9, -0.5), spreadOutcome("Coventry City", 1.9, 0.5)]),
+  ]);
+  // requested -0.75, provider only offers -0.5 -> NO MATCH
+  assert.equal(findSpreadOutcome(halfEvent, "Arsenal", "-0.75").kind, "LINE_NOT_AVAILABLE");
 });
 
 /* -------------------------------------------------------------------------- */
@@ -2433,6 +2548,22 @@ test("verifySpreadOdds CASE B: Arsenal -1.25 requested, provider only has -1.0/-
   assert.equal(result.matched, false);
   assert.ok(result.note?.includes("LINE_NOT_AVAILABLE"), `expected LINE_NOT_AVAILABLE, got: ${result.note}`);
   assert.equal(result.sourceOdds, null, "no fabricated odds when the exact line is unavailable");
+});
+
+test("H4-B5.6: the exact live production bug, reproduced through the FULL fetch -> event-match -> findSpreadOutcome pipeline — requested 'Arsenal -2.0' matches a deterministic fixture whose provider point is the JS number -2, price 1.93, bookmaker Pinnacle", async () => {
+  mockEvents([
+    spreadFetchEventTimed("evt-arsenal-coventry-h4b56", "Arsenal", "Coventry City", [
+      pinnacleSpreadBookmaker([spreadOutcome("Arsenal", 1.93, -2), spreadOutcome("Coventry City", 1.92, 2)]),
+    ], "2026-08-21T19:00:00Z"),
+  ]);
+
+  const result = await verifySpreadOdds({ sport: "premier league", event: "Arsenal", participant: "Arsenal", line: "-2.0", odds: null });
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(result.sourceOdds, 1.93);
+  assert.equal(result.bookmaker, "Pinnacle");
+  assert.equal(result.homeTeamName, "Arsenal");
+  assert.equal(result.awayTeamName, "Coventry City");
 });
 
 /* -------------------------------------------------------------------------- */

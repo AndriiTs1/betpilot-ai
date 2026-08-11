@@ -203,10 +203,56 @@ export function isDecimalString(value: string): boolean {
 // produces the canonical string from any validly-shaped input, "+" included.
 const LINE_INPUT_PATTERN = /^[+-]?\d+(\.\d+)?$/;
 
+// H4-B5.6 — proven live production bug: a requested line of "-2.0" and a
+// provider point of -2 (canonicalized via oddsVerifier.ts's
+// canonicalizeProviderPoint, which round-trips through String(point) and so
+// NEVER produces a redundant trailing ".0") failed to string-match even
+// though they are the identical handicap line — "-2.0" !== "-2". This
+// function is the one shared canonical boundary every line comparison in
+// the codebase is built on (request construction in legacyOddsBridge.ts,
+// provider-point canonicalization and exact-match comparison in
+// oddsVerifier.ts's findSpreadOutcome/findTotalsOutcome, and re-persisted
+// again in createBetFromPreview.ts) — fixing it here, once, is what makes
+// every equivalent decimal spelling ("-2.0"/"-2.00"/"-2") converge on
+// exactly the same canonical string everywhere, rather than patching one
+// caller with a special case.
+//
+// Pure string manipulation only — no Number()/parseFloat()/Math.*/
+// toFixed(), which would risk floating-point representation error for
+// values this codebase must treat as exact (Prisma's own Bet.line/
+// BetSelection.line are Decimal(5,2), never float). Trailing fractional
+// zeros are stripped one digit at a time from the END of the fraction
+// string only — "2.05" keeps its "05" (does not end in "0"), so it is
+// never conflated with "2.5"; "-1.25" has no trailing zero at all, so it
+// is untouched. This is length/character trimming, never rounding: a
+// genuinely different quarter-line value is never merged into a
+// different one (see this file's own required-safety examples: -1.25
+// must never become -1.5, 0.75 must never become 0.5, 2.25 must never
+// become 2.5).
+function stripTrailingFractionZeros(magnitude: string): string {
+  const dotIndex = magnitude.indexOf(".");
+  if (dotIndex === -1) return magnitude;
+
+  const integerPart = magnitude.slice(0, dotIndex);
+  const fractionPart = magnitude.slice(dotIndex + 1).replace(/0+$/, "");
+
+  return fractionPart.length > 0 ? `${integerPart}.${fractionPart}` : integerPart;
+}
+
 export function normalizeLineString(value: string): string | null {
   const trimmed = value.trim();
   if (!LINE_INPUT_PATTERN.test(trimmed)) return null;
-  return trimmed.startsWith("+") ? trimmed.slice(1) : trimmed;
+
+  const isNegative = trimmed.startsWith("-");
+  const magnitude = isNegative || trimmed.startsWith("+") ? trimmed.slice(1) : trimmed;
+  const canonicalMagnitude = stripTrailingFractionZeros(magnitude);
+
+  // "-0"/"-0.0"/etc. and "0"/"0.0"/etc. are the same line (no handicap at
+  // all) — a signed zero would otherwise silently produce two different
+  // canonical strings for the identical value.
+  if (canonicalMagnitude === "0") return "0";
+
+  return isNegative ? `-${canonicalMagnitude}` : canonicalMagnitude;
 }
 
 /* -------------------------------------------------------------------------- */

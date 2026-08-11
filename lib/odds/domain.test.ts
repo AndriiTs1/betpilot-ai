@@ -129,7 +129,6 @@ test("normalizeLineString: '-1.5' passes through unchanged", () => {
 test("normalizeLineString: '2.5' (unsigned, already canonical) passes through unchanged", () => {
   assert.equal(normalizeLineString("2.5"), "2.5");
   assert.equal(normalizeLineString("0"), "0");
-  assert.equal(normalizeLineString("0.0"), "0.0");
 });
 
 test("normalizeLineString: malformed values are rejected (null), never coerced", () => {
@@ -140,11 +139,102 @@ test("normalizeLineString: malformed values are rejected (null), never coerced",
   assert.equal(normalizeLineString("++1.5"), null);
 });
 
+// H4-B5.6 — syntax must not broaden alongside the new trailing-zero
+// canonicalization: every one of these was already rejected before this
+// stage, and none of them become newly acceptable now.
+test("H4-B5.6: invalid-line syntax that was already rejected stays rejected — trailing-zero canonicalization never broadens accepted syntax", () => {
+  for (const malformed of ["2.", ".5", "--2", "2..5", "abc", "2.5.0", "1..0"]) {
+    assert.equal(normalizeLineString(malformed), null, `"${malformed}" must remain rejected`);
+  }
+});
+
 test("normalizeLineString: every output it produces is itself a valid isDecimalString (the canonical shape)", () => {
   for (const input of ["+1.5", "-1.5", "2.5", "0", "+0"]) {
     const normalized = normalizeLineString(input);
     assert.notEqual(normalized, null);
     assert.ok(isDecimalString(normalized as string), `normalizeLineString("${input}") = "${normalized}" must itself be canonical`);
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* H4-B5.6 — trailing fractional zero canonicalization. Root cause fixed:     */
+/* a requested line of "-2.0" and a live provider point of -2 (which          */
+/* canonicalizes via String(-2) -> "-2", never "-2.0") failed to string-match */
+/* even though they are the identical handicap line. String manipulation     */
+/* only — no Number()/parseFloat()/Math methods/toFixed() anywhere here.     */
+/* -------------------------------------------------------------------------- */
+
+test("H4-B5.6: the exact task specification examples canonicalize precisely as specified", () => {
+  const cases: Array<[string, string]> = [
+    ["-2.0", "-2"],
+    ["-2.00", "-2"],
+    ["+2.0", "2"],
+    ["2.00", "2"],
+    ["-1.50", "-1.5"],
+    ["+1.50", "1.5"],
+    ["-1.25", "-1.25"],
+    ["+0.75", "0.75"],
+  ];
+  for (const [input, expected] of cases) {
+    assert.equal(normalizeLineString(input), expected, `normalizeLineString("${input}") must be "${expected}"`);
+  }
+});
+
+test("H4-B5.6: the exact conceptual examples from the stage's own spec", () => {
+  const cases: Array<[string, string]> = [
+    ["2", "2"],
+    ["2.0", "2"],
+    ["2.00", "2"],
+    ["2.500", "2.5"],
+    ["-2.000", "-2"],
+    ["-1.250", "-1.25"],
+    ["+0.750", "0.75"],
+  ];
+  for (const [input, expected] of cases) {
+    assert.equal(normalizeLineString(input), expected);
+  }
+});
+
+test("H4-B5.6: representation equivalence matrix — every listed form of the same line canonicalizes to the identical string", () => {
+  const groups: string[][] = [
+    ["-2", "-2.0", "-2.00"],
+    ["2", "+2.0", "2.00"],
+    ["-1.5", "-1.50", "-1.500"],
+    ["1.5", "+1.50"],
+    ["-1.25", "-1.250"],
+    ["0.75", "+0.750"],
+  ];
+  for (const group of groups) {
+    const canonical = group.map((form) => normalizeLineString(form));
+    const first = canonical[0];
+    assert.notEqual(first, null);
+    for (let i = 1; i < canonical.length; i++) {
+      assert.equal(canonical[i], first, `"${group[i]}" must canonicalize identically to "${group[0]}" (got "${canonical[i]}" vs "${first}")`);
+    }
+  }
+});
+
+test("H4-B5.6: a trailing zero in a decimal digit that is NOT at the very end is never stripped — '2.05' stays '2.05', never becomes '2.5'", () => {
+  assert.equal(normalizeLineString("2.05"), "2.05");
+  assert.equal(normalizeLineString("-1.05"), "-1.05");
+});
+
+test("H4-B5.6: exact-line safety — trailing-zero canonicalization must never merge genuinely different quarter/standard lines", () => {
+  const distinctPairs: Array<[string, string]> = [
+    ["-1.25", "-1.5"],
+    ["-0.75", "-0.5"],
+    ["2.25", "2.5"],
+    ["2.75", "3"],
+    ["-1.25", "-1"],
+  ];
+  for (const [a, b] of distinctPairs) {
+    assert.notEqual(normalizeLineString(a), normalizeLineString(b), `"${a}" must never canonicalize the same as "${b}"`);
+  }
+});
+
+test("H4-B5.6: signed zero collapses to the unsigned canonical '0' — '-0'/'-0.0'/'+0.00' are all the same (no-handicap) line", () => {
+  for (const form of ["0", "-0", "+0", "0.0", "-0.0", "+0.00", "0.00"]) {
+    assert.equal(normalizeLineString(form), "0", `"${form}" must canonicalize to "0"`);
   }
 });
 

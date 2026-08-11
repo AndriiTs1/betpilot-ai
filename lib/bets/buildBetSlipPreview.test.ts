@@ -2031,6 +2031,70 @@ test("H4-B5.4: the EXACT real production shape (event: '<UNKNOWN>', selection: '
   assert.equal(previewSelection.awayTeamName, "Coventry City");
 });
 
+test("H4-B5.6: the full preview path for the exact live production bug — 'Arsenal -2.0 stake 10' against a deterministic provider fixture whose point is -2/price 1.93 — resolves VERIFIED and confirmable, with the request canonicalized to '-2' before it ever reaches the provider", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [{ sport: "Football", event: "Arsenal", market: null, selection: "Arsenal -2.0", line: "-2.0", submittedOdds: null }],
+  };
+
+  let capturedSpreadLine: string | null = null;
+  const provider = new TheOddsApiProvider(
+    fakeVerifyOddsFn({}),
+    undefined,
+    fakeVerifySpreadOddsFn(
+      {
+        // Keyed by the participant search text ("Arsenal") — this fake
+        // stands in for a real oddsVerifier.ts result against a provider
+        // fixture whose point is the JS number -2, price 1.93 (see
+        // oddsVerifier.test.ts's own full fetch->match pipeline proof of
+        // this exact fixture, including homeTeamName/awayTeamName/
+        // competitionName exactly as the real, unmodified verifySpreadOdds
+        // would return them). This test's own job is to prove
+        // buildBetSlipPreview's DISPLAY/confirmability behavior once
+        // matching succeeds, not to re-prove the matching algorithm itself.
+        Arsenal: {
+          matched: true,
+          withinTolerance: true,
+          sourceOdds: 1.93,
+          submittedOdds: 1.93,
+          discrepancyPercent: 0,
+          bookmaker: "Pinnacle",
+          note: null,
+          providerEventId: "evt-arsenal-coventry-h4b56",
+          providerSportKey: "soccer_epl",
+          eventStartTime: "2026-08-21T19:00:00.000Z",
+          homeTeamName: "Arsenal",
+          awayTeamName: "Coventry City",
+          competitionName: "Premier League",
+        },
+      },
+      (input) => {
+        capturedSpreadLine = input.line;
+      },
+    ),
+  );
+  const service = new OddsVerificationService(provider);
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+  const previewSelection = result.preview.selections[0];
+
+  assert.equal(capturedSpreadLine, "-2", "the request must be canonicalized to '-2' before reaching the provider — never the raw '-2.0' text");
+  assert.equal(previewSelection.marketType, "SPREAD");
+  assert.equal(previewSelection.participant, "Arsenal");
+  assert.equal(previewSelection.line, "-2", "the canonical/display line is the trailing-zero-stripped form — this is the accepted display normalization, not a UI change");
+  assert.equal(previewSelection.oddsStatus, "VERIFIED");
+  assert.equal(previewSelection.currentOdds, 1.93);
+  assert.equal(previewSelection.bookmaker, "Pinnacle");
+  assert.equal(previewSelection.event, "Arsenal — Coventry City");
+
+  const confirmable = canConfirmBetSlip(true, {
+    preview: result.preview as unknown as BetPreview,
+    previewToken: result.previewToken,
+  });
+  assert.equal(confirmable, true, "a VERIFIED matched line must be confirmable");
+});
+
 test("Handicap Stage H2: MONEYLINE and TOTALS previews carry marketType/participant but normalizeSelectionToEnglish's SPREAD branch never fires for them (existing display unchanged)", async () => {
   const slip: ParsedBetSlip = {
     type: "EXPRESS",
