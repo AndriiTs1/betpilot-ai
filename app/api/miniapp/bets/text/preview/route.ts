@@ -252,34 +252,6 @@ export async function handleTextPreview(
       throw err;
     }
 
-    // TEMP H4-B5.3 diagnostic — remove after production reproduction.
-    // Logs ONLY the final preview's technical odds/event-matching fields —
-    // never the player's raw text, Telegram identity, tokens, or any other
-    // secret/PII — so a production log line can prove or disprove whether
-    // event metadata (homeTeamName/awayTeamName/competitionName) is still
-    // present on the exact response this route is about to return, without
-    // reconstructing or guessing at anything not already on `result`.
-    console.log(
-      "[BET_PREVIEW_DIAGNOSTIC]",
-      JSON.stringify({
-        type: result.preview.type,
-        selections: result.preview.selections.map((selection) => ({
-          event: selection.event,
-          selection: selection.selection,
-          marketType: selection.marketType,
-          participant: selection.participant,
-          line: selection.line,
-          homeTeamName: selection.homeTeamName,
-          awayTeamName: selection.awayTeamName,
-          competitionName: selection.competitionName,
-          eventStartTime: selection.eventStartTime,
-          oddsStatus: selection.oddsStatus,
-          submittedOdds: selection.submittedOdds,
-          currentOdds: selection.currentOdds,
-        })),
-      }),
-    );
-
     return NextResponse.json(result);
   } catch (err) {
     console.error("POST /api/miniapp/bets/text/preview failed:", err);
