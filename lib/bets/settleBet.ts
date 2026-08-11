@@ -21,17 +21,22 @@ export type SettlementDatabase = PrismaClient;
 export interface SettleBetInput {
   betId: string;
   requestedStatus: SettlementTarget;
-  // Stage 3.4A — optional, WIN-only override for the odds used to compute
-  // the payout, instead of the stored Bet.totalOdds/Bet.odds. Exists so an
-  // application-layer caller (e.g. a future EXPRESS aggregator) can supply
-  // a freshly-computed effective price — e.g. a combined price adjusted
-  // for a VOID leg — without this file duplicating that computation.
-  // Absent for every existing caller today; a no-op when omitted. Safe
-  // because BetSelection.odds/Bet.totalOdds/Bet.odds are all immutable
-  // after creation (no update() call anywhere in the codebase ever writes
-  // to them — confirmed by a full-codebase audit, not assumed), so there is
-  // no staleness window between when a caller computes this value and when
-  // it's used here.
+  // Stage 3.4A — optional override for the odds used to compute the
+  // financial delta, instead of the stored Bet.totalOdds/Bet.odds. Exists
+  // so an application-layer caller (e.g. a future EXPRESS aggregator) can
+  // supply a freshly-computed effective price — e.g. a combined price
+  // adjusted for a VOID leg — without this file duplicating that
+  // computation. Absent for every existing caller today; a no-op when
+  // omitted. Safe because BetSelection.odds/Bet.totalOdds/Bet.odds are all
+  // immutable after creation (no update() call anywhere in the codebase
+  // ever writes to them — confirmed by a full-codebase audit, not assumed),
+  // so there is no staleness window between when a caller computes this
+  // value and when it's used here.
+  //
+  // X3A — widened from SETTLED_WIN-only to also accept SETTLED_LOSS, for a
+  // genuine partial-loss EXPRESS outcome (0 < effectiveOdds < 1) — see
+  // validateEffectiveOddsInput's own comment for the exact accepted range.
+  // Still rejected for VOID/SETTLED_HALF_WIN/SETTLED_HALF_LOSS.
   effectiveOdds?: Prisma.Decimal;
 }
 
@@ -147,6 +152,16 @@ function isRecordNotFoundError(err: unknown): boolean {
 // responsible for passing an already-appropriately-scaled Decimal, the same
 // implicit contract totalOdds/odds already have (their scale comes from
 // Prisma column precision, never from a rounding step in this file).
+//
+// X3A — widened from SETTLED_WIN-only to also accept SETTLED_LOSS, per
+// X2.5's proven design: a future EXPRESS aggregator whose exact combined
+// effectiveOdds factor lands strictly between 0 and 1 (a genuine partial
+// loss — e.g. one leg HALF_LOSS, another WIN) settles as SETTLED_LOSS with
+// this override, so computeSettlementFinancials can compute the exact
+// partial delta instead of always assuming the full stake was lost.
+// SETTLED_HALF_WIN/SETTLED_HALF_LOSS/VOID remain rejected — their math is
+// still the fixed SINGLE-shaped stake/2 or stake-never-deducted rule X2.5
+// found unsafe to generalize, untouched by this stage.
 function validateEffectiveOddsInput(
   betId: string,
   requestedStatus: SettlementTarget,
@@ -154,10 +169,10 @@ function validateEffectiveOddsInput(
 ): void {
   if (effectiveOdds === undefined) return;
 
-  if (requestedStatus !== "SETTLED_WIN") {
+  if (requestedStatus !== "SETTLED_WIN" && requestedStatus !== "SETTLED_LOSS") {
     throw new InvalidEffectiveSettlementOddsError(
       betId,
-      `effectiveOdds may only be provided when requestedStatus is SETTLED_WIN, got ${requestedStatus}`,
+      `effectiveOdds may only be provided when requestedStatus is SETTLED_WIN or SETTLED_LOSS, got ${requestedStatus}`,
     );
   }
 
@@ -173,6 +188,24 @@ function validateEffectiveOddsInput(
   }
   if (effectiveOdds.lte(0)) {
     throw new InvalidEffectiveSettlementOddsError(betId, `effectiveOdds must be positive, got ${effectiveOdds.toString()}`);
+  }
+
+  // X3A — SETTLED_LOSS-only fail-closed boundary: an override is only ever
+  // meaningful here as a PARTIAL loss (0 < E < 1). E == 1 is a breakeven
+  // (X2.5: that's VOID's job, not SETTLED_LOSS's), and E > 1 is a genuine
+  // gain (that's SETTLED_WIN's job) — either would silently produce a
+  // SETTLED_LOSS row with a zero or positive balance delta, a self-
+  // contradictory financial record. E == 0 (a full loss) is deliberately
+  // NOT required to pass through this override at all: ordinary
+  // SETTLED_LOSS without an override already means exactly that, so a
+  // caller with a full loss should simply omit effectiveOdds, not supply 0
+  // (0 would also fail the lte(0) check above, which is intentionally not
+  // special-cased for this boundary — no caller needs it).
+  if (requestedStatus === "SETTLED_LOSS" && effectiveOdds.gte(1)) {
+    throw new InvalidEffectiveSettlementOddsError(
+      betId,
+      `effectiveOdds for SETTLED_LOSS must represent a partial loss (0 < effectiveOdds < 1), got ${effectiveOdds.toString()}`,
+    );
   }
 }
 
@@ -262,7 +295,21 @@ function computeSettlementFinancials(
   }
 
   if (targetStatus === "SETTLED_LOSS") {
-    // No odds required — a missing totalOdds must never block a LOSS.
+    // X3A — overrideOdds is the ONLY source consulted here (never
+    // totalOdds/legacyOdds — a full LOSS has always been, and remains,
+    // odds-independent). When absent (every caller before this stage, and
+    // every caller that hasn't computed a genuine partial-loss factor),
+    // behavior is byte-for-byte unchanged: no odds required, full stake
+    // lost. When present, validateEffectiveOddsInput has already proven
+    // 0 < overrideOdds < 1, so this is always a genuine partial loss:
+    // grossReturn = stake * overrideOdds (some money still comes back),
+    // delta = grossReturn - stake (negative, exactly the partial-loss
+    // amount) — the same grossReturn-minus-stake shape SETTLED_WIN already
+    // uses above, just with a sub-1 odds figure instead of a supra-1 one.
+    if (overrideOdds !== null) {
+      const grossReturn = roundMoney(stake.times(overrideOdds));
+      return { delta: roundMoney(grossReturn.minus(stake)), transactionType: "BET_STAKE", grossPayout: null, netProfit: null };
+    }
     return { delta: roundMoney(stake.negated()), transactionType: "BET_STAKE", grossPayout: null, netProfit: null };
   }
 

@@ -927,7 +927,11 @@ test("settleBet: EXPRESS WIN with both totalOdds and legacy odds null throws Mis
 });
 
 // ---------------------------------------------------------------------
-// Stage 3.4A — optional caller-computed effectiveOdds, WIN only.
+// Stage 3.4A — optional caller-computed effectiveOdds, originally WIN only.
+// X3A widens this to also accept SETTLED_LOSS (0 < effectiveOdds < 1, a
+// genuine partial loss) — see the dedicated "X3A" section further below for
+// that coverage; every test in this section still exercises WIN only,
+// unchanged from Stage 3.4A.
 //
 // Architectural context (see the Stage 3.4A audit): BetSelection.odds and
 // Bet.totalOdds/Bet.odds are provably immutable after creation — no
@@ -1087,7 +1091,7 @@ test("effectiveOdds: a non-Decimal value at the runtime boundary is rejected, no
   assert.equal(fake._debug.transactionCreateCallCount(), 0);
 });
 
-test("effectiveOdds: provided for SETTLED_LOSS is rejected (misuse), no writes", async () => {
+test("X3A (G): effectiveOdds > 1 provided for SETTLED_LOSS is rejected (a real loss can never have a supra-1 override — that's SETTLED_WIN's job), no writes", async () => {
   const fake = createFakeDb({ bet: fakeBet() });
 
   await assert.rejects(
@@ -1133,6 +1137,225 @@ test("effectiveOdds: validation runs before any database read (fails fast even f
       }),
     (err: unknown) => err instanceof InvalidEffectiveSettlementOddsError,
   );
+});
+
+/* ============================================================================
+ * X3A — SETTLED_LOSS effectiveOdds override: a generic EXPRESS partial-loss
+ * financial primitive. X2.5 proved: for an EXPRESS with exact combined
+ * effectiveOdds E, E>1 -> SETTLED_WIN, E=1 -> VOID, 0<=E<1 -> SETTLED_LOSS.
+ * The E=0 (full loss) case needs no override at all — ordinary SETTLED_LOSS
+ * without one already means exactly that. This section covers only the
+ * genuine 0<E<1 partial case, plus the fail-closed E>=1 boundary and the
+ * full existing-behavior regression matrix.
+ * ============================================================================ */
+
+test("X3A (A): stake 100, SETTLED_LOSS, no override -> delta -100, unchanged from before this stage", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100) }) });
+  const result = await settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_LOSS" });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.amount.toString(), "-100");
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "-100");
+  assert.equal(fake._debug.transactions()[0]?.type, "BET_STAKE");
+});
+
+test("X3A (B): stake 100, SETTLED_LOSS, effectiveOdds 0.75 -> delta -25", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100) }) });
+  const result = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_LOSS",
+    effectiveOdds: new Prisma.Decimal("0.75"),
+  });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.amount.toString(), "-25");
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_LOSS");
+});
+
+test("X3A (C): stake 100, SETTLED_LOSS, effectiveOdds 0.50 -> delta -50", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100) }) });
+  const result = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_LOSS",
+    effectiveOdds: new Prisma.Decimal("0.50"),
+  });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.amount.toString(), "-50");
+});
+
+test("X3A (D): stake 100, SETTLED_LOSS, effectiveOdds 0.10 -> delta -90", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100) }) });
+  const result = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_LOSS",
+    effectiveOdds: new Prisma.Decimal("0.10"),
+  });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.amount.toString(), "-90");
+});
+
+test("X3A (E): stake 100, SETTLED_LOSS, effectiveOdds 0.875 -> exact Decimal -12.5, no floating-point drift", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100) }) });
+  const result = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_LOSS",
+    effectiveOdds: new Prisma.Decimal("0.875"),
+  });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  // Native float: 100 * 0.875 - 100 === -12.5 exactly here too (0.875 is a
+  // clean binary fraction), so this test's real value is proving the
+  // Decimal code path is what actually ran (no Number()/parseFloat()
+  // anywhere in the implementation, confirmed by source read), not that the
+  // result merely looks right.
+  assert.equal(result.amount.toString(), "-12.5");
+});
+
+test("X3A (F): stake 100, SETTLED_LOSS, effectiveOdds 1.00 -> rejected, no writes (breakeven is VOID's job, not SETTLED_LOSS's)", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+
+  await assert.rejects(
+    () =>
+      settleBet(db(fake), {
+        betId: BET_ID,
+        requestedStatus: "SETTLED_LOSS",
+        effectiveOdds: new Prisma.Decimal("1.00"),
+      }),
+    (err: unknown) => err instanceof InvalidEffectiveSettlementOddsError,
+  );
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "CONFIRMED");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("X3A (H1): stake 100, SETTLED_LOSS, effectiveOdds 0 (not omitted) -> rejected by the existing lte(0) rule, no writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+
+  await assert.rejects(
+    () =>
+      settleBet(db(fake), {
+        betId: BET_ID,
+        requestedStatus: "SETTLED_LOSS",
+        effectiveOdds: new Prisma.Decimal(0),
+      }),
+    (err: unknown) => err instanceof InvalidEffectiveSettlementOddsError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("X3A (H2): stake 100, SETTLED_LOSS, effectiveOdds negative -> rejected by the existing lte(0) rule, no writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+
+  await assert.rejects(
+    () =>
+      settleBet(db(fake), {
+        betId: BET_ID,
+        requestedStatus: "SETTLED_LOSS",
+        effectiveOdds: new Prisma.Decimal("-0.5"),
+      }),
+    (err: unknown) => err instanceof InvalidEffectiveSettlementOddsError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("X3A (I): SETTLED_WIN effectiveOdds override still works exactly as before this stage", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("6.00") }) });
+  const result = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_WIN",
+    effectiveOdds: new Prisma.Decimal("2.00"),
+  });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.amount.toString(), "100"); // 100 * 2.00 - 100, NOT the stored totalOdds 6.00
+});
+
+test("X3A (J): VOID + effectiveOdds override remains rejected, no writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+
+  await assert.rejects(
+    () =>
+      settleBet(db(fake), { betId: BET_ID, requestedStatus: "VOID", effectiveOdds: new Prisma.Decimal("0.75") }),
+    (err: unknown) => err instanceof InvalidEffectiveSettlementOddsError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("X3A (K): SETTLED_HALF_WIN + effectiveOdds override remains rejected, no writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+
+  await assert.rejects(
+    () =>
+      settleBet(db(fake), {
+        betId: BET_ID,
+        requestedStatus: "SETTLED_HALF_WIN",
+        effectiveOdds: new Prisma.Decimal("2.00"),
+      }),
+    (err: unknown) => err instanceof InvalidEffectiveSettlementOddsError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("X3A (L): SETTLED_HALF_LOSS + effectiveOdds override remains rejected, no writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+
+  await assert.rejects(
+    () =>
+      settleBet(db(fake), {
+        betId: BET_ID,
+        requestedStatus: "SETTLED_HALF_LOSS",
+        effectiveOdds: new Prisma.Decimal("0.75"),
+      }),
+    (err: unknown) => err instanceof InvalidEffectiveSettlementOddsError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("X3A transaction/credit proof: stake 100, effectiveOdds 0.75 -> SETTLED_LOSS, exactly one Transaction, BET_STAKE -25, currentCredit -25", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100) }), playerCurrentCredit: new Prisma.Decimal(0) });
+
+  const result = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_LOSS",
+    effectiveOdds: new Prisma.Decimal("0.75"),
+  });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_LOSS");
+  assert.equal(fake._debug.transactions().length, 1);
+  const [tx] = fake._debug.transactions();
+  assert.equal(tx.type, "BET_STAKE");
+  assert.equal(tx.amount.toString(), "-25");
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "-25");
+  assert.equal(tx.balanceAfter.toString(), "-25");
+});
+
+test("X3A idempotency: a partial-loss SETTLED_LOSS bet settled twice creates exactly one Transaction and one balance mutation", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100) }), playerCurrentCredit: new Prisma.Decimal(0) });
+  const input = {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_LOSS" as const,
+    effectiveOdds: new Prisma.Decimal("0.75"),
+  };
+
+  const first = await settleBet(db(fake), input);
+  assert.equal(first.kind, "APPLIED");
+
+  const second = await settleBet(db(fake), input);
+  assert.deepEqual(second, { kind: "IDEMPOTENT", betId: BET_ID, status: "SETTLED_LOSS" });
+
+  assert.equal(fake._debug.transactionCreateCallCount(), 1);
+  assert.equal(fake._debug.playerUpdateCallCount(), 1);
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_LOSS");
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "-25");
 });
 
 // ---------------------------------------------------------------------
