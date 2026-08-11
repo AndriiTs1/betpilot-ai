@@ -21,6 +21,7 @@ import {
   BetNotFoundForSettlementError,
   MissingSettlementOddsError,
   InvalidEffectiveSettlementOddsError,
+  InvalidExactSettlementDeltaError,
   type SettlementDatabase,
   type SettleBetResult,
 } from "@/lib/bets/settleBet";
@@ -63,10 +64,16 @@ export type AutoSettleExpressBetResult =
       readonly kind: "SETTLED";
       readonly betId: string;
       readonly outcome: "WIN" | "LOSS" | "VOID";
-      // Only present for outcome WIN — mirrors SettleBetResult's own
-      // grossPayout/netProfit convention (optional, not null, for a field
-      // that's only meaningful for one outcome).
+      // At most one of these two is present, mirroring
+      // AggregateExpressOutcome's own WIN/LOSS shape exactly:
+      // effectiveOdds for an ordinary (no split leg) WIN; exactDelta for a
+      // branch-derived WIN, or for a genuine partial LOSS (X3E). Both
+      // absent for VOID and for a full LOSS (no override needed).
+      // Mirrors SettleBetResult's own grossPayout/netProfit convention
+      // (optional, not null, for a field that's only meaningful
+      // sometimes).
       readonly effectiveOdds?: Prisma.Decimal;
+      readonly exactDelta?: Prisma.Decimal;
       readonly previousStatus: string;
       readonly finalStatus: SettlementTarget;
       readonly idempotent: boolean;
@@ -107,6 +114,10 @@ interface LoadedExpressBet {
   readonly id: string;
   readonly type: string;
   readonly status: string;
+  // X3E — needed only to pass through to aggregateExpressOutcome()'s
+  // branch-exact settlement path (splitting the ORIGINAL stake into 2^k
+  // branches). Never read for eligibility/rejection decisions in this file.
+  readonly stake: Prisma.Decimal;
   readonly selections: readonly LoadedExpressSelection[];
 }
 
@@ -178,6 +189,8 @@ export async function autoSettleExpressBet(
       id: true,
       type: true,
       status: true,
+      // X3E — see LoadedExpressBet's own comment.
+      stake: true,
       selections: {
         select: {
           id: true,
@@ -188,10 +201,10 @@ export async function autoSettleExpressBet(
           canonicalParticipant: true,
           canonicalPeriod: true,
           // X2 — BetSelection.line, threaded through to
-          // mapExpressSelectionToCanonicalSelection() so a future SPREAD/
-          // TOTALS evaluator can read it. SPREAD/TOTALS legs are still
-          // turned away by aggregateExpressOutcome.ts's own deferral guards
-          // before this value is ever used in a settlement decision.
+          // mapExpressSelectionToCanonicalSelection() so the SPREAD/TOTALS
+          // evaluator can read it (X3B enabled real SPREAD/TOTALS EXPRESS
+          // settlement; this value now genuinely reaches a settlement
+          // decision).
           line: true,
           odds: true,
         },
@@ -222,7 +235,7 @@ export async function autoSettleExpressBet(
     return { kind: "REJECTED", betId, reasonCode: "DUPLICATE_PROVIDER_EVENT_RESULT" };
   }
 
-  const aggregate = aggregateExpressOutcome(legsResult.legs, lookupResult.lookup);
+  const aggregate = aggregateExpressOutcome(legsResult.legs, lookupResult.lookup, bet.stake);
 
   if (aggregate.kind === "WAITING" || aggregate.kind === "UNSUPPORTED" || aggregate.kind === "INVALID_DATA") {
     return { kind: "NO_ACTION", betId, aggregate };
@@ -230,12 +243,31 @@ export async function autoSettleExpressBet(
 
   const requestedStatus = settlementTargetFor(aggregate.kind);
 
+  // X3E — WIN carries EITHER effectiveOdds (ordinary, no split leg —
+  // settleBet.ts's original Stage 3.4A override) OR exactDelta (branch-
+  // derived, >=1 HALF_WIN/HALF_LOSS leg — settleBet.ts's X3E primitive),
+  // never both (aggregateExpressOutcome.ts never sets both on the same
+  // result). LOSS now only ever carries exactDelta (a partial loss can
+  // only arise from a branch-derived combination — see that file's own
+  // comment), absent entirely for a full loss. settleBet() itself rejects
+  // either override for VOID, so VOID is correctly never given one here.
+  const settlementOverride =
+    aggregate.kind === "WIN"
+      ? aggregate.exactDelta !== undefined
+        ? { exactDelta: aggregate.exactDelta }
+        : aggregate.effectiveOdds !== undefined
+          ? { effectiveOdds: aggregate.effectiveOdds }
+          : {}
+      : aggregate.kind === "LOSS" && aggregate.exactDelta !== undefined
+        ? { exactDelta: aggregate.exactDelta }
+        : {};
+
   let settleResult: SettleBetResult;
   try {
     settleResult = await settleBet(db as unknown as SettlementDatabase, {
       betId,
       requestedStatus,
-      ...(aggregate.kind === "WIN" ? { effectiveOdds: aggregate.effectiveOdds } : {}),
+      ...settlementOverride,
     });
   } catch (err) {
     if (err instanceof SettlementConflictError) {
@@ -247,21 +279,23 @@ export async function autoSettleExpressBet(
     if (err instanceof BetNotFoundForSettlementError) {
       return { kind: "NOT_FOUND", betId };
     }
-    if (err instanceof MissingSettlementOddsError || err instanceof InvalidEffectiveSettlementOddsError) {
+    if (
+      err instanceof MissingSettlementOddsError ||
+      err instanceof InvalidEffectiveSettlementOddsError ||
+      err instanceof InvalidExactSettlementDeltaError
+    ) {
       return { kind: "FAILED", betId, reasonCode: err.code, message: err.message };
     }
     const message = err instanceof Error ? err.message : String(err);
     return { kind: "FAILED", betId, reasonCode: "UNEXPECTED_ERROR", message };
   }
 
-  const effectiveOddsField = aggregate.kind === "WIN" ? { effectiveOdds: aggregate.effectiveOdds } : {};
-
   if (settleResult.kind === "IDEMPOTENT") {
     return {
       kind: "SETTLED",
       betId,
       outcome: aggregate.kind,
-      ...effectiveOddsField,
+      ...settlementOverride,
       previousStatus: settleResult.status,
       finalStatus: settleResult.status,
       idempotent: true,
@@ -272,7 +306,7 @@ export async function autoSettleExpressBet(
     kind: "SETTLED",
     betId,
     outcome: aggregate.kind,
-    ...effectiveOddsField,
+    ...settlementOverride,
     previousStatus: bet.status,
     finalStatus: settleResult.status,
     idempotent: false,

@@ -6,6 +6,7 @@ import {
   BetNotFoundForSettlementError,
   MissingSettlementOddsError,
   InvalidEffectiveSettlementOddsError,
+  InvalidExactSettlementDeltaError,
   type SettlementDatabase,
 } from "./settleBet";
 import {
@@ -1356,6 +1357,181 @@ test("X3A idempotency: a partial-loss SETTLED_LOSS bet settled twice creates exa
   assert.equal(fake._debug.playerUpdateCallCount(), 1);
   assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_LOSS");
   assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "-25");
+});
+
+/* ============================================================================
+ * X3E — exactDelta: a caller-precomputed, cent-exact branch-settlement
+ * delta (see lib/bets/settlement/expressBranchSettlement.ts), bypassing
+ * computeSettlementFinancials's odds-based grossPayout/netProfit derivation
+ * entirely. Mirrors the X3A effectiveOdds test structure one-for-one.
+ * ============================================================================ */
+
+test("X3E: WIN + positive exactDelta -> applied exactly, bypassing the stored totalOdds entirely", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(100), totalOdds: new Prisma.Decimal("6.00") }) });
+  const result = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_WIN",
+    exactDelta: new Prisma.Decimal("151.64"),
+  });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.amount.toString(), "151.64");
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_WIN");
+  assert.equal(fake._debug.transactions()[0]?.type, "BET_PAYOUT");
+  assert.equal(fake._debug.transactions()[0]?.amount.toString(), "151.64");
+});
+
+test("X3E: LOSS + negative exactDelta -> applied exactly", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal("66.67") }) });
+  const result = await settleBet(db(fake), {
+    betId: BET_ID,
+    requestedStatus: "SETTLED_LOSS",
+    exactDelta: new Prisma.Decimal("-3.00"),
+  });
+
+  assert.equal(result.kind, "APPLIED");
+  if (result.kind !== "APPLIED") return;
+  assert.equal(result.amount.toString(), "-3");
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "SETTLED_LOSS");
+  assert.equal(fake._debug.transactions()[0]?.type, "BET_STAKE");
+  assert.equal(fake._debug.transactions()[0]?.amount.toString(), "-3");
+});
+
+test("X3E: WIN + zero exactDelta -> rejected, zero writes (a true zero-branch result is VOID's job, never SETTLED_WIN)", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN", exactDelta: new Prisma.Decimal(0) }),
+    (err: unknown) => err instanceof InvalidExactSettlementDeltaError,
+  );
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "CONFIRMED");
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("X3E: WIN + negative exactDelta -> rejected, zero writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_WIN", exactDelta: new Prisma.Decimal("-10") }),
+    (err: unknown) => err instanceof InvalidExactSettlementDeltaError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("X3E: LOSS + zero exactDelta -> rejected, zero writes (a true zero-branch result is VOID's job, never SETTLED_LOSS)", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_LOSS", exactDelta: new Prisma.Decimal(0) }),
+    (err: unknown) => err instanceof InvalidExactSettlementDeltaError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("X3E: LOSS + positive exactDelta -> rejected, zero writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_LOSS", exactDelta: new Prisma.Decimal("10") }),
+    (err: unknown) => err instanceof InvalidExactSettlementDeltaError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("X3E: VOID + exactDelta -> rejected, zero writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "VOID", exactDelta: new Prisma.Decimal("5") }),
+    (err: unknown) => err instanceof InvalidExactSettlementDeltaError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("X3E: SETTLED_HALF_WIN + exactDelta -> rejected, zero writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_WIN", exactDelta: new Prisma.Decimal("5") }),
+    (err: unknown) => err instanceof InvalidExactSettlementDeltaError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("X3E: SETTLED_HALF_LOSS + exactDelta -> rejected, zero writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+  await assert.rejects(
+    () => settleBet(db(fake), { betId: BET_ID, requestedStatus: "SETTLED_HALF_LOSS", exactDelta: new Prisma.Decimal("-5") }),
+    (err: unknown) => err instanceof InvalidExactSettlementDeltaError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("X3E: effectiveOdds and exactDelta together -> rejected, zero writes", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+  await assert.rejects(
+    () =>
+      settleBet(db(fake), {
+        betId: BET_ID,
+        requestedStatus: "SETTLED_WIN",
+        effectiveOdds: new Prisma.Decimal("2.00"),
+        exactDelta: new Prisma.Decimal("100"),
+      }),
+    (err: unknown) => err instanceof InvalidExactSettlementDeltaError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("X3E: non-Decimal exactDelta at the runtime boundary is rejected, not silently coerced", async () => {
+  const fake = createFakeDb({ bet: fakeBet() });
+  await assert.rejects(
+    () =>
+      settleBet(db(fake), {
+        betId: BET_ID,
+        requestedStatus: "SETTLED_WIN",
+        exactDelta: "22.74" as unknown as Prisma.Decimal,
+      }),
+    (err: unknown) => err instanceof InvalidExactSettlementDeltaError,
+  );
+  assert.equal(fake._debug.transactionCreateCallCount(), 0);
+});
+
+test("X3E: validation runs before any database read (fails fast even for a nonexistent bet)", async () => {
+  const fake = createFakeDb();
+  await assert.rejects(
+    () =>
+      settleBet(db(fake), {
+        betId: "nonexistent-bet",
+        requestedStatus: "SETTLED_WIN",
+        exactDelta: new Prisma.Decimal(0),
+      }),
+    (err: unknown) => err instanceof InvalidExactSettlementDeltaError,
+  );
+});
+
+test("X3E idempotency: a branch-exact WIN settled twice creates exactly one Transaction and one balance mutation", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal(10) }), playerCurrentCredit: new Prisma.Decimal(0) });
+  const input = { betId: BET_ID, requestedStatus: "SETTLED_WIN" as const, exactDelta: new Prisma.Decimal("22.74") };
+
+  const first = await settleBet(db(fake), input);
+  assert.equal(first.kind, "APPLIED");
+
+  const second = await settleBet(db(fake), input);
+  assert.deepEqual(second, { kind: "IDEMPOTENT", betId: BET_ID, status: "SETTLED_WIN" });
+
+  assert.equal(fake._debug.transactionCreateCallCount(), 1);
+  assert.equal(fake._debug.playerUpdateCallCount(), 1);
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "22.74");
+});
+
+test("X3E idempotency: a branch-exact partial LOSS settled twice creates exactly one Transaction and one balance mutation", async () => {
+  const fake = createFakeDb({ bet: fakeBet({ stake: new Prisma.Decimal("66.67") }), playerCurrentCredit: new Prisma.Decimal(0) });
+  const input = { betId: BET_ID, requestedStatus: "SETTLED_LOSS" as const, exactDelta: new Prisma.Decimal("-3.00") };
+
+  const first = await settleBet(db(fake), input);
+  assert.equal(first.kind, "APPLIED");
+
+  const second = await settleBet(db(fake), input);
+  assert.deepEqual(second, { kind: "IDEMPOTENT", betId: BET_ID, status: "SETTLED_LOSS" });
+
+  assert.equal(fake._debug.transactionCreateCallCount(), 1);
+  assert.equal(fake._debug.playerUpdateCallCount(), 1);
+  assert.equal(fake._debug.getPlayer(PLAYER_ID)?.currentCredit.toString(), "-3");
 });
 
 // ---------------------------------------------------------------------

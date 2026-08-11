@@ -38,6 +38,20 @@ export interface SettleBetInput {
   // validateEffectiveOddsInput's own comment for the exact accepted range.
   // Still rejected for VOID/SETTLED_HALF_WIN/SETTLED_HALF_LOSS.
   effectiveOdds?: Prisma.Decimal;
+  // X3E — optional, EXACT pre-computed financial delta, for a caller that
+  // has already done cent-exact branch settlement (see
+  // lib/bets/settlement/expressBranchSettlement.ts) rather than a single
+  // ratio applied against the whole stake. X3C proved effectiveOdds cannot
+  // represent every EXPRESS HALF_WIN/HALF_LOSS combination exactly — no
+  // single 2dp-rounded odds figure, fed through the ordinary grossPayout =
+  // round(stake * odds) formula, reconstructs a true branch-summed delta in
+  // general. exactDelta bypasses that formula entirely: when present, it
+  // becomes `delta` in SettlementFinancials directly, unrounded a second
+  // time (the caller already rounded every branch it summed). Mutually
+  // exclusive with effectiveOdds — a caller must pick exactly one
+  // computation strategy, never blend them. Same SETTLED_WIN/SETTLED_LOSS-
+  // only restriction as effectiveOdds; see validateEffectiveOddsInput.
+  exactDelta?: Prisma.Decimal;
 }
 
 export type SettleBetResult =
@@ -99,6 +113,21 @@ export class InvalidEffectiveSettlementOddsError extends Error {
   constructor(betId: string, message: string) {
     super(message);
     this.name = "InvalidEffectiveSettlementOddsError";
+    this.betId = betId;
+  }
+}
+
+// X3E — the exactDelta counterpart of InvalidEffectiveSettlementOddsError
+// above: covers wrong runtime type, non-finite, sign mismatch with
+// requestedStatus, and misuse (exactDelta provided for VOID/HALF_WIN/
+// HALF_LOSS, or supplied alongside effectiveOdds in the same call).
+export class InvalidExactSettlementDeltaError extends Error {
+  readonly code = "INVALID_EXACT_SETTLEMENT_DELTA" as const;
+  readonly betId: string;
+
+  constructor(betId: string, message: string) {
+    super(message);
+    this.name = "InvalidExactSettlementDeltaError";
     this.betId = betId;
   }
 }
@@ -209,6 +238,66 @@ function validateEffectiveOddsInput(
   }
 }
 
+// X3E — validates the exact pre-computed branch-settlement delta (see
+// expressBranchSettlement.ts). Same "fail fast, before any DB access"
+// principle as validateEffectiveOddsInput above, and deliberately mirrors
+// its structure: SETTLED_WIN/SETTLED_LOSS only, defense-in-depth runtime
+// type/finiteness checks, and a sign boundary matching the requested
+// status. Zero is rejected for BOTH statuses — a genuine zero-delta branch
+// result means VOID (X3D's classification rule), never SETTLED_WIN or
+// SETTLED_LOSS; a caller that computed exactly 0 has an aggregation bug if
+// it also requested a non-VOID status, and this must surface loudly rather
+// than silently writing a zero-amount BET_PAYOUT/BET_STAKE row.
+function validateExactDeltaInput(
+  betId: string,
+  requestedStatus: SettlementTarget,
+  exactDelta: Prisma.Decimal | undefined,
+): void {
+  if (exactDelta === undefined) return;
+
+  if (requestedStatus !== "SETTLED_WIN" && requestedStatus !== "SETTLED_LOSS") {
+    throw new InvalidExactSettlementDeltaError(
+      betId,
+      `exactDelta may only be provided when requestedStatus is SETTLED_WIN or SETTLED_LOSS, got ${requestedStatus}`,
+    );
+  }
+
+  if (!(exactDelta instanceof Prisma.Decimal)) {
+    throw new InvalidExactSettlementDeltaError(betId, "exactDelta must be a Prisma.Decimal instance");
+  }
+  if (!exactDelta.isFinite()) {
+    throw new InvalidExactSettlementDeltaError(betId, `exactDelta must be finite, got ${exactDelta.toString()}`);
+  }
+
+  if (requestedStatus === "SETTLED_WIN" && exactDelta.lte(0)) {
+    throw new InvalidExactSettlementDeltaError(
+      betId,
+      `exactDelta for SETTLED_WIN must be strictly positive, got ${exactDelta.toString()}`,
+    );
+  }
+  if (requestedStatus === "SETTLED_LOSS" && exactDelta.gte(0)) {
+    throw new InvalidExactSettlementDeltaError(
+      betId,
+      `exactDelta for SETTLED_LOSS must be strictly negative, got ${exactDelta.toString()}`,
+    );
+  }
+}
+
+// X3E — effectiveOdds and exactDelta are two independent, complete
+// computation strategies for the same job (deriving a WIN/LOSS delta) —
+// blending them would be ambiguous (which one wins?) and is never a
+// legitimate caller need, so both being present at once is treated as a
+// caller bug, fail-closed, before either individual validator even runs.
+function validateMutuallyExclusiveOverrides(
+  betId: string,
+  effectiveOdds: Prisma.Decimal | undefined,
+  exactDelta: Prisma.Decimal | undefined,
+): void {
+  if (effectiveOdds !== undefined && exactDelta !== undefined) {
+    throw new InvalidExactSettlementDeltaError(betId, "effectiveOdds and exactDelta are mutually exclusive — supply at most one");
+  }
+}
+
 const ROUNDING_DECIMAL_PLACES = 2;
 const ROUNDING_MODE = Prisma.Decimal.ROUND_HALF_UP;
 
@@ -238,7 +327,25 @@ function computeSettlementFinancials(
   totalOdds: Prisma.Decimal | null,
   legacyOdds: Prisma.Decimal | null,
   overrideOdds: Prisma.Decimal | null,
+  overrideDelta: Prisma.Decimal | null,
 ): SettlementFinancials {
+  // X3E — exactDelta, already validated (finite, correctly signed for
+  // targetStatus, mutually exclusive with overrideOdds) takes absolute
+  // precedence for SETTLED_WIN/SETTLED_LOSS: the caller has already done
+  // cent-exact branch settlement (expressBranchSettlement.ts) and summed
+  // every branch's own already-rounded delta — re-deriving grossPayout/
+  // netProfit from a ratio here would only reintroduce the exact rounding
+  // mismatch X3C proved unsafe. transactionType still comes from
+  // targetStatus alone, exactly as every other branch below.
+  if (overrideDelta !== null && (targetStatus === "SETTLED_WIN" || targetStatus === "SETTLED_LOSS")) {
+    return {
+      delta: overrideDelta,
+      transactionType: targetStatus === "SETTLED_WIN" ? "BET_PAYOUT" : "BET_STAKE",
+      grossPayout: null,
+      netProfit: null,
+    };
+  }
+
   // H4-B3 — a quarter-line Asian handicap half-outcome is financially
   // defined as exactly half the stake settling as a full WIN (or LOSS) and
   // the other half settling as a VOID (this stage's own required
@@ -331,12 +438,17 @@ class RaceResolvedIdempotently extends Error {
 }
 
 export async function settleBet(db: SettlementDatabase, input: SettleBetInput): Promise<SettleBetResult> {
-  const { betId, requestedStatus, effectiveOdds } = input;
+  const { betId, requestedStatus, effectiveOdds, exactDelta } = input;
 
   // Fails fast, before any database access — a malformed/misused
-  // effectiveOdds is a caller bug, not something to silently ignore or
-  // discover mid-transaction.
+  // effectiveOdds/exactDelta is a caller bug, not something to silently
+  // ignore or discover mid-transaction. Mutual exclusion is checked first,
+  // before either individual validator, so a caller that (incorrectly)
+  // supplies both gets one unambiguous error rather than whichever
+  // individual validator happens to run first.
+  validateMutuallyExclusiveOverrides(betId, effectiveOdds, exactDelta);
   validateEffectiveOddsInput(betId, requestedStatus, effectiveOdds);
+  validateExactDeltaInput(betId, requestedStatus, exactDelta);
 
   const bet = await db.bet.findUnique({
     where: { id: betId },
@@ -367,6 +479,7 @@ export async function settleBet(db: SettlementDatabase, input: SettleBetInput): 
     bet.totalOdds,
     bet.odds,
     effectiveOdds ?? null,
+    exactDelta ?? null,
   );
 
   try {

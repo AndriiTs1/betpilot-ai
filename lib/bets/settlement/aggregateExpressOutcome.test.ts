@@ -44,6 +44,12 @@ function lookup(entries: ReadonlyArray<readonly [string, CanonicalEventResult]>)
   return new Map(entries);
 }
 
+// X3E — aggregateExpressOutcome() now requires the bet's stake (needed only
+// for the branch-exact settlement path). A fixed 100 is used throughout
+// this file except where a test specifically exercises a different stake
+// value (see the dedicated X3E sections further down).
+const DEFAULT_STAKE = new Prisma.Decimal(100);
+
 /* -------------------------------------------------------------------------- */
 /* ALL WIN                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -58,11 +64,11 @@ test("all WIN: 2 legs -> WIN, effectiveOdds is the product of both legs' odds", 
     ["e2", eventResult({ homeScore: 3, awayScore: 1 })],
   ]);
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
 
   assert.equal(result.kind, "WIN");
   if (result.kind !== "WIN") return;
-  assert.equal(result.effectiveOdds.toString(), "3"); // 2.00 * 1.50
+  assert.equal(result.effectiveOdds?.toString(), "3"); // 2.00 * 1.50
   assert.deepEqual([...result.winningSelectionIds].sort(), ["l1", "l2"]);
   assert.deepEqual(result.voidedSelectionIds, []);
 });
@@ -71,11 +77,11 @@ test("all WIN: single leg -> WIN, effectiveOdds equals that leg's own odds", () 
   const legs = [leg({ id: "l1", providerEventId: "e1", odds: new Prisma.Decimal("2.10") })];
   const results = lookup([["e1", eventResult()]]);
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
 
   assert.equal(result.kind, "WIN");
   if (result.kind !== "WIN") return;
-  assert.equal(result.effectiveOdds.toString(), "2.1");
+  assert.equal(result.effectiveOdds?.toString(), "2.1");
 });
 
 /* -------------------------------------------------------------------------- */
@@ -92,7 +98,7 @@ test("LOSS: one losing leg among winning legs -> overall LOSS", () => {
     ["e2", eventResult({ homeScore: 2, awayScore: 0 })], // AWAY loses
   ]);
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
 
   assert.equal(result.kind, "LOSS");
   if (result.kind !== "LOSS") return;
@@ -106,7 +112,7 @@ test("LOSS: one losing leg while another is still WAITING -> LOSS finalizes imme
   ];
   const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 0 })]]); // e2 missing entirely
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
 
   assert.equal(result.kind, "LOSS");
   if (result.kind !== "LOSS") return;
@@ -127,7 +133,7 @@ test("all VOID: every leg voids (2-way draw) -> overall VOID", () => {
     ["e2", eventResult({ homeScore: 3, awayScore: 3 })],
   ]);
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
 
   assert.deepEqual(result, { kind: "VOID" });
 });
@@ -146,11 +152,11 @@ test("WIN + VOID: exact worked example — leg A odds 2.00 WIN, leg B odds 3.00 
     ["e2", eventResult({ homeScore: 1, awayScore: 1 })], // 2-way draw -> VOID
   ]);
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
 
   assert.equal(result.kind, "WIN");
   if (result.kind !== "WIN") return;
-  assert.equal(result.effectiveOdds.toString(), "2"); // NOT 2.00 * 3.00 = 6.00
+  assert.equal(result.effectiveOdds?.toString(), "2"); // NOT 2.00 * 3.00 = 6.00
   assert.deepEqual(result.winningSelectionIds, ["A"]);
   assert.deepEqual(result.voidedSelectionIds, ["B"]);
 });
@@ -169,11 +175,11 @@ test("WIN + VOID: multiple WIN legs and multiple VOID legs -> effectiveOdds is t
     ["e4", eventResult({ homeScore: 2, awayScore: 2 })],
   ]);
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
 
   assert.equal(result.kind, "WIN");
   if (result.kind !== "WIN") return;
-  assert.equal(result.effectiveOdds.toString(), "3"); // 2.00 * 1.50, VOID legs excluded entirely
+  assert.equal(result.effectiveOdds?.toString(), "3"); // 2.00 * 1.50, VOID legs excluded entirely
   assert.deepEqual([...result.winningSelectionIds].sort(), ["w1", "w2"]);
   assert.deepEqual([...result.voidedSelectionIds].sort(), ["v1", "v2"]);
 });
@@ -192,7 +198,7 @@ test("WAITING: no LOSS, one leg's event not yet completed -> overall WAITING", (
     ["e2", eventResult({ status: "IN_PROGRESS", homeScore: null, awayScore: null })], // WAITING
   ]);
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
 
   assert.equal(result.kind, "WAITING");
   if (result.kind !== "WAITING") return;
@@ -204,7 +210,7 @@ test("WAITING: missing provider result entirely -> WAITING, missingProviderEvent
   const legs = [leg({ id: "l1", providerEventId: "e1" })];
   const results = lookup([]); // nothing supplied at all
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
 
   assert.equal(result.kind, "WAITING");
   if (result.kind !== "WAITING") return;
@@ -223,7 +229,7 @@ for (const [label, status] of NO_LOSS_STATUS_CASES) {
     const legs = [leg({ id: "l1", providerEventId: "e1" })];
     const results = lookup([["e1", eventResult({ status, homeScore: null, awayScore: null })]]);
 
-    const result = aggregateExpressOutcome(legs, results);
+    const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
     assert.equal(result.kind, "WAITING");
   });
 }
@@ -232,7 +238,7 @@ test("CANCELLED status leg with no LOSS elsewhere -> overall VOID (evaluator's o
   const legs = [leg({ id: "l1", providerEventId: "e1" })];
   const results = lookup([["e1", eventResult({ status: "CANCELLED", homeScore: null, awayScore: null })]]);
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
   assert.deepEqual(result, { kind: "VOID" });
 });
 
@@ -255,7 +261,7 @@ test("UNSUPPORTED: no LOSS, one leg's market is unsupported -> overall UNSUPPORT
     ["e2", eventResult({ homeScore: 2, awayScore: 0 })],
   ]);
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
 
   assert.equal(result.kind, "UNSUPPORTED");
   if (result.kind !== "UNSUPPORTED") return;
@@ -273,7 +279,7 @@ test("INVALID_DATA: no LOSS, one leg's event result has a missing score -> overa
     ["e2", eventResult({ homeScore: null, awayScore: 0 })],
   ]);
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
 
   assert.equal(result.kind, "INVALID_DATA");
   if (result.kind !== "INVALID_DATA") return;
@@ -291,7 +297,7 @@ test("combination UNSUPPORTED + LOSS -> LOSS wins (unconditional, per Stage 3.4 
     ["e2", eventResult({ homeScore: 2, awayScore: 0 })],
   ]);
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
 
   assert.equal(result.kind, "LOSS");
   if (result.kind !== "LOSS") return;
@@ -308,7 +314,7 @@ test("combination INVALID_DATA + LOSS -> LOSS wins (unconditional)", () => {
     ["e2", eventResult({ homeScore: null, awayScore: 0 })],
   ]);
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
 
   assert.equal(result.kind, "LOSS");
   if (result.kind !== "LOSS") return;
@@ -325,7 +331,7 @@ test("priority: INVALID_DATA is surfaced before UNSUPPORTED when both co-occur (
     ["e2", eventResult({ homeScore: 2, awayScore: 0 })],
   ]);
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
   assert.equal(result.kind, "INVALID_DATA");
 });
 
@@ -337,7 +343,7 @@ test("WIN with a null BetSelection.odds on the winning leg -> INVALID_DATA, not 
   const legs = [leg({ id: "l1", providerEventId: "e1", odds: null })];
   const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 0 })]]);
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
 
   assert.equal(result.kind, "INVALID_DATA");
   if (result.kind !== "INVALID_DATA") return;
@@ -355,12 +361,12 @@ test("Decimal precision: product uses Prisma.Decimal throughout, HALF_UP rounded
     ["e2", eventResult({ homeScore: 2, awayScore: 0 })],
   ]);
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
 
   assert.equal(result.kind, "WIN");
   if (result.kind !== "WIN") return;
   // 1.111 * 1.111 = 1.234321 -> HALF_UP to 2dp = 1.23
-  assert.equal(result.effectiveOdds.toString(), "1.23");
+  assert.equal(result.effectiveOdds?.toString(), "1.23");
 });
 
 /* -------------------------------------------------------------------------- */
@@ -372,7 +378,7 @@ test("purity: input legs array and lookup are not mutated", () => {
   const results = lookup([["e1", eventResult()]]);
   const legsCopy = JSON.parse(JSON.stringify(legs.map((l) => ({ ...l, odds: l.odds?.toString() }))));
 
-  aggregateExpressOutcome(legs, results);
+  aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
 
   const legsAfter = JSON.parse(JSON.stringify(legs.map((l) => ({ ...l, odds: l.odds?.toString() }))));
   assert.deepEqual(legsAfter, legsCopy);
@@ -383,13 +389,17 @@ test("purity: identical input always returns a deep-equal result", () => {
   const legs = [leg({ id: "l1", providerEventId: "e1" })];
   const results = lookup([["e1", eventResult()]]);
 
-  const r1 = aggregateExpressOutcome(legs, results);
-  const r2 = aggregateExpressOutcome(legs, results);
+  const r1 = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  const r2 = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
   assert.deepEqual(r1, r2);
 });
 
 /* -------------------------------------------------------------------------- */
-/* H4-B2 — SPREAD is evaluator-only, deferred in EXPRESS aggregation         */
+/* X3B — SPREAD/TOTALS aggregation ENABLED. The SPREAD_AUTO_SETTLEMENT_      */
+/* DEFERRED/TOTALS_AUTO_SETTLEMENT_DEFERRED guards (H4-B2/H5-A2) are removed */
+/* — both markets now reach real evaluateSelectionOutcome() evaluation and  */
+/* the exact per-leg factor model (contributingFactorFor in                 */
+/* aggregateExpressOutcome.ts) proven by the X1 audit.                      */
 /* -------------------------------------------------------------------------- */
 
 function spreadSelection(participantName: string, line: string): CanonicalSelection {
@@ -404,68 +414,6 @@ function spreadSelection(participantName: string, line: string): CanonicalSelect
   };
 }
 
-test("SPREAD leg (full-margin WIN if evaluated) is deferred to UNSUPPORTED, never silently interpreted as WIN — proves EXPRESS behavior is unchanged from before H4-B2", () => {
-  const legs = [leg({ id: "l1", providerEventId: "e1", selection: spreadSelection("Home", "-1") })];
-  // Home wins by 2 — a real SPREAD evaluation of -1 would be a full WIN,
-  // but this must never reach that conclusion in B2.
-  const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 0 })]]);
-
-  const result = aggregateExpressOutcome(legs, results);
-
-  assert.equal(result.kind, "UNSUPPORTED");
-  if (result.kind !== "UNSUPPORTED") return;
-  assert.deepEqual(result.affectedSelectionIds, ["l1"]);
-  assert.equal(result.reasonCodes["l1"], "SPREAD_AUTO_SETTLEMENT_DEFERRED");
-});
-
-test("SPREAD leg with a quarter line (would be HALF_WIN if evaluated) is deferred to UNSUPPORTED, never interpreted as WIN or LOSS", () => {
-  const legs = [leg({ id: "l1", providerEventId: "e1", selection: spreadSelection("Home", "-0.75") })];
-  // Home wins by 1: -0.75 splits into [-1, -0.5] -> PUSH + WIN -> HALF_WIN
-  // if this leg were evaluated for real. It must not be.
-  const results = lookup([["e1", eventResult({ homeScore: 1, awayScore: 0 })]]);
-
-  const result = aggregateExpressOutcome(legs, results);
-
-  assert.equal(result.kind, "UNSUPPORTED");
-  if (result.kind !== "UNSUPPORTED") return;
-  assert.deepEqual(result.affectedSelectionIds, ["l1"]);
-  assert.equal(result.reasonCodes["l1"], "SPREAD_AUTO_SETTLEMENT_DEFERRED");
-});
-
-test("a SPREAD leg deferred to UNSUPPORTED masks an otherwise-winning MONEYLINE leg, same priority behavior as any other UNSUPPORTED leg", () => {
-  const legs = [
-    leg({ id: "l1", providerEventId: "e1", selection: selection("HOME") }), // will WIN
-    leg({ id: "l2", providerEventId: "e2", selection: spreadSelection("Home", "-1") }), // deferred
-  ];
-  const results = lookup([
-    ["e1", eventResult({ homeScore: 2, awayScore: 0 })],
-    ["e2", eventResult({ homeScore: 2, awayScore: 0 })],
-  ]);
-
-  const result = aggregateExpressOutcome(legs, results);
-
-  assert.equal(result.kind, "UNSUPPORTED");
-  if (result.kind !== "UNSUPPORTED") return;
-  assert.deepEqual(result.affectedSelectionIds, ["l2"]);
-});
-
-test("a SPREAD leg never reaches evaluateSelectionOutcome's WAITING/event-lookup path either — deferred even when providerEventId has no matching result", () => {
-  const legs = [leg({ id: "l1", providerEventId: "missing-event", selection: spreadSelection("Home", "-1") })];
-  const results = lookup([]);
-
-  const result = aggregateExpressOutcome(legs, results);
-
-  assert.equal(result.kind, "UNSUPPORTED");
-  if (result.kind !== "UNSUPPORTED") return;
-  assert.equal(result.reasonCodes["l1"], "SPREAD_AUTO_SETTLEMENT_DEFERRED");
-});
-
-/* -------------------------------------------------------------------------- */
-/* H5-A2 — TOTALS is evaluator-supported for SINGLE now, but deliberately    */
-/* still deferred in EXPRESS aggregation, mirroring the SPREAD guard exactly */
-/* (including for quarter-line legs that WOULD produce HALF_WIN/HALF_LOSS).  */
-/* -------------------------------------------------------------------------- */
-
 function totalsSelection(direction: "OVER" | "UNDER", line: string): CanonicalSelection {
   return {
     sport: "UNKNOWN",
@@ -477,84 +425,463 @@ function totalsSelection(direction: "OVER" | "UNDER", line: string): CanonicalSe
   };
 }
 
-test("an ordinary (whole-line) TOTALS leg is deferred to UNSUPPORTED, never silently interpreted as WIN — EXPRESS TOTALS settlement is not implemented by this stage", () => {
-  const legs = [leg({ id: "l1", providerEventId: "e1", selection: totalsSelection("OVER", "2.5") })];
-  // 3 total goals — a real TOTALS evaluation of Over 2.5 would be a full
-  // WIN, but this must never reach that conclusion in EXPRESS.
+/* --- Standard-line SPREAD/TOTALS regression: real evaluation, not deferred */
+
+test("X3B standard-line regression: SPREAD -1.5, home wins by 2 -> WIN reaches real aggregation (not deferred)", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", selection: spreadSelection("Home", "-1.5") })];
+  const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 0 })]]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "WIN");
+});
+
+test("X3B standard-line regression: SPREAD -1.5, home wins by 1 -> LOSS reaches real aggregation", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", selection: spreadSelection("Home", "-1.5") })];
+  const results = lookup([["e1", eventResult({ homeScore: 1, awayScore: 0 })]]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "LOSS");
+});
+
+test("X3B standard-line regression: SPREAD -1, home wins by exactly 1 -> PUSH -> VOID", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", selection: spreadSelection("Home", "-1") })];
   const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 1 })]]);
 
-  const result = aggregateExpressOutcome(legs, results);
-
-  assert.equal(result.kind, "UNSUPPORTED");
-  if (result.kind !== "UNSUPPORTED") return;
-  assert.deepEqual(result.affectedSelectionIds, ["l1"]);
-  assert.equal(result.reasonCodes["l1"], "TOTALS_AUTO_SETTLEMENT_DEFERRED");
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.deepEqual(result, { kind: "VOID" });
 });
 
-test("a quarter-line TOTALS leg that WOULD produce HALF_WIN if evaluated is deferred to UNSUPPORTED instead — the exact silent-vanishing hazard this guard exists to prevent", () => {
-  const legs = [leg({ id: "l1", providerEventId: "e1", selection: totalsSelection("UNDER", "2.25") })];
-  // 2 total goals: Under 2.25 splits into [2, 2.5] -> PUSH + WIN -> HALF_WIN
-  // if this leg were evaluated for real. It must not be — and, critically,
-  // it must not silently vanish from every tracking bucket either (see this
-  // guard's own comment in aggregateExpressOutcome.ts).
+test("X3B standard-line regression: TOTALS Over 2.5, 3 total goals -> WIN reaches real aggregation", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", selection: totalsSelection("OVER", "2.5") })];
+  const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 1 })]]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "WIN");
+});
+
+test("X3B standard-line regression: TOTALS Under 2.5, 3 total goals -> LOSS reaches real aggregation", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", selection: totalsSelection("UNDER", "2.5") })];
+  const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 1 })]]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "LOSS");
+});
+
+test("X3B standard-line regression: TOTALS 3, exactly 3 total goals -> PUSH -> VOID", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", selection: totalsSelection("OVER", "3") })];
+  const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 1 })]]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.deepEqual(result, { kind: "VOID" });
+});
+
+/* --- Quarter-line EXPRESS matrix -------------------------------------------
+ * X3E — a single split leg (no other WIN legs) is the exact SINGLE
+ * HALF_WIN/HALF_LOSS degenerate case proven in expressBranchSettlement.test.ts
+ * (Phase 3): stake 100 @ odds 2.00 HALF_WIN -> +50; stake 100 HALF_LOSS ->
+ * -50, regardless of which market/line produced that classification.
+ * ----------------------------------------------------------------------- */
+
+test("X3E quarter-line: SPREAD -1.25, home wins by exactly 1 -> HALF_LOSS reaches real aggregation, exactDelta -50", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", odds: new Prisma.Decimal("2.00"), selection: spreadSelection("Home", "-1.25") })];
+  // components [-1.5, -1]: -1.5+1=-0.5 LOSS, -1+1=0 PUSH -> HALF_LOSS
+  const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 1 })]]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "LOSS");
+  if (result.kind !== "LOSS") return;
+  assert.equal(result.losingSelectionIds.length, 0);
+  assert.equal(result.exactDelta?.toString(), "-50");
+});
+
+test("X3E quarter-line: SPREAD -0.75, home wins by exactly 1 -> HALF_WIN reaches real aggregation, exactDelta +50", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", odds: new Prisma.Decimal("2.00"), selection: spreadSelection("Home", "-0.75") })];
+  // components [-1, -0.5]: -1+1=0 PUSH, -0.5+1=0.5 WIN -> HALF_WIN
+  const results = lookup([["e1", eventResult({ homeScore: 1, awayScore: 0 })]]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "WIN");
+  if (result.kind !== "WIN") return;
+  assert.equal(result.exactDelta?.toString(), "50");
+});
+
+test("X3E quarter-line: TOTALS Over 2.25, 2 total goals -> HALF_LOSS reaches real aggregation, exactDelta -50", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", odds: new Prisma.Decimal("1.90"), selection: totalsSelection("OVER", "2.25") })];
   const results = lookup([["e1", eventResult({ homeScore: 1, awayScore: 1 })]]);
 
-  const result = aggregateExpressOutcome(legs, results);
-
-  assert.equal(result.kind, "UNSUPPORTED");
-  if (result.kind !== "UNSUPPORTED") return;
-  assert.deepEqual(result.affectedSelectionIds, ["l1"]);
-  assert.equal(result.reasonCodes["l1"], "TOTALS_AUTO_SETTLEMENT_DEFERRED");
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "LOSS");
+  if (result.kind !== "LOSS") return;
+  assert.equal(result.exactDelta?.toString(), "-50");
 });
 
-test("a quarter-line TOTALS leg that WOULD produce HALF_LOSS if evaluated is deferred to UNSUPPORTED instead", () => {
-  const legs = [leg({ id: "l1", providerEventId: "e1", selection: totalsSelection("OVER", "2.25") })];
-  // 2 total goals: Over 2.25 splits into [2, 2.5] -> PUSH + LOSS -> HALF_LOSS
-  // if this leg were evaluated for real. It must not be.
+test("X3E quarter-line: TOTALS Under 2.25, 2 total goals -> HALF_WIN reaches real aggregation, exactDelta +50", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", odds: new Prisma.Decimal("2.00"), selection: totalsSelection("UNDER", "2.25") })];
   const results = lookup([["e1", eventResult({ homeScore: 1, awayScore: 1 })]]);
 
-  const result = aggregateExpressOutcome(legs, results);
-
-  assert.equal(result.kind, "UNSUPPORTED");
-  if (result.kind !== "UNSUPPORTED") return;
-  assert.deepEqual(result.affectedSelectionIds, ["l1"]);
-  assert.equal(result.reasonCodes["l1"], "TOTALS_AUTO_SETTLEMENT_DEFERRED");
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "WIN");
+  if (result.kind !== "WIN") return;
+  assert.equal(result.exactDelta?.toString(), "50");
 });
 
-test("a TOTALS leg deferred to UNSUPPORTED masks an otherwise-winning MONEYLINE leg, same priority behavior as any other UNSUPPORTED leg", () => {
+test("X3E quarter-line: TOTALS Over 2.75, 3 total goals -> HALF_WIN reaches real aggregation, exactDelta +50", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", odds: new Prisma.Decimal("2.00"), selection: totalsSelection("OVER", "2.75") })];
+  const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 1 })]]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "WIN");
+  if (result.kind !== "WIN") return;
+  assert.equal(result.exactDelta?.toString(), "50");
+});
+
+test("X3E quarter-line: TOTALS Under 2.75, 3 total goals -> HALF_LOSS reaches real aggregation, exactDelta -50", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", odds: new Prisma.Decimal("1.90"), selection: totalsSelection("UNDER", "2.75") })];
+  const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 1 })]]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "LOSS");
+  if (result.kind !== "LOSS") return;
+  assert.equal(result.exactDelta?.toString(), "-50");
+});
+
+/* --- Math matrix A-I -------------------------------------------------------*/
+
+test("X3B (A): WIN + WIN, odds 2.00 x 1.50 -> E=3.00, SETTLED_WIN-shaped", () => {
   const legs = [
-    leg({ id: "l1", providerEventId: "e1", selection: selection("HOME") }), // will WIN
-    leg({ id: "l2", providerEventId: "e2", selection: totalsSelection("OVER", "2.5") }), // deferred
+    leg({ id: "l1", providerEventId: "e1", odds: new Prisma.Decimal("2.00"), selection: selection("HOME") }),
+    leg({ id: "l2", providerEventId: "e2", odds: new Prisma.Decimal("1.50"), selection: selection("HOME") }),
   ];
   const results = lookup([
     ["e1", eventResult({ homeScore: 2, awayScore: 0 })],
-    ["e2", eventResult({ homeScore: 2, awayScore: 1 })],
+    ["e2", eventResult({ homeScore: 3, awayScore: 1 })],
   ]);
 
-  const result = aggregateExpressOutcome(legs, results);
-
-  assert.equal(result.kind, "UNSUPPORTED");
-  if (result.kind !== "UNSUPPORTED") return;
-  assert.deepEqual(result.affectedSelectionIds, ["l2"]);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "WIN");
+  if (result.kind !== "WIN") return;
+  assert.equal(result.effectiveOdds?.toString(), "3");
 });
 
-test("a TOTALS leg never reaches evaluateSelectionOutcome's WAITING/event-lookup path either — deferred even when providerEventId has no matching result", () => {
-  const legs = [leg({ id: "l1", providerEventId: "missing-event", selection: totalsSelection("OVER", "2.5") })];
-  const results = lookup([]);
+test("X3B (B): HALF_WIN (odds 2.00) + WIN (odds 1.50) -> E=2.25", () => {
+  const legs = [
+    leg({ id: "half", providerEventId: "e1", odds: new Prisma.Decimal("2.00"), selection: spreadSelection("Home", "-0.75") }),
+    leg({ id: "win", providerEventId: "e2", odds: new Prisma.Decimal("1.50"), selection: selection("HOME") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 1, awayScore: 0 })], // -0.75 -> HALF_WIN
+    ["e2", eventResult({ homeScore: 2, awayScore: 0 })],
+  ]);
 
-  const result = aggregateExpressOutcome(legs, results);
-
-  assert.equal(result.kind, "UNSUPPORTED");
-  if (result.kind !== "UNSUPPORTED") return;
-  assert.equal(result.reasonCodes["l1"], "TOTALS_AUTO_SETTLEMENT_DEFERRED");
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "WIN");
+  if (result.kind !== "WIN") return;
+  assert.equal(result.exactDelta?.toString(), "125"); // stake 100, X3D branch-exact
+  assert.deepEqual([...result.winningSelectionIds].sort(), ["half", "win"]);
 });
 
-test("zero financial aggregation occurs for a TOTALS leg — the returned UNSUPPORTED result carries no effectiveOdds/winningSelectionIds/voidedSelectionIds at all", () => {
-  const legs = [leg({ id: "l1", providerEventId: "e1", selection: totalsSelection("OVER", "2.5"), odds: new Prisma.Decimal("1.90") })];
+test("X3B (C): HALF_LOSS (odds-independent) + WIN (odds 1.5) -> partial SETTLED_LOSS, exactDelta -25", () => {
+  const legs = [
+    leg({ id: "halfloss", providerEventId: "e1", odds: new Prisma.Decimal("2.00"), selection: spreadSelection("Home", "-1.25") }),
+    leg({ id: "win", providerEventId: "e2", odds: new Prisma.Decimal("1.50"), selection: selection("HOME") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 2, awayScore: 1 })], // -1.25 -> HALF_LOSS
+    ["e2", eventResult({ homeScore: 2, awayScore: 0 })],
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "LOSS");
+  if (result.kind !== "LOSS") return;
+  assert.equal(result.losingSelectionIds.length, 0);
+  assert.equal(result.exactDelta?.toString(), "-25"); // stake 100, X3D branch-exact
+});
+
+test("X3B (D): HALF_WIN (odds 2.00) + HALF_WIN (odds 3.00) -> exactDelta +200", () => {
+  const legs = [
+    leg({ id: "h1", providerEventId: "e1", odds: new Prisma.Decimal("2.00"), selection: spreadSelection("Home", "-0.75") }),
+    leg({ id: "h2", providerEventId: "e2", odds: new Prisma.Decimal("3.00"), selection: totalsSelection("OVER", "2.75") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 1, awayScore: 0 })], // -0.75 -> HALF_WIN
+    ["e2", eventResult({ homeScore: 2, awayScore: 1 })], // Over 2.75, 3 goals -> HALF_WIN
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "WIN");
+  if (result.kind !== "WIN") return;
+  assert.equal(result.exactDelta?.toString(), "200"); // stake 100, X3D branch-exact
+});
+
+test("X3B (E): HALF_WIN (odds 2.00) + HALF_LOSS -> partial SETTLED_LOSS, exactDelta -25", () => {
+  const legs = [
+    leg({ id: "h1", providerEventId: "e1", odds: new Prisma.Decimal("2.00"), selection: spreadSelection("Home", "-0.75") }),
+    leg({ id: "h2", providerEventId: "e2", odds: new Prisma.Decimal("1.90"), selection: totalsSelection("OVER", "2.25") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 1, awayScore: 0 })], // -0.75 -> HALF_WIN
+    ["e2", eventResult({ homeScore: 1, awayScore: 1 })], // Over 2.25, 2 goals -> HALF_LOSS
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "LOSS");
+  if (result.kind !== "LOSS") return;
+  assert.equal(result.exactDelta?.toString(), "-25"); // stake 100, X3D branch-exact
+});
+
+test("X3B (F): HALF_LOSS + HALF_LOSS -> partial SETTLED_LOSS, exactDelta -75", () => {
+  const legs = [
+    leg({ id: "h1", providerEventId: "e1", odds: new Prisma.Decimal("2.00"), selection: spreadSelection("Home", "-1.25") }),
+    leg({ id: "h2", providerEventId: "e2", odds: new Prisma.Decimal("1.90"), selection: totalsSelection("OVER", "2.25") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 2, awayScore: 1 })], // -1.25 -> HALF_LOSS
+    ["e2", eventResult({ homeScore: 1, awayScore: 1 })], // Over 2.25, 2 goals -> HALF_LOSS
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "LOSS");
+  if (result.kind !== "LOSS") return;
+  assert.equal(result.exactDelta?.toString(), "-75"); // stake 100, X3D branch-exact
+});
+
+test("X3B (G): HALF_WIN + VOID -> exactDelta equals the single-split-leg value, VOID excluded", () => {
+  const legs = [
+    leg({ id: "half", providerEventId: "e1", odds: new Prisma.Decimal("2.00"), selection: spreadSelection("Home", "-0.75") }),
+    leg({ id: "void", providerEventId: "e2", odds: new Prisma.Decimal("5.00"), selection: spreadSelection("Home", "-1") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 1, awayScore: 0 })], // -0.75 -> HALF_WIN
+    ["e2", eventResult({ homeScore: 2, awayScore: 1 })], // -1, home wins by exactly 1 -> PUSH -> VOID
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "WIN");
+  if (result.kind !== "WIN") return;
+  assert.equal(result.exactDelta?.toString(), "50"); // stake 100, X3D branch-exact
+  assert.deepEqual(result.winningSelectionIds, ["half"]);
+  assert.deepEqual(result.voidedSelectionIds, ["void"]);
+});
+
+test("X3B (H): HALF_LOSS + VOID -> partial SETTLED_LOSS, exactDelta -50, VOID excluded", () => {
+  const legs = [
+    leg({ id: "half", providerEventId: "e1", odds: new Prisma.Decimal("2.00"), selection: spreadSelection("Home", "-1.25") }),
+    leg({ id: "void", providerEventId: "e2", odds: new Prisma.Decimal("5.00"), selection: spreadSelection("Home", "-1") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 2, awayScore: 1 })], // -1.25 -> HALF_LOSS
+    ["e2", eventResult({ homeScore: 2, awayScore: 1 })], // -1, PUSH -> VOID
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "LOSS");
+  if (result.kind !== "LOSS") return;
+  assert.equal(result.exactDelta?.toString(), "-50"); // stake 100, X3D branch-exact
+});
+
+test("X3B (I): a HALF_WIN leg alongside a genuine full LOSS leg -> whole bet LOSS, E=0, no effectiveOdds override (unconditional LOSS priority, unchanged)", () => {
+  const legs = [
+    leg({ id: "half", providerEventId: "e1", odds: new Prisma.Decimal("2.00"), selection: spreadSelection("Home", "-0.75") }),
+    leg({ id: "loser", providerEventId: "e2", selection: selection("AWAY") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 1, awayScore: 0 })], // would be HALF_WIN
+    ["e2", eventResult({ homeScore: 2, awayScore: 0 })], // AWAY loses
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "LOSS");
+  if (result.kind !== "LOSS") return;
+  assert.deepEqual(result.losingSelectionIds, ["loser"]);
+  assert.equal(result.exactDelta, undefined);
+});
+
+/* --- E == 1 breakeven: a genuine coincidental VOID, not "every leg voided" */
+
+test("X3B: HALF_WIN (factor 2.0) + HALF_LOSS (factor 0.5) coincidentally multiply to exactly 1.00 -> VOID, not WIN or LOSS", () => {
+  const legs = [
+    leg({ id: "h1", providerEventId: "e1", odds: new Prisma.Decimal("3.00"), selection: totalsSelection("OVER", "2.75") }),
+    leg({ id: "h2", providerEventId: "e2", odds: new Prisma.Decimal("1.90"), selection: totalsSelection("OVER", "2.25") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 2, awayScore: 1 })], // Over 2.75, 3 goals -> HALF_WIN, factor 2.0
+    ["e2", eventResult({ homeScore: 1, awayScore: 1 })], // Over 2.25, 2 goals -> HALF_LOSS, factor 0.5
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.deepEqual(result, { kind: "VOID" });
+});
+
+/* --- Mixed-market combinations --------------------------------------------*/
+
+test("X3B mixed market: MONEYLINE WIN + SPREAD WIN -> WIN, effectiveOdds is the product", () => {
+  const legs = [
+    leg({ id: "ml", providerEventId: "e1", odds: new Prisma.Decimal("1.80"), selection: selection("HOME") }),
+    leg({ id: "sp", providerEventId: "e2", odds: new Prisma.Decimal("1.90"), selection: spreadSelection("Home", "-1.5") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 2, awayScore: 0 })],
+    ["e2", eventResult({ homeScore: 2, awayScore: 0 })],
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "WIN");
+  if (result.kind !== "WIN") return;
+  assert.equal(result.effectiveOdds?.toString(), "3.42"); // 1.80 * 1.90, ordinary path (no split leg)
+});
+
+test("X3B mixed market: MONEYLINE WIN + SPREAD HALF_WIN -> WIN, exactDelta +170", () => {
+  const legs = [
+    leg({ id: "ml", providerEventId: "e1", odds: new Prisma.Decimal("1.80"), selection: selection("HOME") }),
+    leg({ id: "sp", providerEventId: "e2", odds: new Prisma.Decimal("2.00"), selection: spreadSelection("Home", "-0.75") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 2, awayScore: 0 })],
+    ["e2", eventResult({ homeScore: 1, awayScore: 0 })], // -0.75 -> HALF_WIN
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "WIN");
+  if (result.kind !== "WIN") return;
+  assert.equal(result.exactDelta?.toString(), "170"); // stake 100, X3D branch-exact
+});
+
+test("X3B mixed market: MONEYLINE WIN + SPREAD HALF_LOSS -> partial LOSS, exactDelta -10", () => {
+  const legs = [
+    leg({ id: "ml", providerEventId: "e1", odds: new Prisma.Decimal("1.80"), selection: selection("HOME") }),
+    leg({ id: "sp", providerEventId: "e2", odds: new Prisma.Decimal("2.00"), selection: spreadSelection("Home", "-1.25") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 2, awayScore: 0 })],
+    ["e2", eventResult({ homeScore: 2, awayScore: 1 })], // -1.25 -> HALF_LOSS
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "LOSS");
+  if (result.kind !== "LOSS") return;
+  assert.equal(result.exactDelta?.toString(), "-10"); // stake 100, X3D branch-exact
+});
+
+test("X3B mixed market: MONEYLINE WIN + TOTALS HALF_WIN -> WIN, exactDelta +161", () => {
+  const legs = [
+    leg({ id: "ml", providerEventId: "e1", odds: new Prisma.Decimal("1.80"), selection: selection("HOME") }),
+    leg({ id: "tot", providerEventId: "e2", odds: new Prisma.Decimal("1.90"), selection: totalsSelection("UNDER", "2.25") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 2, awayScore: 0 })],
+    ["e2", eventResult({ homeScore: 1, awayScore: 1 })], // Under 2.25, 2 goals -> HALF_WIN
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "WIN");
+  if (result.kind !== "WIN") return;
+  assert.equal(result.exactDelta?.toString(), "161"); // stake 100, X3D branch-exact
+});
+
+test("X3B mixed market: SPREAD HALF_WIN + TOTALS HALF_LOSS -> partial LOSS, exactDelta -25", () => {
+  const legs = [
+    leg({ id: "sp", providerEventId: "e1", odds: new Prisma.Decimal("2.00"), selection: spreadSelection("Home", "-0.75") }),
+    leg({ id: "tot", providerEventId: "e2", odds: new Prisma.Decimal("1.90"), selection: totalsSelection("OVER", "2.25") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 1, awayScore: 0 })], // -0.75 -> HALF_WIN
+    ["e2", eventResult({ homeScore: 1, awayScore: 1 })], // Over 2.25, 2 goals -> HALF_LOSS
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "LOSS");
+  if (result.kind !== "LOSS") return;
+  assert.equal(result.exactDelta?.toString(), "-25"); // stake 100, X3D branch-exact
+});
+
+test("X3B mixed market: SPREAD VOID + TOTALS WIN -> WIN, VOID leg excluded from the product", () => {
+  const legs = [
+    leg({ id: "sp", providerEventId: "e1", odds: new Prisma.Decimal("2.00"), selection: spreadSelection("Home", "-1") }),
+    leg({ id: "tot", providerEventId: "e2", odds: new Prisma.Decimal("1.90"), selection: totalsSelection("OVER", "2.5") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 2, awayScore: 1 })], // -1, PUSH -> VOID
+    ["e2", eventResult({ homeScore: 2, awayScore: 1 })], // Over 2.5, 3 goals -> WIN
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "WIN");
+  if (result.kind !== "WIN") return;
+  assert.equal(result.effectiveOdds?.toString(), "1.9"); // ordinary path (no split leg)
+  assert.deepEqual(result.winningSelectionIds, ["tot"]);
+  assert.deepEqual(result.voidedSelectionIds, ["sp"]);
+});
+
+test("X3B: multiple legs on the same provider event settle independently against the same result", () => {
+  const legs = [
+    leg({ id: "ml", providerEventId: "e1", odds: new Prisma.Decimal("1.80"), selection: selection("HOME") }),
+    leg({ id: "tot", providerEventId: "e1", odds: new Prisma.Decimal("1.90"), selection: totalsSelection("OVER", "2.5") }),
+  ];
+  const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 1 })]]); // HOME wins, 3 total goals
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "WIN");
+  if (result.kind !== "WIN") return;
+  assert.equal(result.effectiveOdds?.toString(), "3.42"); // 1.80 * 1.90, ordinary path (no split leg)
+  assert.deepEqual([...result.winningSelectionIds].sort(), ["ml", "tot"]);
+});
+
+/* --- Rounding / Decimal safety --------------------------------------------*/
+
+test("X3B rounding: HALF_WIN odds 1.63 combined with a WIN leg odds 2.49, stake 100 -> exact branch-settled result, no float artifact", () => {
+  const legs = [
+    leg({ id: "half", providerEventId: "e1", odds: new Prisma.Decimal("1.63"), selection: spreadSelection("Home", "-0.75") }),
+    leg({ id: "win", providerEventId: "e2", odds: new Prisma.Decimal("2.49"), selection: selection("HOME") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 1, awayScore: 0 })], // -0.75 -> HALF_WIN, odds 1.63
+    ["e2", eventResult({ homeScore: 2, awayScore: 0 })],
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "WIN");
+  if (result.kind !== "WIN") return;
+  // X3D branch-exact: WIN branch (stake/2 @ 1.63*2.49=4.0587) + VOID branch
+  // (stake/2 @ 2.49 alone), each independently rounded then summed — see
+  // expressBranchSettlement.test.ts's own Phase 4 X3C (1)/(2) proofs for
+  // this exact 1.63/2.49 pair at other stakes.
+  assert.equal(result.exactDelta?.toString(), "227.44");
+});
+
+/* --- Fail-closed: SPREAD/TOTALS structural problems still block settlement */
+
+test("X3B fail-closed: SPREAD leg with no line -> INVALID_DATA MISSING_LINE, never silently settled", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", selection: { ...spreadSelection("Home", "-1"), line: undefined } })];
+  const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 0 })]]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "INVALID_DATA");
+  if (result.kind !== "INVALID_DATA") return;
+  assert.equal(result.reasonCodes["l1"], "MISSING_LINE");
+});
+
+test("X3B fail-closed: TOTALS leg with an off-grid line (2.33) -> INVALID_DATA INVALID_LINE, never rounded to the nearest supported line", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", selection: totalsSelection("OVER", "2.33") })];
   const results = lookup([["e1", eventResult({ homeScore: 2, awayScore: 1 })]]);
 
-  const result = aggregateExpressOutcome(legs, results);
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "INVALID_DATA");
+  if (result.kind !== "INVALID_DATA") return;
+  assert.equal(result.reasonCodes["l1"], "INVALID_LINE");
+});
 
-  assert.equal(result.kind, "UNSUPPORTED");
-  assert.deepEqual(Object.keys(result).sort(), ["affectedSelectionIds", "kind", "reasonCodes"]);
+test("X3B fail-closed: a real full LOSS leg is still terminal even alongside a co-occurring INVALID_DATA SPREAD leg (unconditional LOSS priority, unchanged policy)", () => {
+  const legs = [
+    leg({ id: "loser", providerEventId: "e1", selection: selection("AWAY") }),
+    leg({ id: "invalid", providerEventId: "e2", selection: { ...spreadSelection("Home", "-1"), line: undefined } }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 2, awayScore: 0 })], // AWAY loses
+    ["e2", eventResult({ homeScore: 2, awayScore: 0 })],
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+  assert.equal(result.kind, "LOSS");
+  if (result.kind !== "LOSS") return;
+  assert.deepEqual(result.losingSelectionIds, ["loser"]);
 });

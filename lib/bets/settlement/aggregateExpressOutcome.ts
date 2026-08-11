@@ -18,8 +18,9 @@
 
 import { Prisma } from "@/lib/generated/prisma/client";
 import type { CanonicalSelection } from "@/lib/odds/domain";
-import { computeTotalOdds, ExpressMathError } from "@/lib/bets/expressMath";
+import { computeTotalOdds } from "@/lib/bets/expressMath";
 import { evaluateSelectionOutcome, type SelectionOutcomeEvaluation } from "./evaluateSelectionOutcome";
+import { computeExpressBranchExactDelta, type BranchSettlementLeg } from "./expressBranchSettlement";
 import type { CanonicalEventResult } from "./eventResultDomain";
 
 export interface ExpressLeg {
@@ -36,11 +37,40 @@ export interface ExpressLeg {
 export type AggregateExpressOutcome =
   | {
       readonly kind: "WIN";
-      readonly effectiveOdds: Prisma.Decimal;
+      // X3E — exactly one of these two is present, never both:
+      // effectiveOdds for an ORDINARY WIN (no HALF_WIN/HALF_LOSS leg
+      // present at all — the pure computeTotalOdds() scalar path, byte-
+      // identical to before X3B/X3E for this case); exactDelta for a
+      // BRANCH-DERIVED WIN (>=1 HALF_WIN/HALF_LOSS leg present — X3C proved
+      // effectiveOdds cannot represent this case cent-exactly, so the
+      // caller-computed branch-summed delta is carried instead, per
+      // settleBet.ts's own X3E exactDelta primitive).
+      readonly effectiveOdds?: Prisma.Decimal;
+      readonly exactDelta?: Prisma.Decimal;
+      // Every leg that contributed a non-trivial factor to the product: a
+      // full WIN, or a HALF_WIN/HALF_LOSS quarter-line component. For an
+      // EXPRESS with only full-WIN legs, this is byte-identical to before
+      // X3B — the set of full-WIN leg ids.
       readonly winningSelectionIds: readonly string[];
       readonly voidedSelectionIds: readonly string[];
     }
-  | { readonly kind: "LOSS"; readonly losingSelectionIds: readonly string[] }
+  | {
+      readonly kind: "LOSS";
+      readonly losingSelectionIds: readonly string[];
+      // X3E — present ONLY for a genuine PARTIAL loss (a HALF_WIN/
+      // HALF_LOSS combination whose exact branch-summed delta is strictly
+      // negative), never when losingSelectionIds is non-empty (a real full
+      // LOSS leg — still needs no override at all, per settleBet.ts's own
+      // X3A rule and X2.5's design: full-stake loss is not a branch-
+      // decomposition question, see this file's own full-LOSS short-
+      // circuit below). Always the exact branch-summed delta now, never a
+      // scalar effectiveOdds — a partial LOSS can only ever arise from a
+      // HALF_WIN/HALF_LOSS combination (a pure WIN/VOID-only EXPRESS can
+      // never classify as LOSS except via the full-LOSS short-circuit),
+      // so effectiveOdds was never actually meaningful for LOSS and is
+      // dropped from this variant entirely.
+      readonly exactDelta?: Prisma.Decimal;
+    }
   | { readonly kind: "VOID" }
   | {
       readonly kind: "WAITING";
@@ -81,6 +111,12 @@ const MISSING_RESULT_EVALUATION: SelectionOutcomeEvaluation = { kind: "WAITING",
 export function aggregateExpressOutcome(
   legs: readonly ExpressLeg[],
   eventResultsByProviderEventId: ReadonlyMap<string, CanonicalEventResult>,
+  // X3E — Bet.stake, needed only for the branch-exact path (splitting the
+  // ORIGINAL stake into 2^k branches — see expressBranchSettlement.ts).
+  // Never read for LOSS/VOID/WAITING/UNSUPPORTED/INVALID_DATA, and never
+  // read for the ordinary no-split-leg WIN path either (that continues to
+  // use the pre-existing computeTotalOdds() scalar product, unaffected).
+  stake: Prisma.Decimal,
 ): AggregateExpressOutcome {
   const losingIds: string[] = [];
   const invalidIds: string[] = [];
@@ -89,61 +125,18 @@ export function aggregateExpressOutcome(
   const unsupportedReasons: Record<string, string> = {};
   const waitingIds: string[] = [];
   const missingProviderEventIds: string[] = [];
-  const winningLegs: ExpressLeg[] = [];
+  // X3B/X3E — every leg whose evaluation contributes a non-trivial value
+  // to the product: full WIN, or a HALF_WIN/HALF_LOSS quarter-line
+  // component. VOID legs still contribute nothing and are still simply
+  // excluded (never a fabricated entry).
+  const contributingLegs: Array<{
+    readonly id: string;
+    readonly kind: "WIN" | "HALF_WIN" | "HALF_LOSS";
+    readonly odds: Prisma.Decimal | null;
+  }> = [];
   const voidedIds: string[] = [];
 
   for (const leg of legs) {
-    // H4-B2 — SPREAD is evaluator-only in this stage, deliberately not
-    // wired into EXPRESS aggregation yet — same rationale and same
-    // deferred-reason-code convention as
-    // lib/bets/settlement/autoSettleSingleBet.ts's identical guard (see
-    // that file's own comment for the full explanation of why this must
-    // be checked on the leg's own selection.marketType, not
-    // evaluation.kind). Before H4-B2, evaluateSelectionOutcome() always
-    // returned UNSUPPORTED_MARKET for a SPREAD leg, so a SPREAD leg has
-    // never contributed anything but the UNSUPPORTED bucket here — this
-    // preserves that exact behavior byte-for-byte, and the switch below is
-    // therefore never reached for a SPREAD leg at all. Combined with the
-    // TOTALS guard immediately below (H5-A2), this is what keeps HALF_WIN/
-    // HALF_LOSS out of the switch entirely: those two kinds can currently
-    // only ever be produced by a SPREAD or TOTALS selection (see
-    // evaluateSelectionOutcome.ts) — both intercepted here before
-    // evaluateSelectionOutcome() is even called — so together these two
-    // guards remain a complete, sufficient fail-closed handler for them; no
-    // HALF_WIN/HALF_LOSS switch case is needed, and the switch itself stays
-    // byte-identical. Any FUTURE market that can also produce HALF_WIN/
-    // HALF_LOSS must add its own guard here the same way, or add real
-    // switch cases — this comment is the trip-wire for that.
-    if (leg.selection.marketType === "SPREAD") {
-      unsupportedIds.push(leg.id);
-      unsupportedReasons[leg.id] = "SPREAD_AUTO_SETTLEMENT_DEFERRED";
-      continue;
-    }
-
-    // H5-A2 — TOTALS joins the SPREAD guard above, same rationale, same
-    // deferred-reason-code convention, checked the same way (on the leg's
-    // own selection.marketType, not evaluation.kind — required BEFORE
-    // evaluateSelectionOutcome() ever gains real TOTALS support, which this
-    // stage's own change to evaluateSelectionOutcome.ts does in the same
-    // commit). Root cause this guards against: the switch below has no
-    // "case HALF_WIN"/"case HALF_LOSS" at all — it was only ever safe
-    // because SPREAD (the sole prior HALF_* producer) was already
-    // intercepted above, before evaluateSelectionOutcome() was even called.
-    // Now that evaluateSelectionOutcome() can also produce HALF_WIN/
-    // HALF_LOSS for a TOTALS quarter line, an unguarded TOTALS leg reaching
-    // that switch would silently fall through every case (no default
-    // branch either), contributing to none of the tracking arrays below —
-    // effectively vanishing from the whole EXPRESS bet's aggregation
-    // instead of correctly blocking it. This guard is what prevents that:
-    // TOTALS is turned away here, same as SPREAD, before the switch is ever
-    // reached — EXPRESS TOTALS settlement (standard or quarter) remains
-    // completely out of scope for this stage.
-    if (leg.selection.marketType === "TOTALS") {
-      unsupportedIds.push(leg.id);
-      unsupportedReasons[leg.id] = "TOTALS_AUTO_SETTLEMENT_DEFERRED";
-      continue;
-    }
-
     const eventResult = eventResultsByProviderEventId.get(leg.providerEventId);
     const evaluation = eventResult ? evaluateSelectionOutcome(eventResult, leg.selection) : MISSING_RESULT_EVALUATION;
 
@@ -167,12 +160,31 @@ export function aggregateExpressOutcome(
         voidedIds.push(leg.id);
         break;
       case "WIN":
-        winningLegs.push(leg);
+        contributingLegs.push({ id: leg.id, kind: "WIN", odds: leg.odds });
+        break;
+      // X3B — HALF_WIN/HALF_LOSS are real, reachable evaluation kinds for
+      // a SPREAD or TOTALS quarter-line leg (the SPREAD_AUTO_SETTLEMENT_
+      // DEFERRED/TOTALS_AUTO_SETTLEMENT_DEFERRED guards that used to
+      // intercept both markets before evaluateSelectionOutcome() was ever
+      // called were removed in X3B). Both cases are explicit — neither
+      // silently falls through a missing switch case.
+      case "HALF_WIN":
+        contributingLegs.push({ id: leg.id, kind: "HALF_WIN", odds: leg.odds });
+        break;
+      case "HALF_LOSS":
+        contributingLegs.push({ id: leg.id, kind: "HALF_LOSS", odds: null });
         break;
     }
   }
 
   if (losingIds.length > 0) {
+    // X3D/X3E — a real (non-split) full LOSS leg is not a branch-
+    // decomposition question at all: it makes the WHOLE ORIGINAL,
+    // UNDIVIDED stake an unconditional loss regardless of any HALF_WIN/
+    // HALF_LOSS leg's own state (accumulator rule — one genuine LOSS
+    // component kills the entire bet). No exactDelta, no effectiveOdds —
+    // settleBet.ts's plain SETTLED_LOSS (no override) already computes
+    // exactly this (round(-stake)), unchanged since before X3B.
     return { kind: "LOSS", losingSelectionIds: losingIds };
   }
   if (invalidIds.length > 0) {
@@ -185,38 +197,73 @@ export function aggregateExpressOutcome(
     return { kind: "WAITING", waitingSelectionIds: waitingIds, missingProviderEventIds };
   }
 
-  // Every leg is now WIN or VOID.
-  if (winningLegs.length === 0) {
+  // Every leg is now WIN, HALF_WIN, HALF_LOSS, or VOID.
+  if (contributingLegs.length === 0) {
     return { kind: "VOID" };
   }
 
-  // VOID legs contribute nothing to the product (equivalent to a x1.00
-  // factor) — simply excluded from the list, not multiplied in as 1.00,
-  // same net effect, no fabricated Decimal(1) entries. computeTotalOdds()
-  // (lib/bets/expressMath.ts) is reused unmodified: same Decimal-safe
-  // product, same HALF_UP/2dp rounding this codebase already established —
-  // never a new math rule invented here.
-  try {
-    const effectiveOdds = computeTotalOdds(winningLegs.map((leg) => leg.odds));
+  const hasSplitLeg = contributingLegs.some((leg) => leg.kind === "HALF_WIN" || leg.kind === "HALF_LOSS");
+
+  // WIN/HALF_WIN legs both require a real, positive stored odds value —
+  // checked once, uniformly, before either path below runs. A HALF_LOSS
+  // leg needs no odds at all (same rule as SINGLE's own HALF_LOSS math).
+  const invalidOddsIds = contributingLegs
+    .filter((leg) => leg.kind !== "HALF_LOSS" && (leg.odds === null || leg.odds.lte(0)))
+    .map((leg) => leg.id);
+  if (invalidOddsIds.length > 0) {
+    const reasonCodes = Object.fromEntries(invalidOddsIds.map((id) => [id, "INVALID_SELECTION_ODDS"]));
+    return { kind: "INVALID_DATA", affectedSelectionIds: invalidOddsIds, reasonCodes };
+  }
+
+  if (!hasSplitLeg) {
+    // X3E — no HALF_WIN/HALF_LOSS leg present at all: the pure, unmodified
+    // computeTotalOdds() scalar product (lib/bets/expressMath.ts), exactly
+    // as before X3B. Every real leg odds is > 1, so a product of >=1 such
+    // WIN legs is always > 1 — this path can only ever be a genuine WIN
+    // (VOID/LOSS were already resolved above), matching the pre-X3B
+    // MONEYLINE-only EXPRESS contract byte-for-byte.
+    const effectiveOdds = computeTotalOdds(contributingLegs.map((leg) => leg.odds));
     return {
       kind: "WIN",
       effectiveOdds,
-      winningSelectionIds: winningLegs.map((leg) => leg.id),
+      winningSelectionIds: contributingLegs.map((leg) => leg.id),
       voidedSelectionIds: voidedIds,
     };
-  } catch (err) {
-    // computeTotalOdds() only throws for MISSING_ODDS (a WIN leg with a
-    // null BetSelection.odds) or ZERO_OR_NEGATIVE_ODDS — both are genuine
-    // stored-data problems, not evaluator/business outcomes, so they
-    // surface as INVALID_DATA rather than propagating a raw
-    // ExpressMathError out of this otherwise-pure function.
-    if (err instanceof ExpressMathError) {
-      const affectedSelectionIds = winningLegs
-        .filter((leg) => leg.odds === null || leg.odds.lte(0))
-        .map((leg) => leg.id);
-      const reasonCodes = Object.fromEntries(affectedSelectionIds.map((id) => [id, "INVALID_SELECTION_ODDS"]));
-      return { kind: "INVALID_DATA", affectedSelectionIds, reasonCodes };
-    }
-    throw err;
   }
+
+  // X3E — at least one HALF_WIN/HALF_LOSS leg: X3C proved the X3B scalar-
+  // factor shortcut is not cent-exact here. Delegate to the reviewed X3D
+  // branch algorithm instead, which sums every real 2^k sub-accumulator's
+  // own independently-rounded delta — the exact same rounding contract
+  // settleBet.ts's SETTLED_HALF_WIN/HALF_LOSS already use for SINGLE bets.
+  const branchLegs: BranchSettlementLeg[] = contributingLegs.map((leg) => {
+    if (leg.kind === "HALF_LOSS") return { kind: "HALF_LOSS" };
+    // leg.odds is guaranteed non-null and positive here (checked above).
+    return { kind: leg.kind, odds: leg.odds as Prisma.Decimal };
+  });
+  const exactDelta = computeExpressBranchExactDelta(stake, branchLegs);
+
+  // X3D's proven final-status boundary, applied to the exact branch-summed
+  // delta:
+  //   delta == 0 -> VOID (a genuine coincidental breakeven — e.g. a
+  //                 HALF_WIN branch's gain exactly cancels a HALF_LOSS
+  //                 branch's loss; financially identical to, but distinct
+  //                 from, the "every leg voided" case above)
+  //   delta <  0 -> LOSS with this exactDelta as a SETTLED_LOSS override
+  //                 (settleBet.ts's X3E primitive; a real LOSS leg — the
+  //                 only OTHER way to reach a full loss — was already
+  //                 intercepted above, long before any branch was summed)
+  //   delta >  0 -> WIN with this exactDelta
+  if (exactDelta.equals(0)) {
+    return { kind: "VOID" };
+  }
+  if (exactDelta.lessThan(0)) {
+    return { kind: "LOSS", losingSelectionIds: [], exactDelta };
+  }
+  return {
+    kind: "WIN",
+    exactDelta,
+    winningSelectionIds: contributingLegs.map((leg) => leg.id),
+    voidedSelectionIds: voidedIds,
+  };
 }
