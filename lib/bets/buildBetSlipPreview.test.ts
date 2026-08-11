@@ -1530,6 +1530,72 @@ test("buildBetSlipPreview: Totals FAILED (line not offered) never becomes a misl
 });
 
 /* -------------------------------------------------------------------------- */
+/* H5-A4.1 — full preview-path proof for the live-proven TOTALS bookmaker    */
+/* fallback bug (Arsenal vs Coventry City). oddsVerifier.ts's own            */
+/* findTotalsOutcome() tests (lib/odds/oddsVerifier.test.ts) already prove   */
+/* the fallback resolves to the correct bookmaker/price at the provider      */
+/* layer; these two tests instead prove that same resolved price/bookmaker   */
+/* actually flows, unmodified, all the way through buildBetSlipPreview() to  */
+/* a confirmable VERIFIED preview — using the fake totals verifier seam      */
+/* (no live network dependency), since the fake stands in for whatever the   */
+/* real provider/findTotalsOutcome() returns.                                */
+/* -------------------------------------------------------------------------- */
+
+test("H5-A4.1 preview path: Arsenal vs Coventry City 'Over 2.5' stake 10 -> VERIFIED at the 1xBet fallback price (1.64), confirmable", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [
+      { sport: "Football", event: "Arsenal vs Coventry City", market: null, selection: "Over 2.5", line: "2.5", submittedOdds: 1.64 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: totalsAwareVerificationService({}, {
+      "Arsenal vs Coventry City": verified(1.64, 1.64, "1xBet"),
+    }),
+  });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[0].line, "2.5");
+  assert.equal(result.preview.totalOdds, 1.64);
+  assert.ok(result.previewToken && result.previewToken.length > 0);
+
+  const confirmable = canConfirmBetSlip(true, {
+    preview: result.preview as unknown as BetPreview,
+    previewToken: result.previewToken,
+  });
+  assert.equal(confirmable, true, "a VERIFIED single with a signed token must be confirmable");
+});
+
+test("H5-A4.1 preview path: Arsenal vs Coventry City 'Under 2.5' stake 10 -> VERIFIED at the 1xBet fallback price (2.47), confirmable", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [
+      { sport: "Football", event: "Arsenal vs Coventry City", market: null, selection: "Under 2.5", line: "2.5", submittedOdds: 2.47 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: totalsAwareVerificationService({}, {
+      "Arsenal vs Coventry City": verified(2.47, 2.47, "1xBet"),
+    }),
+  });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[0].line, "2.5");
+  assert.equal(result.preview.totalOdds, 2.47);
+  assert.ok(result.previewToken && result.previewToken.length > 0);
+
+  const confirmable = canConfirmBetSlip(true, {
+    preview: result.preview as unknown as BetPreview,
+    previewToken: result.previewToken,
+  });
+  assert.equal(confirmable, true, "a VERIFIED single with a signed token must be confirmable");
+});
+
+/* -------------------------------------------------------------------------- */
 /* Handicap Stage H2 — SPREAD preview display normalization                   */
 /*                                                                            */
 /* buildBetSlipPreview.ts itself never reconstructs a display label (the     */

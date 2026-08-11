@@ -988,10 +988,13 @@ export type TotalsOutcomeLookupResult =
   // requestedLine itself isn't a valid decimal string — checked first, zero
   // bookmaker/market work wasted on an already-invalid request.
   | { readonly kind: "INVALID_REQUESTED_LINE" }
-  // event.bookmakers is empty — mirrors extractOutcomePrice's existing "No
-  // bookmaker odds available" h2h case exactly (same pickBookmaker() call).
+  // event.bookmakers is empty — checked once, up front, before any
+  // per-bookmaker iteration (H5-A4.1: previously via pickBookmaker(), now
+  // an explicit length check, mirroring findSpreadOutcome's own identical
+  // guard).
   | { readonly kind: "NO_BOOKMAKER" }
-  // The picked bookmaker has no "totals" market entry at all.
+  // None of the bookmakers tried (in orderedBookmakersForFallback() order)
+  // has a "totals" market entry at all.
   | { readonly kind: "MARKET_ABSENT" }
   // A "totals" market exists but has zero outcomes named "Over"/"Under" for
   // the requested direction — a degenerate/unexpected provider shape.
@@ -1034,10 +1037,26 @@ function canonicalizeProviderPoint(point: number): string | null {
 
 // Pure — no I/O, no caching, no mutation. Operates on an already-matched
 // event (the caller is responsible for event resolution, exactly like every
-// existing extractOutcomePrice() caller in this file already is) and reuses
-// pickBookmaker() unchanged, so Totals gets the identical Pinnacle-preferred/
-// first-bookmaker-fallback policy h2h already has — never a second,
-// independently-maintained bookmaker-selection rule.
+// existing extractOutcomePrice() caller in this file already is).
+//
+// H5-A4.1 — production bug fix. This function previously committed to a
+// SINGLE bookmaker via pickBookmaker() (Pinnacle-or-first) BEFORE ever
+// checking whether it actually had the requested line — the exact same
+// regression findSpreadOutcome() below already fixed for SPREAD back in
+// Handicap Stage H1.1, but never applied here. Live-proven production
+// consequence (H5-A4's audit): for the real Arsenal vs Coventry City
+// fixture, Pinnacle only listed a 3.0 total, while 1xBet/William Hill/
+// others (already present in the exact same fetched response) listed 2.5,
+// and Tipico listed 3.5 — every one of those genuinely-available lines was
+// reported LINE_NOT_AVAILABLE because this function never looked past
+// Pinnacle. Now reuses orderedBookmakersForFallback() — the SAME shared
+// helper findSpreadOutcome() uses, never a second independently-maintained
+// bookmaker-selection rule — trying each bookmaker in preference order
+// (Pinnacle first, then provider-response order) and stopping at the FIRST
+// one whose totals market has the EXACT requested line. Never price-shops
+// across bookmakers for the best odds, never widens to a nearest/adjacent
+// line — exact canonical-string equality against requestedLine is
+// completely unchanged.
 export function findTotalsOutcome(
   event: OddsApiEvent,
   direction: TotalsDirection,
@@ -1048,49 +1067,57 @@ export function findTotalsOutcome(
     return { kind: "INVALID_REQUESTED_LINE" };
   }
 
-  const bookmakerPick = pickBookmaker(event);
-  if (!bookmakerPick) {
+  if (event.bookmakers.length === 0) {
     return { kind: "NO_BOOKMAKER" };
   }
 
-  const market = bookmakerPick.bookmaker.markets.find((m) => m.key === "totals");
-  if (!market) {
-    return { kind: "MARKET_ABSENT" };
-  }
-
   const targetName = TOTALS_OUTCOME_NAME[direction];
-  const candidates = market.outcomes.filter((outcome) => outcome.name.trim().toLowerCase() === targetName);
-  if (candidates.length === 0) {
-    return { kind: "OUTCOME_ABSENT" };
-  }
 
+  let sawMarket = false;
+  let sawOutcomeCandidates = false;
   let sawMissingPoint = false;
   let sawMalformedPoint = false;
 
-  for (const outcome of candidates) {
-    if (outcome.point === undefined || outcome.point === null) {
-      sawMissingPoint = true;
-      continue;
-    }
+  for (const bookmaker of orderedBookmakersForFallback(event)) {
+    const market = bookmaker.markets.find((m) => m.key === "totals");
+    if (!market) continue;
+    sawMarket = true;
 
-    const canonicalPoint = canonicalizeProviderPoint(outcome.point);
-    if (canonicalPoint === null) {
-      sawMalformedPoint = true;
-      continue;
-    }
+    const candidates = market.outcomes.filter((outcome) => outcome.name.trim().toLowerCase() === targetName);
+    if (candidates.length === 0) continue;
+    sawOutcomeCandidates = true;
 
-    if (canonicalPoint === canonicalRequestedLine) {
-      return {
-        kind: "MATCHED",
-        price: outcome.price,
-        bookmaker: bookmakerPick.bookmaker.title,
-        isFallbackBookmaker: bookmakerPick.isFallback,
-        marketKey: "totals",
-        point: canonicalPoint,
-      };
+    for (const outcome of candidates) {
+      if (outcome.point === undefined || outcome.point === null) {
+        sawMissingPoint = true;
+        continue;
+      }
+
+      const canonicalPoint = canonicalizeProviderPoint(outcome.point);
+      if (canonicalPoint === null) {
+        sawMalformedPoint = true;
+        continue;
+      }
+
+      if (canonicalPoint === canonicalRequestedLine) {
+        return {
+          kind: "MATCHED",
+          price: outcome.price,
+          bookmaker: bookmaker.title,
+          // Same honest meaning as findSpreadOutcome's own identical field:
+          // true whenever the bookmaker actually used isn't Pinnacle,
+          // whether because Pinnacle was absent entirely or because
+          // Pinnacle was present but lacked this exact line.
+          isFallbackBookmaker: bookmaker.key !== "pinnacle",
+          marketKey: "totals",
+          point: canonicalPoint,
+        };
+      }
     }
   }
 
+  if (!sawMarket) return { kind: "MARKET_ABSENT" };
+  if (!sawOutcomeCandidates) return { kind: "OUTCOME_ABSENT" };
   if (sawMissingPoint) return { kind: "MISSING_POINT" };
   if (sawMalformedPoint) return { kind: "MALFORMED_POINT" };
   return { kind: "LINE_NOT_AVAILABLE" };

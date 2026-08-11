@@ -1418,7 +1418,7 @@ test("Phase 3.1 lookup: a '+2.5' requestedLine is accepted and canonicalized, ma
   assert.equal(result.kind, "MATCHED");
 });
 
-test("Phase 3.1 lookup: fallback bookmaker behavior remains correct — no Pinnacle present, falls back to the first bookmaker, exactly like h2h", () => {
+test("Phase 3.1 lookup: fallback bookmaker behavior remains correct — no Pinnacle present, uses the first bookmaker in provider order (H5-A4.1: via orderedBookmakersForFallback, both bookmakers here happen to share the same line so this doesn't exercise the multi-line fallback itself — see the dedicated H5-A4.1 section below for that)", () => {
   const event = totalsEvent("Arsenal", "Chelsea", [
     { key: "bet365", title: "Bet365", markets: [{ key: "totals", outcomes: [totalsOutcome("Over", 1.8, 2.5), totalsOutcome("Under", 2.0, 2.5)] }] },
     { key: "williamhill", title: "William Hill", markets: [{ key: "totals", outcomes: [totalsOutcome("Over", 1.75, 2.5), totalsOutcome("Under", 2.05, 2.5)] }] },
@@ -1428,7 +1428,7 @@ test("Phase 3.1 lookup: fallback bookmaker behavior remains correct — no Pinna
 
   assert.equal(result.kind, "MATCHED");
   if (result.kind !== "MATCHED") return;
-  assert.equal(result.bookmaker, "Bet365", "must fall back to the first bookmaker (bet365), same rule as h2h's pickBookmaker()");
+  assert.equal(result.bookmaker, "Bet365", "must select the first bookmaker in provider response order");
   assert.equal(result.price, 1.8);
   assert.equal(result.isFallbackBookmaker, true);
 });
@@ -1458,6 +1458,302 @@ test("H4-B5.6 TOTALS: exact-line safety preserved — 2.25 never matches a provi
 
   const threeEvent = totalsEvent("Arsenal", "Chelsea", [pinnacleTotalsBookmaker([totalsOutcome("Over", 1.85, 3)])]);
   assert.equal(findTotalsOutcome(threeEvent, "OVER", "2.75").kind, "LINE_NOT_AVAILABLE");
+});
+
+/* ============================================================================
+ * H5-A4.1 — TOTALS bookmaker fallback fix. Live-proven production bug
+ * (H5-A4's audit, real Arsenal vs Coventry City fixture): findTotalsOutcome
+ * used to commit to a single bookmaker (pickBookmaker()) before checking
+ * whether it had the requested line — Pinnacle only listed 3.0, so 2.5
+ * (offered by 1xBet/William Hill/others in the SAME response) and 3.5
+ * (offered by Tipico) were reported LINE_NOT_AVAILABLE even though they
+ * genuinely existed. Now uses orderedBookmakersForFallback() — the exact
+ * same shared helper findSpreadOutcome() already used since Handicap Stage
+ * H1.1 — mirroring that fix's own test structure one-for-one.
+ * ============================================================================ */
+
+function totalsBookmaker(key: string, title: string, outcomes: OddsApiOutcome[]): OddsApiBookmaker {
+  return { key, title, markets: [{ key: "totals", outcomes }] };
+}
+
+test("H5-A4.1 PRODUCTION REGRESSION: Arsenal — Coventry City — Pinnacle only has 3.0, 1xBet has the exact 2.5 the player requested -> 1xBet is selected, never Pinnacle, never a failure", () => {
+  const event = totalsEvent("Arsenal", "Coventry City", [
+    totalsBookmaker("pinnacle", "Pinnacle", [totalsOutcome("Over", 1.95, 3), totalsOutcome("Under", 1.88, 3)]),
+    totalsBookmaker("onexbet", "1xBet", [totalsOutcome("Over", 1.64, 2.5), totalsOutcome("Under", 2.47, 2.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "2.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.bookmaker, "1xBet");
+  assert.equal(result.price, 1.64);
+  assert.equal(result.point, "2.5");
+  assert.equal(result.isFallbackBookmaker, true);
+});
+
+test("H5-A4.1 PRODUCTION REGRESSION, full pipeline: verifyTotalsOdds end-to-end reproduces the same exact result via the fetch layer", async () => {
+  mockEvents([
+    totalsFetchEvent("evt-arsenal-coventry-totals", "Arsenal", "Coventry City", [
+      totalsBookmaker("pinnacle", "Pinnacle", [totalsOutcome("Over", 1.95, 3), totalsOutcome("Under", 1.88, 3)]),
+      totalsBookmaker("onexbet", "1xBet", [totalsOutcome("Over", 1.64, 2.5), totalsOutcome("Under", 2.47, 2.5)]),
+    ]),
+  ]);
+
+  const result = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Coventry City", direction: "OVER", line: "2.5", odds: null });
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(result.sourceOdds, 1.64);
+  assert.equal(result.bookmaker, "1xBet");
+});
+
+/* --- A. Preferred bookmaker has the exact line --------------------------- */
+
+test("H5-A4.1 (A): Pinnacle has the requested line -> Pinnacle used, no fallback needed", () => {
+  const event = totalsEvent("Arsenal", "Coventry City", [
+    totalsBookmaker("pinnacle", "Pinnacle", [totalsOutcome("Over", 1.9, 2.5), totalsOutcome("Under", 1.95, 2.5)]),
+    totalsBookmaker("onexbet", "1xBet", [totalsOutcome("Over", 1.95, 2.5), totalsOutcome("Under", 1.9, 2.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "2.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.bookmaker, "Pinnacle", "preferred bookmaker must win when it has the exact line, even though 1xBet's price (1.95) is HIGHER — this is availability fallback, not best-price shopping");
+  assert.equal(result.price, 1.9);
+  assert.equal(result.isFallbackBookmaker, false);
+});
+
+/* --- B/C/D. Pinnacle lacks the line, exact fallback to 1xBet (2.5) ------- */
+
+test("H5-A4.1 (B/C): Pinnacle lacks the exact line, fallback bookmaker (1xBet) has exact 2.5 -> fallback succeeds, OVER 2.5 uses 1xBet", () => {
+  const event = totalsEvent("Arsenal", "Coventry City", [
+    totalsBookmaker("pinnacle", "Pinnacle", [totalsOutcome("Over", 1.95, 3), totalsOutcome("Under", 1.88, 3)]),
+    totalsBookmaker("onexbet", "1xBet", [totalsOutcome("Over", 1.64, 2.5), totalsOutcome("Under", 2.47, 2.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "2.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.bookmaker, "1xBet");
+  assert.equal(result.price, 1.64);
+  assert.equal(result.isFallbackBookmaker, true);
+});
+
+test("H5-A4.1 (D): same fixture, UNDER 2.5 also falls back to 1xBet", () => {
+  const event = totalsEvent("Arsenal", "Coventry City", [
+    totalsBookmaker("pinnacle", "Pinnacle", [totalsOutcome("Over", 1.95, 3), totalsOutcome("Under", 1.88, 3)]),
+    totalsBookmaker("onexbet", "1xBet", [totalsOutcome("Over", 1.64, 2.5), totalsOutcome("Under", 2.47, 2.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "UNDER", "2.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.bookmaker, "1xBet");
+  assert.equal(result.price, 2.47);
+  assert.equal(result.isFallbackBookmaker, true);
+});
+
+/* --- E/F. Pinnacle lacks the line, exact fallback to Tipico (3.5) -------- */
+
+test("H5-A4.1 (E): Pinnacle has 3.0, Tipico has the exact 3.5 the player requested -> Tipico used for OVER 3.5", () => {
+  const event = totalsEvent("Arsenal", "Coventry City", [
+    totalsBookmaker("pinnacle", "Pinnacle", [totalsOutcome("Over", 1.95, 3), totalsOutcome("Under", 1.88, 3)]),
+    totalsBookmaker("tipico_de", "Tipico", [totalsOutcome("Over", 2.25, 3.5), totalsOutcome("Under", 1.6, 3.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "3.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.bookmaker, "Tipico");
+  assert.equal(result.price, 2.25);
+  assert.equal(result.isFallbackBookmaker, true);
+});
+
+test("H5-A4.1 (F): same fixture, UNDER 3.5 also falls back to Tipico", () => {
+  const event = totalsEvent("Arsenal", "Coventry City", [
+    totalsBookmaker("pinnacle", "Pinnacle", [totalsOutcome("Over", 1.95, 3), totalsOutcome("Under", 1.88, 3)]),
+    totalsBookmaker("tipico_de", "Tipico", [totalsOutcome("Over", 2.25, 3.5), totalsOutcome("Under", 1.6, 3.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "UNDER", "3.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.bookmaker, "Tipico");
+  assert.equal(result.price, 1.6);
+  assert.equal(result.isFallbackBookmaker, true);
+});
+
+/* --- G/H/I. No bookmaker has the exact line ------------------------------ */
+
+test("H5-A4.1 (G): no bookmaker (preferred or fallback) has the exact requested line -> LINE_NOT_AVAILABLE, no substitute chosen", () => {
+  const event = totalsEvent("Arsenal", "Coventry City", [
+    totalsBookmaker("pinnacle", "Pinnacle", [totalsOutcome("Over", 1.95, 3), totalsOutcome("Under", 1.88, 3)]),
+    totalsBookmaker("onexbet", "1xBet", [totalsOutcome("Over", 1.64, 2.5), totalsOutcome("Under", 2.47, 2.5)]),
+    totalsBookmaker("tipico_de", "Tipico", [totalsOutcome("Over", 2.25, 3.5), totalsOutcome("Under", 1.6, 3.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "4");
+
+  assert.equal(result.kind, "LINE_NOT_AVAILABLE");
+});
+
+test("H5-A4.1 (H): requested 2.5, provider only has 2.25/3.0/3.5 across every bookmaker -> NO MATCH, never nearest-line", () => {
+  const event = totalsEvent("Arsenal", "Coventry City", [
+    totalsBookmaker("pinnacle", "Pinnacle", [totalsOutcome("Over", 1.95, 3), totalsOutcome("Under", 1.88, 3)]),
+    totalsBookmaker("quarter-book", "Quarter Book", [totalsOutcome("Over", 1.7, 2.25), totalsOutcome("Under", 2.1, 2.25)]),
+    totalsBookmaker("tipico_de", "Tipico", [totalsOutcome("Over", 2.25, 3.5), totalsOutcome("Under", 1.6, 3.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "2.5");
+
+  assert.equal(result.kind, "LINE_NOT_AVAILABLE");
+});
+
+test("H5-A4.1 (I): requested 3.5, provider has only 3.0 across every bookmaker -> NO MATCH", () => {
+  const event = totalsEvent("Arsenal", "Coventry City", [
+    totalsBookmaker("pinnacle", "Pinnacle", [totalsOutcome("Over", 1.95, 3), totalsOutcome("Under", 1.88, 3)]),
+    totalsBookmaker("coolbet", "Coolbet", [totalsOutcome("Over", 1.93, 3), totalsOutcome("Under", 1.93, 3)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "3.5");
+
+  assert.equal(result.kind, "LINE_NOT_AVAILABLE");
+});
+
+/* --- J. Deterministic ordering -------------------------------------------- */
+
+test("H5-A4.1 (J): several fallback bookmakers have the exact line -> the FIRST one in deterministic provider order wins, never the best price", () => {
+  const event = totalsEvent("Arsenal", "Coventry City", [
+    totalsBookmaker("pinnacle", "Pinnacle", [totalsOutcome("Over", 1.95, 3), totalsOutcome("Under", 1.88, 3)]),
+    totalsBookmaker("bookmaker-a", "Bookmaker A", [totalsOutcome("Over", 1.5, 2.5), totalsOutcome("Under", 2.6, 2.5)]),
+    totalsBookmaker("bookmaker-b", "Bookmaker B", [totalsOutcome("Over", 1.95, 2.5), totalsOutcome("Under", 1.85, 2.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "2.5");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.bookmaker, "Bookmaker A", "must select the first eligible bookmaker in provider response order, never the higher-priced Bookmaker B");
+  assert.equal(result.price, 1.5);
+});
+
+test("H5-A4.1: explicit no-best-price proof — a later, higher-priced fallback bookmaker never overrides an earlier, lower-priced eligible one", () => {
+  const event = totalsEvent("Arsenal", "Coventry City", [
+    totalsBookmaker("pinnacle", "Pinnacle", [totalsOutcome("Over", 1.95, 3), totalsOutcome("Under", 1.88, 3)]),
+    totalsBookmaker("cheap-first", "Cheap First", [totalsOutcome("Over", 1.5, 2.5), totalsOutcome("Under", 2.6, 2.5)]),
+    totalsBookmaker("expensive-second", "Expensive Second", [totalsOutcome("Over", 2.5, 2.5), totalsOutcome("Under", 1.5, 2.5)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "2.5");
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind === "MATCHED") {
+    assert.equal(result.bookmaker, "Cheap First");
+    assert.equal(result.price, 1.5, "the FIRST eligible fallback bookmaker wins regardless of a later one offering better odds");
+  }
+});
+
+/* --- Market safety: another bookmaker with no totals market at all ------- */
+
+test("H5-A4.1: another bookmaker has an h2h market but no totals market at all -> never used as a market substitute", () => {
+  const event = totalsEvent("Arsenal", "Coventry City", [
+    { key: "pinnacle", title: "Pinnacle", markets: [{ key: "h2h", outcomes: [] }] },
+    { key: "other", title: "Other Bookmaker", markets: [{ key: "h2h", outcomes: [{ name: "Arsenal", price: 1.5 }] }] },
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "2.5");
+
+  assert.equal(result.kind, "MARKET_ABSENT");
+});
+
+/* --- Quarter TOTALS lines also benefit from the fallback fix ------------- */
+
+test("H5-A4.1: quarter TOTALS (2.25) also falls back correctly — Pinnacle has 2.5, a fallback bookmaker has the exact 2.25", () => {
+  const event = totalsEvent("Arsenal", "Coventry City", [
+    totalsBookmaker("pinnacle", "Pinnacle", [totalsOutcome("Over", 1.9, 2.5), totalsOutcome("Under", 1.9, 2.5)]),
+    totalsBookmaker("quarter-book", "Quarter Book", [totalsOutcome("Over", 1.91, 2.25), totalsOutcome("Under", 1.85, 2.25)]),
+  ]);
+
+  const result = findTotalsOutcome(event, "OVER", "2.25");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.bookmaker, "Quarter Book");
+  assert.equal(result.price, 1.91);
+  assert.equal(result.isFallbackBookmaker, true);
+});
+
+/* --- Only one provider fetch, never one per bookmaker --------------------- */
+
+test("H5-A4.1: fallback across bookmakers happens entirely within the ALREADY-fetched event — verifyTotalsOdds still makes exactly one HTTP request", async () => {
+  let fetchCount = 0;
+  currentHandler = async () => {
+    fetchCount += 1;
+    return jsonResponse([
+      totalsFetchEvent("evt-totals-onefetch", "Arsenal", "Coventry City", [
+        totalsBookmaker("pinnacle", "Pinnacle", [totalsOutcome("Over", 1.95, 3), totalsOutcome("Under", 1.88, 3)]),
+        totalsBookmaker("a", "A", [totalsOutcome("Over", 1.93, 3), totalsOutcome("Under", 1.93, 3)]),
+        totalsBookmaker("onexbet", "1xBet", [totalsOutcome("Over", 1.64, 2.5), totalsOutcome("Under", 2.47, 2.5)]),
+      ]),
+    ]);
+  };
+
+  const result = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Coventry City", direction: "OVER", line: "2.5", odds: null });
+
+  assert.equal(result.matched, true, result.note ?? "expected a match");
+  assert.equal(fetchCount, 1, "inspecting multiple bookmakers must never trigger additional HTTP requests — the provider response already contains all bookmakers");
+});
+
+/* --- Full live-bug-shape fixture: all six requested selections ----------- */
+
+test("H5-A4.1 live-bug-shape fixture: Pinnacle Over/Under 3, 1xBet Over/Under 2.5, Tipico Over/Under 3.5 -> every genuinely-offered selection now resolves to its real bookmaker/price", async () => {
+  const fixture = () => [
+    totalsFetchEvent("evt-live-bug-shape", "Arsenal", "Coventry City", [
+      totalsBookmaker("pinnacle", "Pinnacle", [totalsOutcome("Over", 1.95, 3), totalsOutcome("Under", 1.88, 3)]),
+      totalsBookmaker("onexbet", "1xBet", [totalsOutcome("Over", 1.64, 2.5), totalsOutcome("Under", 2.47, 2.5)]),
+      totalsBookmaker("tipico_de", "Tipico", [totalsOutcome("Over", 2.25, 3.5), totalsOutcome("Under", 1.6, 3.5)]),
+    ]),
+  ];
+
+  mockEvents(fixture());
+  const over25 = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Coventry City", direction: "OVER", line: "2.5", odds: null });
+  assert.equal(over25.matched, true);
+  assert.equal(over25.bookmaker, "1xBet");
+  assert.equal(over25.sourceOdds, 1.64);
+
+  mockEvents(fixture());
+  const under25 = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Coventry City", direction: "UNDER", line: "2.5", odds: null });
+  assert.equal(under25.matched, true);
+  assert.equal(under25.bookmaker, "1xBet");
+  assert.equal(under25.sourceOdds, 2.47);
+
+  mockEvents(fixture());
+  const over3 = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Coventry City", direction: "OVER", line: "3", odds: null });
+  assert.equal(over3.matched, true);
+  assert.equal(over3.bookmaker, "Pinnacle");
+  assert.equal(over3.sourceOdds, 1.95);
+
+  mockEvents(fixture());
+  const under3 = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Coventry City", direction: "UNDER", line: "3", odds: null });
+  assert.equal(under3.matched, true);
+  assert.equal(under3.bookmaker, "Pinnacle");
+  assert.equal(under3.sourceOdds, 1.88);
+
+  mockEvents(fixture());
+  const over35 = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Coventry City", direction: "OVER", line: "3.5", odds: null });
+  assert.equal(over35.matched, true);
+  assert.equal(over35.bookmaker, "Tipico");
+  assert.equal(over35.sourceOdds, 2.25);
+
+  mockEvents(fixture());
+  const under35 = await verifyTotalsOdds({ sport: "premier league", event: "Arsenal vs Coventry City", direction: "UNDER", line: "3.5", odds: null });
+  assert.equal(under35.matched, true);
+  assert.equal(under35.bookmaker, "Tipico");
+  assert.equal(under35.sourceOdds, 1.6);
 });
 
 /* ============================================================================
