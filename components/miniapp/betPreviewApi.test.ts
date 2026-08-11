@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getBetPreviewErrorMessage, isAiTimeoutFailure } from "./betPreviewApi";
+import { fetchBetPreview, getBetPreviewErrorMessage, isAiTimeoutFailure } from "./betPreviewApi";
 
 // Focused coverage for the client-side error-message mapping — the actual
 // fetchBetPreview() network/parsing logic is exercised indirectly by the
@@ -125,4 +125,91 @@ test("isAiTimeoutFailure: false for non-http failure kinds (network/timeout/inva
   assert.equal(isAiTimeoutFailure({ kind: "network" }), false);
   assert.equal(isAiTimeoutFailure({ kind: "timeout" }), false);
   assert.equal(isAiTimeoutFailure({ kind: "invalid_response" }), false);
+});
+
+/* -------------------------------------------------------------------------- */
+/* UI-E1 — RATE_LIMITED (429) was previously unhandled, silently falling     */
+/* through to the generic "Something went wrong" default and discarding the */
+/* server's already-computed retryAfterSeconds (lib/rateLimit/               */
+/* rateLimitResponse.ts). Same "was there a specific server reason that got  */
+/* masked" shape as the Benfica/St. Gallen regression above, so it's tested  */
+/* the same two ways: the message-mapping layer (getBetPreviewErrorMessage)  */
+/* and the HTTP-body-extraction layer (fetchBetPreview) that feeds it.       */
+/* -------------------------------------------------------------------------- */
+
+function stubFetch(responseInit: { status: number; body: unknown }) {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(responseInit.body), {
+      status: responseInit.status,
+      headers: { "Content-Type": "application/json" },
+    })) as typeof fetch;
+  return () => {
+    globalThis.fetch = original;
+  };
+}
+
+test("getBetPreviewErrorMessage: RATE_LIMITED with retryAfterSeconds includes the exact wait time, never the generic fallback", () => {
+  const message = getBetPreviewErrorMessage({ kind: "http", code: "RATE_LIMITED", retryAfterSeconds: 12 });
+  assert.equal(message, "Too many attempts. Please try again in 12 seconds.");
+  assert.notEqual(message, GENERIC_FALLBACK);
+});
+
+test("getBetPreviewErrorMessage: RATE_LIMITED without retryAfterSeconds falls back to a generic-wait message, still never the unrelated generic fallback", () => {
+  const message = getBetPreviewErrorMessage({ kind: "http", code: "RATE_LIMITED" });
+  assert.equal(message, "Too many attempts. Please try again shortly.");
+  assert.notEqual(message, GENERIC_FALLBACK);
+});
+
+test("fetchBetPreview: 429 RATE_LIMITED with retryAfterSeconds propagates it onto the failure object", async () => {
+  const restore = stubFetch({ status: 429, body: { error: "RATE_LIMITED", retryAfterSeconds: 12 } });
+  try {
+    const result = await fetchBetPreview("fake-init-data", "Arsenal win stake 10");
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.deepEqual(result.failure, { kind: "http", code: "RATE_LIMITED", retryAfterSeconds: 12 });
+    assert.equal(getBetPreviewErrorMessage(result.failure), "Too many attempts. Please try again in 12 seconds.");
+  } finally {
+    restore();
+  }
+});
+
+test("fetchBetPreview: 429 RATE_LIMITED without retryAfterSeconds in the body leaves it undefined on the failure object", async () => {
+  const restore = stubFetch({ status: 429, body: { error: "RATE_LIMITED" } });
+  try {
+    const result = await fetchBetPreview("fake-init-data", "Arsenal win stake 10");
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.deepEqual(result.failure, { kind: "http", code: "RATE_LIMITED" });
+    assert.equal((result.failure as { retryAfterSeconds?: number }).retryAfterSeconds, undefined);
+    assert.equal(getBetPreviewErrorMessage(result.failure), "Too many attempts. Please try again shortly.");
+  } finally {
+    restore();
+  }
+});
+
+test("fetchBetPreview: retryAfterSeconds is never attached to a non-RATE_LIMITED http failure", async () => {
+  const restore = stubFetch({ status: 422, body: { error: "PARSE_FAILED", detail: "unrelated" } });
+  try {
+    const result = await fetchBetPreview("fake-init-data", "gibberish");
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.deepEqual(result.failure, { kind: "http", code: "PARSE_FAILED" });
+  } finally {
+    restore();
+  }
+});
+
+test("UI-E1 regression: existing AI_TIMEOUT message is unchanged by this stage", () => {
+  const message = getBetPreviewErrorMessage({ kind: "http", code: "AI_TIMEOUT" });
+  assert.equal(message, "Your bet was not rejected. The analysis took too long. Please try again.");
+});
+
+test("UI-E1 regression: existing network failure message is unchanged by this stage", () => {
+  assert.equal(getBetPreviewErrorMessage({ kind: "network" }), "Unable to connect. Check your internet connection.");
+});
+
+test("getBetPreviewErrorMessage: an unknown HTTP error code still uses the generic fallback, unchanged", () => {
+  const message = getBetPreviewErrorMessage({ kind: "http", code: "UNKNOWN" });
+  assert.equal(message, GENERIC_FALLBACK);
 });

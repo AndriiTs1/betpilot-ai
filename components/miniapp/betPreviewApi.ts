@@ -83,10 +83,25 @@ export type BetPreviewErrorCode =
   | "AMBIGUOUS_EVENT"
   | "UNSUPPORTED_SELECTION"
   | "EVENT_ALREADY_STARTED"
-  | "ODDS_UNAVAILABLE";
+  | "ODDS_UNAVAILABLE"
+  // UI-E1 — the server has always been able to send this (429, see
+  // lib/rateLimit/rateLimitResponse.ts), but this client had no case for
+  // it, so it silently fell through to getBetPreviewErrorMessage's generic
+  // "Something went wrong" default, discarding the server's already-
+  // computed retryAfterSeconds. See BetPreviewFailure's own comment for
+  // how that value is threaded through.
+  | "RATE_LIMITED";
 
 export type BetPreviewFailure =
-  | { kind: "http"; code: BetPreviewErrorCode | "UNKNOWN" }
+  | {
+      kind: "http";
+      code: BetPreviewErrorCode | "UNKNOWN";
+      // UI-E1 — present only for a RATE_LIMITED (429) response, whose body
+      // is the only one that ever carries this field
+      // (lib/rateLimit/rateLimitResponse.ts). Optional, not required, so
+      // every other existing `http` failure's shape/behavior is untouched.
+      retryAfterSeconds?: number;
+    }
   | { kind: "network" }
   | { kind: "timeout" }
   | { kind: "invalid_response" };
@@ -201,7 +216,16 @@ export async function fetchBetPreview(initData: string, message: string): Promis
         ? ((body as { error: string }).error as BetPreviewErrorCode | "UNKNOWN")
         : "UNKNOWN";
 
-    return { ok: false, failure: { kind: "http", code } };
+    // UI-E1 — only ever present on the RATE_LIMITED body
+    // (lib/rateLimit/rateLimitResponse.ts's own { error, retryAfterSeconds }
+    // shape); every other error body simply doesn't have this field, so
+    // this stays undefined for them, same as before this change.
+    const retryAfterSeconds =
+      typeof body === "object" && body !== null && typeof (body as { retryAfterSeconds?: unknown }).retryAfterSeconds === "number"
+        ? (body as { retryAfterSeconds: number }).retryAfterSeconds
+        : undefined;
+
+    return { ok: false, failure: { kind: "http", code, ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}) } };
   }
 
   const body: unknown = await response.json().catch(() => null);
@@ -265,6 +289,13 @@ export function getBetPreviewErrorMessage(failure: BetPreviewFailure): string {
       return "This match has already started. Please choose a different event.";
     case "ODDS_UNAVAILABLE":
       return "Odds for this selection aren't available right now. Please try again shortly.";
+    // UI-E1 — see BetPreviewErrorCode's own comment: this was previously
+    // unhandled and fell through to the generic default below, discarding
+    // the server's already-computed retryAfterSeconds.
+    case "RATE_LIMITED":
+      return failure.retryAfterSeconds !== undefined
+        ? `Too many attempts. Please try again in ${failure.retryAfterSeconds} seconds.`
+        : "Too many attempts. Please try again shortly.";
     case "INVALID_JSON":
     case "INTERNAL_ERROR":
     default:
