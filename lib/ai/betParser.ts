@@ -7,6 +7,7 @@ import { z } from "zod";
 import { normalizeParsedBet, type ParsedBetSlip, type PendingMarketReconciliation } from "@/lib/bets/betSlip";
 import { chatPrompt, ocrPrompt } from "./betParserPrompt";
 import { mapRawBetSlipToParsedBetSlip, type RawBetSelectionFields, type NumericRoleObservation, type MarketIntentObservation } from "./betDraftMapper";
+import { normalizeOcrParticipantClaim } from "./ocrParticipantClaimNormalizer";
 
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "llama3.2";
@@ -629,10 +630,17 @@ function buildParsedBetSlipResult(
       // own header). Only that exact signature ever defers instead of
       // rejecting here — every other contradiction/ambiguity falls straight
       // through to the unchanged rejection below.
-      const pendingMarketReconciliation = classifyReconcilable1X2Mismatch(
-        unreliableMarketClaim,
-        raw.selections[0]?.selection,
-      );
+      // SCREENSHOT QA-CORE S1 — OCR-mode only: a screenshot's own `selection`
+      // text (e.g. "Bayern Win (П1)") is cleaned into something closer to a
+      // bare participant name before it becomes claimedParticipant, fixing
+      // the proven NO_MATCH-via-diluted-word-overlap failure (see
+      // lib/ai/ocrParticipantClaimNormalizer.ts's own header). CHAT mode's
+      // claim text is passed through completely unchanged — this can never
+      // alter typed-chat behavior, not even for an identical claim string.
+      const claimedSelectionText =
+        mode === "OCR" ? normalizeOcrParticipantClaim(raw.selections[0]?.selection ?? "") : raw.selections[0]?.selection;
+
+      const pendingMarketReconciliation = classifyReconcilable1X2Mismatch(unreliableMarketClaim, claimedSelectionText);
 
       if (pendingMarketReconciliation) {
         const [firstSelection, ...restSelections] = parsedSlip.selections;

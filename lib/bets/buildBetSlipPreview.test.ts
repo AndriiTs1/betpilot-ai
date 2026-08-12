@@ -2586,6 +2586,41 @@ test("QA-1.6 real rrrr.png incident regression: Bayern/Stuttgart SINGLE reaches 
 });
 
 /* ============================================================================
+ * SCREENSHOT QA-CORE S1 — end-to-end proof: the ACTUAL claimedParticipant
+ * lib/ai/betParser.ts's OCR-mode normalization now produces for the real
+ * rrrr.png incident ("Bayern") — not a hand-cleaned "Bayern Munich" — still
+ * reconciles successfully. Before S1, production's real claimedParticipant
+ * was "Bayern Win (П1)" (the unmodified selection display text), which
+ * failed with resolutionKind NO_MATCH (word-overlap score 0.333, below the
+ * 0.4 threshold) — confirmed by the QA-3 fresh reconciliation diagnostic.
+ * This test proves the fix at the actual boundary that matters: the exact
+ * string S1 hands to reconcile1X2ParticipantClaim, not an idealized one.
+ * ============================================================================ */
+
+test("S1 real fixture regression: claimedParticipant 'Bayern' (S1's actual normalized output, not a hand-cleaned 'Bayern Munich') reconciles to MONEYLINE_3WAY/HOME against the real provider event", async () => {
+  const slip = pendingSlip("HOME", "Bayern", {
+    event: "Bayern Munich vs VfB Stuttgart",
+    submittedOdds: 1.42,
+    stake: 100,
+  });
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => verifiedWithTeams(1.42, 1.42, "Bayern Munich", "VfB Stuttgart"),
+  });
+
+  const previewSelection = result.preview.selections[0];
+  assert.equal(previewSelection.oddsStatus, "VERIFIED");
+  assert.equal(previewSelection.marketType, "MONEYLINE_3WAY");
+
+  assert.ok(result.previewToken !== null);
+  const verifiedToken = verifyPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verifiedToken.ok, true);
+  if (!verifiedToken.ok) return;
+  assert.equal(verifiedToken.payload.canonicalMarketType, "MONEYLINE_3WAY");
+  assert.equal(verifiedToken.payload.canonicalSelectionType, "HOME");
+});
+
+/* ============================================================================
  * SCREENSHOT QA-2.1 — reconciliation-boundary diagnostic. Extends
  * [SCREENSHOT_QA1_DIAGNOSTIC] (lib/logging/screenshotQa1Diagnostic.ts) with a
  * "reconciliation" stage so a future MARKET_INTENT_UNRECONCILED reproduction

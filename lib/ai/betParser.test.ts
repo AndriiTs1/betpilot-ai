@@ -1534,3 +1534,144 @@ test("QA-1.6 typed-chat regression: 'Arsenal win'/'Bayern Munich win'/'Arsenal -
     );
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/* SCREENSHOT QA-CORE S1 — OCR-mode claimedParticipant normalization          */
+/* -------------------------------------------------------------------------- */
+
+test("S1: the real production claim 'Bayern Win (П1)' is deferred with a CLEAN claimedParticipant ('Bayern'), not the raw display text", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({
+        sport: "Football",
+        event: "Bayern Munich vs VfB Stuttgart",
+        market: "1X2",
+        selection: "Bayern Win (П1)",
+        stake: 100,
+        odds: 1.42,
+      }),
+    );
+
+  const result = await parseBetSlipMessage(BAYERN_STUTTGART_OCR_TEXT, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `expected deferred-valid, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+
+  // The DISPLAYED selection text is completely untouched — only the
+  // internal claimedParticipant used for provider matching is cleaned.
+  assert.equal(result.selections[0].selection, "Bayern Win (П1)");
+  assert.deepEqual(result.selections[0].pendingMarketReconciliation, {
+    requiredSide: "HOME",
+    claimedParticipant: "Bayern",
+  });
+});
+
+test("S1 (task requirement C): an OCR-mode 'RB Leipzig W1' claim resolves HOME cleanly — via the PRE-EXISTING participant-prefix-aware market-intent classifier (H3 Production Fix), which strips the exact event participant name 'RB Leipzig' as a prefix and classifies the remaining 'W1' directly. No pendingMarketReconciliation is needed here at all: the claim itself already corroborates the 'W1' evidence, so this exact shape was never actually broken — confirmed as a regression, not attributed to this stage's new normalizer.", async () => {
+  const text = ["Bundesliga", "RB Leipzig - Borussia Mönchengladbach", "1X2", "W1 - RB Leipzig", "1.53"].join("\n");
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({
+        sport: "Football",
+        event: "RB Leipzig vs Borussia Mönchengladbach",
+        market: "1X2",
+        selection: "RB Leipzig W1",
+        stake: 10,
+        odds: 1.53,
+      }),
+    );
+
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `expected a valid parse, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+
+  // The raw display selection is untouched either way.
+  assert.equal(result.selections[0].selection, "RB Leipzig W1");
+  assert.equal(
+    result.selections[0].pendingMarketReconciliation ?? null,
+    null,
+    "already corroborates directly — no deferral needed for an exact participant-name-prefix + shorthand shape",
+  );
+});
+
+test("S1 (task requirement D): an OCR-mode 'Borussia Mönchengladbach W2' claim resolves AWAY cleanly the same way — no deferral needed", async () => {
+  const text = ["Bundesliga", "RB Leipzig - Borussia Mönchengladbach", "1X2", "W2 - Borussia Mönchengladbach", "6.5"].join("\n");
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({
+        sport: "Football",
+        event: "RB Leipzig vs Borussia Mönchengladbach",
+        market: "1X2",
+        selection: "Borussia Mönchengladbach W2",
+        stake: 10,
+        odds: 6.5,
+      }),
+    );
+
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `expected a valid parse, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+
+  assert.equal(
+    result.selections[0].pendingMarketReconciliation ?? null,
+    null,
+    "already corroborates directly — no deferral needed",
+  );
+});
+
+test("S1 (task requirement E): an OCR-mode 'RB Leipzig to win' claim IS deferred (winner-suffix breaks the exact-prefix corroboration path) with claimedParticipant cleaned to 'RB Leipzig'", async () => {
+  // Deliberately only ONE market-intent signal in the source text ("П1") —
+  // unlike the claim text, which independently says "to win". Two SEPARATE
+  // signals in the same source text would be genuine AMBIGUOUS evidence
+  // (QA-1.6's own proven negative case); this fixture avoids that by
+  // construction, exactly like every existing QA-1.6 positive fixture does.
+  const text = ["Bundesliga", "RB Leipzig - Borussia Mönchengladbach", "1X2", "П1 - RB Leipzig", "1.53"].join("\n");
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({
+        sport: "Football",
+        event: "RB Leipzig vs Borussia Mönchengladbach",
+        market: "1X2",
+        selection: "RB Leipzig to win",
+        stake: 10,
+        odds: 1.53,
+      }),
+    );
+
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `expected deferred-valid, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+
+  assert.deepEqual(result.selections[0].pendingMarketReconciliation, {
+    requiredSide: "HOME",
+    claimedParticipant: "RB Leipzig",
+  });
+});
+
+test("S1: CHAT mode never normalizes the claim, even for an identically-polluted string — claimedParticipant stays byte-for-byte the raw claim", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({ event: "Bayern Munich vs VfB Stuttgart", selection: "Bayern Win (П1)", stake: 10 }),
+    );
+
+  // A hand-typed chat message carrying the identical 1X2 evidence shape.
+  const result = await parseBetSlipMessage("П1 ставка 10", "CHAT");
+
+  assert.equal(result.valid, true, result.valid ? "" : `expected deferred-valid, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+
+  assert.deepEqual(result.selections[0].pendingMarketReconciliation, {
+    requiredSide: "HOME",
+    // Unchanged from the raw claim — CHAT mode must never invoke
+    // normalizeOcrParticipantClaim(), proving the mode-gate is real, not
+    // just coincidentally producing the same output.
+    claimedParticipant: "Bayern Win (П1)",
+  });
+});

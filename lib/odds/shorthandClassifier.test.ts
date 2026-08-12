@@ -1,14 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyBettingSelectionText, classifyBettingSelectionTextWithMarketHint } from "./shorthandClassifier";
+import {
+  classifyBettingSelectionText,
+  classifyBettingSelectionTextWithMarketHint,
+  stripTrailingWinnerSuffix,
+  isBareMoneylineShorthandToken,
+} from "./shorthandClassifier";
 
 /* -------------------------------------------------------------------------- */
 /* Moneyline — bare 1X2 tokens (parity with the removed legacyOddsBridge.ts   */
 /* HOME_TOKENS/DRAW_TOKENS/AWAY_TOKENS fixtures)                              */
 /* -------------------------------------------------------------------------- */
 
-test("classifyBettingSelectionText: HOME tokens (1/П1/P1/home)", () => {
-  for (const input of ["1", "П1", "п1", "P1", "p1", "Home", "home"]) {
+test("classifyBettingSelectionText: HOME tokens (1/П1/P1/W1/home)", () => {
+  for (const input of ["1", "П1", "п1", "P1", "p1", "W1", "w1", "Home", "home"]) {
     const result = classifyBettingSelectionText(input);
     assert.equal(result.marketType, "MONEYLINE_3WAY", `"${input}"`);
     assert.equal(result.selectionType, "HOME", `"${input}"`);
@@ -25,8 +30,8 @@ test("classifyBettingSelectionText: DRAW tokens (X/Х/draw/ничья/нічия
   }
 });
 
-test("classifyBettingSelectionText: AWAY tokens (2/П2/P2/away)", () => {
-  for (const input of ["2", "П2", "п2", "P2", "p2", "Away", "away"]) {
+test("classifyBettingSelectionText: AWAY tokens (2/П2/P2/W2/away)", () => {
+  for (const input of ["2", "П2", "п2", "P2", "p2", "W2", "w2", "Away", "away"]) {
     const result = classifyBettingSelectionText(input);
     assert.equal(result.marketType, "MONEYLINE_3WAY", `"${input}"`);
     assert.equal(result.selectionType, "AWAY", `"${input}"`);
@@ -1078,4 +1083,39 @@ test("classifyBettingSelectionTextWithMarketHint: knownParticipantNames still ap
   assert.equal(result.marketType, "TOTALS");
   assert.equal(result.selectionType, "OVER");
   assert.equal(result.embeddedLine, "2.5");
+});
+
+/* -------------------------------------------------------------------------- */
+/* SCREENSHOT QA-CORE S1 — exported helpers, reused by                        */
+/* lib/ai/ocrParticipantClaimNormalizer.ts                                   */
+/* -------------------------------------------------------------------------- */
+
+test("stripTrailingWinnerSuffix: strips a trailing English/Russian/Ukrainian winner suffix", () => {
+  assert.equal(stripTrailingWinnerSuffix("Bayern Win"), "Bayern");
+  assert.equal(stripTrailingWinnerSuffix("RB Leipzig to win"), "RB Leipzig");
+  assert.equal(stripTrailingWinnerSuffix("Inter wins"), "Inter");
+  assert.equal(stripTrailingWinnerSuffix("Арсенал победа"), "Арсенал");
+});
+
+test("stripTrailingWinnerSuffix: a name with no winner suffix is returned unchanged (trimmed)", () => {
+  assert.equal(stripTrailingWinnerSuffix("Bayern Munich"), "Bayern Munich");
+  assert.equal(stripTrailingWinnerSuffix("  Real Madrid  "), "Real Madrid");
+});
+
+test("isBareMoneylineShorthandToken: recognizes every HOME/DRAW/AWAY token, case-insensitively", () => {
+  for (const token of ["1", "п1", "P1", "w1", "W1", "home", "Home"]) {
+    assert.equal(isBareMoneylineShorthandToken(token), true, token);
+  }
+  for (const token of ["x", "Draw", "ничья"]) {
+    assert.equal(isBareMoneylineShorthandToken(token), true, token);
+  }
+  for (const token of ["2", "п2", "P2", "w2", "W2", "away", "Away"]) {
+    assert.equal(isBareMoneylineShorthandToken(token), true, token);
+  }
+});
+
+test("isBareMoneylineShorthandToken: a real participant name or word is never mistaken for a shorthand token", () => {
+  for (const token of ["Bayern", "Real", "Madrid", "Leipzig", "Win", "Arsenal"]) {
+    assert.equal(isBareMoneylineShorthandToken(token), false, token);
+  }
 });

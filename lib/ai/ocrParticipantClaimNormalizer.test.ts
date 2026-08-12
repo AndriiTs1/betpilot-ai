@@ -1,0 +1,67 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { normalizeOcrParticipantClaim } from "./ocrParticipantClaimNormalizer";
+
+/* -------------------------------------------------------------------------- */
+/* SCREENSHOT QA-CORE S1 — required positive cases (task's own A/C/D/E)       */
+/* -------------------------------------------------------------------------- */
+
+test("A: the real production claim 'Bayern Win (П1)' cleans to 'Bayern'", () => {
+  assert.equal(normalizeOcrParticipantClaim("Bayern Win (П1)"), "Bayern");
+});
+
+test("B: 'VfB Stuttgart (П2)' cleans to 'VfB Stuttgart'", () => {
+  assert.equal(normalizeOcrParticipantClaim("VfB Stuttgart (П2)"), "VfB Stuttgart");
+});
+
+test("C: 'RB Leipzig W1' cleans to 'RB Leipzig' (trailing bare W1 shorthand)", () => {
+  assert.equal(normalizeOcrParticipantClaim("RB Leipzig W1"), "RB Leipzig");
+});
+
+test("D: 'Borussia Mönchengladbach W2' cleans to 'Borussia Mönchengladbach'", () => {
+  assert.equal(normalizeOcrParticipantClaim("Borussia Mönchengladbach W2"), "Borussia Mönchengladbach");
+});
+
+test("E: 'RB Leipzig to win' cleans to 'RB Leipzig' (winner-suffix only, no shorthand token present)", () => {
+  assert.equal(normalizeOcrParticipantClaim("RB Leipzig to win"), "RB Leipzig");
+});
+
+test("leading shorthand + separator: 'П1 - Бавария' cleans to 'Бавария'", () => {
+  assert.equal(normalizeOcrParticipantClaim("П1 - Бавария"), "Бавария");
+});
+
+test("leading shorthand, no separator: 'П1 Бавария' cleans to 'Бавария'", () => {
+  assert.equal(normalizeOcrParticipantClaim("П1 Бавария"), "Бавария");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Safety — must never over-strip a genuine participant name                  */
+/* -------------------------------------------------------------------------- */
+
+test("a clean participant name with no noise is returned unchanged", () => {
+  assert.equal(normalizeOcrParticipantClaim("Bayern Munich"), "Bayern Munich");
+  assert.equal(normalizeOcrParticipantClaim("Real Madrid"), "Real Madrid");
+  assert.equal(normalizeOcrParticipantClaim("RB Leipzig"), "RB Leipzig");
+});
+
+test("a genuinely descriptive parenthetical (not a shorthand token) is left untouched", () => {
+  assert.equal(normalizeOcrParticipantClaim("Bayern Munich (Germany)"), "Bayern Munich (Germany)");
+});
+
+test("a first/last word that merely LOOKS short is never stripped unless it's an exact closed-vocabulary token", () => {
+  // "1899" is not "1" — must not be treated as the HOME shorthand token.
+  assert.equal(normalizeOcrParticipantClaim("Hoffenheim 1899"), "Hoffenheim 1899");
+});
+
+test("a single-word claim that is itself a shorthand token is not emptied out — falls back to the original text", () => {
+  assert.equal(normalizeOcrParticipantClaim("(П1)"), "(П1)");
+});
+
+test("whitespace is trimmed and normalized even when no shorthand noise is present", () => {
+  assert.equal(normalizeOcrParticipantClaim("  Arsenal  "), "Arsenal");
+});
+
+test("an empty string is returned as-is, never throws", () => {
+  assert.equal(normalizeOcrParticipantClaim(""), "");
+  assert.equal(normalizeOcrParticipantClaim("   "), "");
+});

@@ -63,12 +63,18 @@ function normalizeKey(text: string): string {
 /* Moneyline — bare 1X2 tokens                                                */
 /* -------------------------------------------------------------------------- */
 
-const HOME_TOKENS: ReadonlySet<string> = new Set(["1", "п1", "p1", "home"]);
+// SCREENSHOT QA-CORE S1 — "w1"/"w2" added alongside the existing 1/п1/p1 and
+// 2/п2/p2 tokens: 1xBet's own Western-style shorthand for the exact same
+// HOME/AWAY moneyline outcome (confirmed by the QA-3 design review's Case B
+// reference screenshot, labeled "1X2 / W1"). Same closed-vocabulary
+// discipline as every other token here — not a new pattern, just two more
+// entries in an existing set.
+const HOME_TOKENS: ReadonlySet<string> = new Set(["1", "п1", "p1", "w1", "home"]);
 // Ukrainian "нічия" added alongside the existing Russian/English tokens —
 // already proven safe and live: lib/bets/buildSportmonksFootballPreview.ts's
 // own independent DRAW_KEYWORDS list already includes it in production.
 const DRAW_TOKENS: ReadonlySet<string> = new Set(["x", "х", "draw", "ничья", "нічия"]);
-const AWAY_TOKENS: ReadonlySet<string> = new Set(["2", "п2", "p2", "away"]);
+const AWAY_TOKENS: ReadonlySet<string> = new Set(["2", "п2", "p2", "w2", "away"]);
 
 /* -------------------------------------------------------------------------- */
 /* Moneyline — winner-suffix phrases ("Inter Win", "Арсенал победа")          */
@@ -81,6 +87,25 @@ const AWAY_TOKENS: ReadonlySet<string> = new Set(["2", "п2", "p2", "away"]);
 const WINNER_SUFFIX_REGEX = /\s+(?:to\s+win|wins|win|победа|выиграет|перемога)$/i;
 const HOME_TEAM_PHRASES: ReadonlySet<string> = new Set(["home", "home team"]);
 const AWAY_TEAM_PHRASES: ReadonlySet<string> = new Set(["away", "away team"]);
+
+// SCREENSHOT QA-CORE S1 — exported so a caller with its own raw claim text
+// (lib/ai/ocrParticipantClaimNormalizer.ts) can strip the exact same
+// trailing winner-suffix phrase this file already strips internally, rather
+// than re-declaring WINNER_SUFFIX_REGEX a second time. Pure string ->
+// string; never mutates, never throws, no-op when no suffix is present.
+export function stripTrailingWinnerSuffix(text: string): string {
+  return text.replace(WINNER_SUFFIX_REGEX, "").trim();
+}
+
+// SCREENSHOT QA-CORE S1 — exported so a caller can recognize a bare 1X2
+// shorthand token (the same closed HOME_TOKENS/DRAW_TOKENS/AWAY_TOKENS
+// vocabulary this file already trusts) without re-declaring or duplicating
+// those sets elsewhere. Case-insensitive; the caller is responsible for
+// trimming surrounding punctuation/whitespace from `token` first.
+export function isBareMoneylineShorthandToken(token: string): boolean {
+  const key = token.toLowerCase();
+  return HOME_TOKENS.has(key) || DRAW_TOKENS.has(key) || AWAY_TOKENS.has(key);
+}
 
 /* -------------------------------------------------------------------------- */
 /* Totals (match)                                                              */
