@@ -150,22 +150,22 @@ test("11b. SOLE_CANDIDATE never CONTRADICTS a mismatched claim either", () => {
 /* -------------------------------------------------------------------------- */
 
 test("12. '2.5' == '2.50'", () => {
-  const evidence: NumericRoleEvidence[] = [evidenceEntry({ role: "LINE", value: "2.50", confidence: "MARKER_HIGH", marker: "тб" })];
+  const evidence: NumericRoleEvidence[] = [evidenceEntry({ role: "LINE", value: "2.50", confidence: "LABEL_STRONG", marker: "тб" })];
   const result = verifyNumericRoleClaim(claim("LINE", "2.5"), evidence);
   assert.equal(result.verdict, "CORROBORATED");
 });
 
 test("13. '10' == '10.00'", () => {
-  const evidence: NumericRoleEvidence[] = [evidenceEntry({ role: "STAKE", value: "10.00", confidence: "MARKER_HIGH", marker: "ставка" })];
+  const evidence: NumericRoleEvidence[] = [evidenceEntry({ role: "STAKE", value: "10.00", confidence: "LABEL_STRONG", marker: "ставка" })];
   const result = verifyNumericRoleClaim(claim("STAKE", "10"), evidence);
   assert.equal(result.verdict, "CORROBORATED");
 });
 
 test("14. signed spread values: '+1' == '1', and '-1.5' compares correctly", () => {
-  const plusOne: NumericRoleEvidence[] = [evidenceEntry({ role: "LINE", value: "1", confidence: "MARKER_HIGH", marker: "ф2" })];
+  const plusOne: NumericRoleEvidence[] = [evidenceEntry({ role: "LINE", value: "1", confidence: "LABEL_STRONG", marker: "ф2" })];
   assert.equal(verifyNumericRoleClaim(claim("LINE", "+1"), plusOne).verdict, "CORROBORATED");
 
-  const negative: NumericRoleEvidence[] = [evidenceEntry({ role: "LINE", value: "-1.5", confidence: "MARKER_HIGH", marker: "ф1" })];
+  const negative: NumericRoleEvidence[] = [evidenceEntry({ role: "LINE", value: "-1.5", confidence: "LABEL_STRONG", marker: "ф1" })];
   assert.equal(verifyNumericRoleClaim(claim("LINE", "-1.5"), negative).verdict, "CORROBORATED");
   assert.equal(verifyNumericRoleClaim(claim("LINE", "1.5"), negative).verdict, "CONTRADICTED");
   assert.equal(verifyNumericRoleClaim(claim("LINE", -1.5), negative).verdict, "CORROBORATED");
@@ -185,7 +185,7 @@ test("16. EXPRESS multiple DIFFERENT lines: correctly AMBIGUOUS, not falsely COR
   // Revised on review: this used to assert CORROBORATED for a claim
   // matching one of two distinct per-leg lines. That overclaimed
   // confidence the verifier doesn't actually have — from its flat,
-  // leg-unaware view, two distinct MARKER_HIGH LINE values are
+  // leg-unaware view, two distinct LABEL_STRONG LINE values are
   // indistinguishable from the "ставка 10, ставка 20" self-contradiction
   // case (see the AMBIGUOUS tests above). AMBIGUOUS is the honest verdict
   // here; leg attribution remains a separate, future problem, exactly as
@@ -248,7 +248,7 @@ test("18. malformed claimed numeric value never crashes and never fabricates a v
 /* -------------------------------------------------------------------------- */
 
 test("19. evidence for another role never creates a contradiction — LINE evidence cannot contradict a STAKE claim", () => {
-  const evidence: NumericRoleEvidence[] = [evidenceEntry({ role: "LINE", value: "2.5", confidence: "MARKER_HIGH", marker: "тб" })];
+  const evidence: NumericRoleEvidence[] = [evidenceEntry({ role: "LINE", value: "2.5", confidence: "LABEL_STRONG", marker: "тб" })];
   // No STAKE evidence exists at all — only an unrelated LINE entry with a
   // totally different value from the claim.
   const result = verifyNumericRoleClaim(claim("STAKE", 10), evidence);
@@ -315,18 +315,18 @@ test("23. duplicated SAME value is NOT conflicting: 'ставка 10, ставк
   assert.equal(result.supportingEvidence.length, 2);
 });
 
-test("24. one MARKER_HIGH + an unrelated MARKER_LOW of a different value must NOT create false ambiguity", () => {
+test("24. one LABEL_STRONG + an unrelated MARKER_LOW of a different value must NOT create false ambiguity", () => {
   const evidence = extractNumericRoleEvidence("Арсенал ТБ 2.5 ставка 10 на 15");
   const stakes = evidence.filter((e) => e.role === "STAKE");
   assert.equal(stakes.length, 2);
-  assert.equal(stakes.find((e) => e.value === "10")?.confidence, "MARKER_HIGH");
+  assert.equal(stakes.find((e) => e.value === "10")?.confidence, "LABEL_STRONG");
   assert.equal(stakes.find((e) => e.value === "15")?.confidence, "MARKER_LOW");
 
   const result = verifyNumericRoleClaim(claim("STAKE", 10), evidence);
-  assert.equal(result.verdict, "CORROBORATED", "a single MARKER_HIGH value plus an unrelated weak MARKER_LOW mention must not trigger AMBIGUOUS");
+  assert.equal(result.verdict, "CORROBORATED", "a single LABEL_STRONG value plus an unrelated weak MARKER_LOW mention must not trigger AMBIGUOUS");
 });
 
-test("two DISTINCT MARKER_LOW values alone (no MARKER_HIGH at all) do not trigger AMBIGUOUS either — only MARKER_HIGH conflicts count", () => {
+test("two DISTINCT MARKER_LOW values alone (no LABEL_STRONG at all) do not trigger AMBIGUOUS either — only LABEL_STRONG conflicts count", () => {
   const evidence: NumericRoleEvidence[] = [
     evidenceEntry({ role: "STAKE", value: "10", confidence: "MARKER_LOW", marker: "на" }),
     evidenceEntry({ role: "STAKE", value: "20", confidence: "MARKER_LOW", marker: "на" }),
@@ -473,4 +473,138 @@ test("QA-1.3 role regression: the new STAKE vocabulary does not steal LINE/ODDS 
   assert.equal(verifyNumericRoleClaim(claim("LINE", 2.5), evidence).verdict, "CORROBORATED");
   assert.equal(verifyNumericRoleClaim(claim("ODDS", 1.9), evidence).verdict, "CORROBORATED");
   assert.equal(verifyNumericRoleClaim(claim("STAKE", 10), evidence).verdict, "CORROBORATED");
+});
+
+/* ============================================================================
+ * SCREENSHOT QA-CORE S2 — LABEL_STRONG vs LABEL_WEAK tiering. Before this
+ * stage, a bare currency-suffixed number (a quick-stake preset button, a
+ * repeated CTA amount with no field label of its own) was the SAME
+ * MARKER_HIGH tier as an explicit "Ставка:"/"Stake" field label — two
+ * DIFFERENT values at that tier always produced a false AMBIGUOUS, exactly
+ * the class of bug behind the real Leipzig/Gladbach production incident
+ * (numeric_mismatch, role=STAKE, verdict=AMBIGUOUS). These tests prove the
+ * fix directly, using hand-built evidence (unit-level, isolating the
+ * verifier's own tiering logic from the extractor) and the extractor
+ * end-to-end.
+ * ============================================================================ */
+
+test("S2 core fix — direct unit proof: LABEL_STRONG 'Stake 100' + a DIFFERENT-valued LABEL_WEAK '50 USD' no longer competes — claim 100 is CORROBORATED, not AMBIGUOUS", () => {
+  const evidence: NumericRoleEvidence[] = [
+    evidenceEntry({ role: "STAKE", value: "100", confidence: "LABEL_STRONG", marker: "stake" }),
+    evidenceEntry({ role: "STAKE", value: "50", confidence: "LABEL_WEAK", marker: "usd" }),
+  ];
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+  assert.equal(result.supportingEvidence.length, 1);
+  assert.equal(result.supportingEvidence[0].confidence, "LABEL_STRONG");
+  assert.equal(result.conflictingEvidence.length, 0, "the LABEL_WEAK entry must be completely excluded, not merely outvoted");
+});
+
+test("S2: several DIFFERENT-valued LABEL_WEAK quick-stake-style entries alongside one LABEL_STRONG label all defer to the label — still CORROBORATED", () => {
+  const evidence: NumericRoleEvidence[] = [
+    evidenceEntry({ role: "STAKE", value: "10", confidence: "LABEL_WEAK", marker: "usd" }),
+    evidenceEntry({ role: "STAKE", value: "25", confidence: "LABEL_WEAK", marker: "usd" }),
+    evidenceEntry({ role: "STAKE", value: "100", confidence: "LABEL_STRONG", marker: "ставка" }),
+    evidenceEntry({ role: "STAKE", value: "200", confidence: "LABEL_WEAK", marker: "usd" }),
+  ];
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+});
+
+test("S2 fail-closed preserved: two DISTINCT LABEL_WEAK values with NO label anywhere remain AMBIGUOUS — the fix narrows false positives, it does not weaken genuinely unresolvable input", () => {
+  const evidence: NumericRoleEvidence[] = [
+    evidenceEntry({ role: "STAKE", value: "100", confidence: "LABEL_WEAK", marker: "usd" }),
+    evidenceEntry({ role: "STAKE", value: "500", confidence: "LABEL_WEAK", marker: "usd" }),
+  ];
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.equal(result.verdict, "AMBIGUOUS");
+});
+
+test("S2 fail-closed preserved: two DISTINCT LABEL_STRONG values (genuinely conflicting explicit labels) remain AMBIGUOUS, unchanged from before this stage", () => {
+  const evidence: NumericRoleEvidence[] = [
+    evidenceEntry({ role: "STAKE", value: "50", confidence: "LABEL_STRONG", marker: "stake" }),
+    evidenceEntry({ role: "STAKE", value: "100", confidence: "LABEL_STRONG", marker: "bet" }),
+  ];
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.equal(result.verdict, "AMBIGUOUS");
+});
+
+test("S2: LABEL_STRONG contradicted by a claim still CONTRADICTS even with unrelated LABEL_WEAK noise present", () => {
+  const evidence: NumericRoleEvidence[] = [
+    evidenceEntry({ role: "STAKE", value: "50", confidence: "LABEL_STRONG", marker: "stake" }),
+    evidenceEntry({ role: "STAKE", value: "500", confidence: "LABEL_WEAK", marker: "usd" }),
+  ];
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.equal(result.verdict, "CONTRADICTED");
+  assert.equal(result.conflictingEvidence.length, 1);
+  assert.equal(result.conflictingEvidence[0].confidence, "LABEL_STRONG");
+});
+
+test("S2 end-to-end via the real extractor: an explicit 'Stake' label repeated as a currency-suffixed CTA (same value) still corroborates cleanly", () => {
+  const evidence = extractNumericRoleEvidence("Stake 100\n10 25 50 100 200\nPlace Bet 100 USD");
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+});
+
+test("S2 end-to-end via the real extractor: an explicit 'Stake' label alongside a DIFFERENT-valued currency-suffixed quick-stake button no longer produces a false AMBIGUOUS", () => {
+  // "50 USD" here is a *different* value than the real stake, with no
+  // excluding label (not "balance"/"payout") — exactly the shape that used
+  // to collide at the flat MARKER_HIGH tier.
+  const evidence = extractNumericRoleEvidence("Stake 100\n10 25 50 USD 200\nPlace Bet");
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+});
+
+/* ============================================================================
+ * SCREENSHOT QA-CORE S2 — real Leipzig/Gladbach fixture regression. A
+ * reconstructed, representative 1xBet-style OCR text (not the literal
+ * captured transcript — never logged, by design, same convention as
+ * BAYERN_STUTTGART_OCR_TEXT elsewhere in this codebase): an explicit stake
+ * label, a quick-stake preset row, and a repeated CTA amount, all present at
+ * once — proving the class of bug this stage fixes on a realistic, full
+ * sportsbook-slip-shaped text, not just a hand-built two-entry array.
+ *
+ * "Potential payout" (not "Possible win"): a latent, PRE-EXISTING, unrelated
+ * gap was found while building this fixture — marketIntentEvidence.ts's own
+ * winner-suffix window matching treats any trailing "win" as a participant-
+ * winner phrase, so an English "Possible win" LABEL (not a team name) was
+ * misread as a second, spurious MONEYLINE_2WAY/PARTICIPANT market-intent
+ * signal, producing a false AMBIGUOUS unrelated to this stage's own STAKE
+ * tiering fix. Worked around here by rewording the label; the underlying gap
+ * is out of S2's scope (market-intent evidence, not numeric-role evidence)
+ * and is noted in this stage's own report as a finding for a later stage.
+ * ============================================================================ */
+
+const LEIPZIG_GLADBACH_OCR_TEXT = [
+  "Germany - Bundesliga",
+  "RB Leipzig - Borussia Mönchengladbach",
+  "28.08.2026 20:30",
+  "1X2",
+  "W1 - RB Leipzig",
+  "1.53",
+  "",
+  "Stake",
+  "100",
+  "USD",
+  "10 25 50 100 200",
+  "",
+  "Potential payout",
+  "153.00 USD",
+  "Place Bet 100.00 USD",
+].join("\n");
+
+test("S2 real Leipzig/Gladbach fixture: claim STAKE=100 CORROBORATED, no AMBIGUOUS — the reconstructed production incident no longer reproduces", () => {
+  const evidence = extractNumericRoleEvidence(LEIPZIG_GLADBACH_OCR_TEXT);
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+});
+
+test("S2 real Leipzig/Gladbach fixture: the odds claim (1.53) is unaffected by the STAKE fix", () => {
+  const evidence = extractNumericRoleEvidence(LEIPZIG_GLADBACH_OCR_TEXT);
+  // No explicit odds marker in this fixture (odds appears bare on its own
+  // line, matching the real screenshot's own layout) — UNVERIFIED is the
+  // correct, honest verdict, same as it would have been before this stage.
+  const result = verifyNumericRoleClaim(claim("ODDS", 1.53), evidence);
+  assert.notEqual(result.verdict, "CONTRADICTED");
+  assert.notEqual(result.verdict, "AMBIGUOUS");
 });

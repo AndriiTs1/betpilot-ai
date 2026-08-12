@@ -18,11 +18,23 @@ import { classifyBettingSelectionText } from "@/lib/odds/shorthandClassifier";
 
 export type NumericRole = "STAKE" | "LINE" | "ODDS";
 
+// SCREENSHOT QA-CORE S2 — MARKER_HIGH split into two tiers. LABEL_STRONG is
+// every case that used to be MARKER_HIGH via an explicit FIELD-NAME label
+// sitting directly next to the number (ставка/ставлю/сумма ставки/размер
+// ставки/сумма пари/экспресс/stake/bet/коэффициент/кф/коэф/odds/@, or a line
+// token recognized by the shared shorthand classifier) — unchanged in
+// meaning, just renamed. LABEL_WEAK is new: a bare currency-suffixed number
+// with NO field label at all ("100 USD", "$100") — real evidence in
+// isolation (nothing else to go on), but a sportsbook screenshot commonly
+// repeats that exact shape for a quick-stake preset button, a "possible
+// win" figure, or other UI chrome that is not the stake. See
+// numericRoleVerifier.ts's own header for how the two tiers interact: an
+// explicit LABEL_STRONG entry always wins outright over LABEL_WEAK noise
+// for the same role, rather than the two competing as equals the way two
+// MARKER_HIGH entries used to.
 export type NumericRoleEvidenceConfidence =
-  // A closed, unambiguous marker word/symbol sits directly next to the
-  // number (ставка/ставлю/экспресс/коэффициент/кф/коэф/odds/stake/bet/@,
-  // or a line token recognized by the shared shorthand classifier).
-  | "MARKER_HIGH"
+  | "LABEL_STRONG"
+  | "LABEL_WEAK"
   // A marker exists, but it is a common word with other meanings in
   // ordinary speech ("на") — real evidence, weighted lower.
   | "MARKER_LOW"
@@ -150,23 +162,23 @@ const NOT_WORD_AFTER = "(?![a-zа-яё0-9])";
 // whether the label and number are on the same OCR line or separate ones —
 // no special-casing needed for that.
 const MARKER_BEFORE_NUMBER_SPECS: readonly MarkerBeforeNumberSpec[] = [
-  { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "ставка", pattern: new RegExp(`${NOT_WORD_BEFORE}ставка\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
-  { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "ставлю", pattern: new RegExp(`${NOT_WORD_BEFORE}ставлю\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
-  { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "сумма ставки", pattern: new RegExp(`${NOT_WORD_BEFORE}сумма\\s+ставки\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
-  { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "размер ставки", pattern: new RegExp(`${NOT_WORD_BEFORE}размер\\s+ставки\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
-  { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "сумма пари", pattern: new RegExp(`${NOT_WORD_BEFORE}сумма\\s+пари\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
-  { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "экспресс", pattern: new RegExp(`${NOT_WORD_BEFORE}(?:экспресс|express)\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
-  { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "stake", pattern: /\bstake\s*[:=]?\s*([+-]?\d+(?:[.,]\d+)?)/gi },
-  { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "bet", pattern: /\bbet\s*[:=]?\s*([+-]?\d+(?:[.,]\d+)?)/gi },
+  { role: "STAKE", confidence: "LABEL_STRONG", markerLabel: "ставка", pattern: new RegExp(`${NOT_WORD_BEFORE}ставка\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
+  { role: "STAKE", confidence: "LABEL_STRONG", markerLabel: "ставлю", pattern: new RegExp(`${NOT_WORD_BEFORE}ставлю\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
+  { role: "STAKE", confidence: "LABEL_STRONG", markerLabel: "сумма ставки", pattern: new RegExp(`${NOT_WORD_BEFORE}сумма\\s+ставки\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
+  { role: "STAKE", confidence: "LABEL_STRONG", markerLabel: "размер ставки", pattern: new RegExp(`${NOT_WORD_BEFORE}размер\\s+ставки\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
+  { role: "STAKE", confidence: "LABEL_STRONG", markerLabel: "сумма пари", pattern: new RegExp(`${NOT_WORD_BEFORE}сумма\\s+пари\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
+  { role: "STAKE", confidence: "LABEL_STRONG", markerLabel: "экспресс", pattern: new RegExp(`${NOT_WORD_BEFORE}(?:экспресс|express)\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
+  { role: "STAKE", confidence: "LABEL_STRONG", markerLabel: "stake", pattern: /\bstake\s*[:=]?\s*([+-]?\d+(?:[.,]\d+)?)/gi },
+  { role: "STAKE", confidence: "LABEL_STRONG", markerLabel: "bet", pattern: /\bbet\s*[:=]?\s*([+-]?\d+(?:[.,]\d+)?)/gi },
   // "на" is a common preposition ("bet ON Arsenal", "total ON the match")
   // with no betting-specific meaning of its own — only ever treated as weak
   // STAKE evidence, never on par with an unambiguous marker like "ставка".
   { role: "STAKE", confidence: "MARKER_LOW", markerLabel: "на", pattern: new RegExp(`${NOT_WORD_BEFORE}на\\s+([+-]?\\d+(?:[.,]\\d+)?)${NOT_WORD_AFTER}`, "gi") },
-  { role: "ODDS", confidence: "MARKER_HIGH", markerLabel: "коэффициент", pattern: /коэффициент\s*[:=]?\s*(\d+(?:[.,]\d+)?)/gi },
-  { role: "ODDS", confidence: "MARKER_HIGH", markerLabel: "коэф", pattern: new RegExp(`${NOT_WORD_BEFORE}коэф\\.?\\s*[:=]?\\s*(\\d+(?:[.,]\\d+)?)`, "gi") },
-  { role: "ODDS", confidence: "MARKER_HIGH", markerLabel: "кф", pattern: new RegExp(`${NOT_WORD_BEFORE}кф\\.?\\s*[:=]?\\s*(\\d+(?:[.,]\\d+)?)`, "gi") },
-  { role: "ODDS", confidence: "MARKER_HIGH", markerLabel: "odds", pattern: /\bodds\s*[:=]?\s*(\d+(?:[.,]\d+)?)/gi },
-  { role: "ODDS", confidence: "MARKER_HIGH", markerLabel: "@", pattern: /@\s*(\d+(?:[.,]\d+)?)/g },
+  { role: "ODDS", confidence: "LABEL_STRONG", markerLabel: "коэффициент", pattern: /коэффициент\s*[:=]?\s*(\d+(?:[.,]\d+)?)/gi },
+  { role: "ODDS", confidence: "LABEL_STRONG", markerLabel: "коэф", pattern: new RegExp(`${NOT_WORD_BEFORE}коэф\\.?\\s*[:=]?\\s*(\\d+(?:[.,]\\d+)?)`, "gi") },
+  { role: "ODDS", confidence: "LABEL_STRONG", markerLabel: "кф", pattern: new RegExp(`${NOT_WORD_BEFORE}кф\\.?\\s*[:=]?\\s*(\\d+(?:[.,]\\d+)?)`, "gi") },
+  { role: "ODDS", confidence: "LABEL_STRONG", markerLabel: "odds", pattern: /\bodds\s*[:=]?\s*(\d+(?:[.,]\d+)?)/gi },
+  { role: "ODDS", confidence: "LABEL_STRONG", markerLabel: "@", pattern: /@\s*(\d+(?:[.,]\d+)?)/g },
 ];
 
 // Number-BEFORE-marker forms: the captured number is the very first thing
@@ -179,7 +191,7 @@ interface NumberBeforeMarkerSpec {
 }
 
 const NUMBER_BEFORE_MARKER_SPECS: readonly NumberBeforeMarkerSpec[] = [
-  { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "usdc", pattern: /([+-]?\d+(?:[.,]\d+)?)\s*(?:usdc|usd|\$)\b/gi },
+  { role: "STAKE", confidence: "LABEL_WEAK", markerLabel: "usdc", pattern: /([+-]?\d+(?:[.,]\d+)?)\s*(?:usdc|usd|\$)\b/gi },
 ];
 
 // SCREENSHOT QA-1.3 — the ROOT CAUSE the production diagnostic (QA-1.2)
@@ -190,9 +202,16 @@ const NUMBER_BEFORE_MARKER_SPECS: readonly NumberBeforeMarkerSpec[] = [
 // stake — "Возможный выигрыш\n142.00 USD" (potential win) is the exact
 // figure that turned the real screenshot's stake claim from a clean
 // CORROBORATED match into a false AMBIGUOUS one (a second, DIFFERENT
-// MARKER_HIGH STAKE value competing with the real 100). This is a bounded,
-// PRECEDING-text check (not a hand-picked "last/biggest number" heuristic,
-// and not a new confidence tier) — it excludes a currency-suffixed number
+// currency-suffixed STAKE value competing with the real 100). This bounded,
+// PRECEDING-text check remains in place even after SCREENSHOT QA-CORE S2
+// introduced the LABEL_STRONG/LABEL_WEAK tier split above (this spec is now
+// LABEL_WEAK) — the two are complementary, not redundant: this check
+// excludes a currency-suffixed number outright when a known non-stake label
+// precedes it (even with no competing evidence at all), while the
+// LABEL_WEAK tier separately keeps any *other*, unexcluded currency-suffixed
+// number from ever outranking or competing with an explicit LABEL_STRONG
+// field label elsewhere in the same text (e.g. a quick-stake preset button
+// with no explanatory label of its own). It excludes a currency-suffixed number
 // only when an explicit non-stake monetary label sits immediately before
 // it, exactly mirroring findLineEvidence's own "small bounded window,
 // explicit vocabulary only" discipline elsewhere in this file. 60 chars
@@ -427,7 +446,7 @@ function findLineEvidence(text: string, occurrences: readonly NumberOccurrence[]
           // found inside the normalized window text, leaving the label
           // uncleanly stripped for comma inputs.
           marker: deriveLineMarkerLabel(classified.windowText, classified.embeddedLine),
-          confidence: "MARKER_HIGH",
+          confidence: "LABEL_STRONG",
           start: occurrence.start,
           end: occurrence.end,
         });

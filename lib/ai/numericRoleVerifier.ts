@@ -50,28 +50,59 @@ export interface NumericRoleVerification {
 /* Confidence policy                                                          */
 /* -------------------------------------------------------------------------- */
 
-// MARKER_HIGH and MARKER_LOW can both actively CONFIRM a claim — even a
-// weak/ambiguous marker like "на" is still real textual evidence the player
-// wrote, and requiring it to also carry the higher CONTRADICTED bar (below)
-// before it can even support a match would make Step 1's MARKER_LOW tier
-// pointless. SOLE_CANDIDATE deliberately never corroborates on its own: it
-// is "the one number nothing else explains," not evidence that a specific
-// ROLE was intended — a claim that happens to equal it is unverified, not
-// confirmed, matching this stage's own worked example (`Арсенал победа 10`,
-// claim STAKE=10 against only a SOLE_CANDIDATE=10 entry -> UNVERIFIED).
-const CORROBORATING_CONFIDENCES: ReadonlySet<NumericRoleEvidenceConfidence> = new Set(["MARKER_HIGH", "MARKER_LOW"]);
+// LABEL_STRONG/LABEL_WEAK and MARKER_LOW can all actively CONFIRM a claim —
+// even a weak/ambiguous marker like "на" is still real textual evidence the
+// player wrote, and requiring it to also carry the higher CONTRADICTED bar
+// (below) before it can even support a match would make Step 1's MARKER_LOW
+// tier pointless. SOLE_CANDIDATE deliberately never corroborates on its own:
+// it is "the one number nothing else explains," not evidence that a
+// specific ROLE was intended — a claim that happens to equal it is
+// unverified, not confirmed, matching this stage's own worked example
+// (`Арсенал победа 10`, claim STAKE=10 against only a SOLE_CANDIDATE=10
+// entry -> UNVERIFIED).
+const CORROBORATING_CONFIDENCES: ReadonlySet<NumericRoleEvidenceConfidence> = new Set(["LABEL_STRONG", "LABEL_WEAK", "MARKER_LOW"]);
 
-// Only MARKER_HIGH can CONTRADICT. MARKER_LOW ("на") is too common a
-// preposition to justify a hard negative signal on its own — a mismatch
-// against it is real context (surfaced in conflictingEvidence either way)
-// but must never alone flip the verdict to CONTRADICTED. SOLE_CANDIDATE
-// never contradicts either, by the same reasoning as above: it was never
-// strong evidence FOR a role in the first place, so a mismatch against it
-// cannot be strong evidence AGAINST a claim either. This asymmetric bar
-// (corroborate: HIGH+LOW; contradict: HIGH only) is the deliberate design
-// choice that keeps false-positive CONTRADICTED verdicts rare, per this
-// stage's explicit goal.
-const CONTRADICTING_CONFIDENCES: ReadonlySet<NumericRoleEvidenceConfidence> = new Set(["MARKER_HIGH"]);
+// LABEL_STRONG/LABEL_WEAK can both CONTRADICT (the primaryTierEvidence()
+// filter below, applied before this set is ever consulted, already ensures
+// LABEL_WEAK entries are only reached here when NO LABEL_STRONG evidence for
+// the same role exists at all — see this file's own header). MARKER_LOW
+// ("на") is too common a preposition to justify a hard negative signal on
+// its own — a mismatch against it is real context (surfaced in
+// conflictingEvidence either way) but must never alone flip the verdict to
+// CONTRADICTED. SOLE_CANDIDATE never contradicts either, by the same
+// reasoning as above: it was never strong evidence FOR a role in the first
+// place, so a mismatch against it cannot be strong evidence AGAINST a claim
+// either.
+const CONTRADICTING_CONFIDENCES: ReadonlySet<NumericRoleEvidenceConfidence> = new Set(["LABEL_STRONG", "LABEL_WEAK"]);
+
+/* -------------------------------------------------------------------------- */
+/* SCREENSHOT QA-CORE S2 — tiering: an explicit field-name label always wins  */
+/* -------------------------------------------------------------------------- */
+
+// A sportsbook screenshot commonly carries an explicit, unambiguous field
+// label ("Ставка: 100") ALONGSIDE unrelated currency-suffixed noise with no
+// label of its own (a quick-stake preset button, a repeated CTA amount) —
+// before this stage, both were the same MARKER_HIGH tier, so two DIFFERENT
+// values at that tier always triggered AMBIGUOUS even when one was a clearly
+// labeled real field and the other was unlabeled UI chrome. This function is
+// the ONE place that decision is made: whenever ANY LABEL_STRONG evidence
+// exists for a role, every LABEL_WEAK entry for that SAME role is filtered
+// out before ambiguity/matching/contradiction is ever evaluated — it cannot
+// compete with, dilute, or out-rank an explicit label, regardless of its own
+// value. MARKER_LOW and SOLE_CANDIDATE are never filtered here; they were
+// never part of the high-confidence tier to begin with (see
+// CORROBORATING_CONFIDENCES/CONTRADICTING_CONFIDENCES above) and this
+// function changes nothing about how they're treated. When no LABEL_STRONG
+// evidence exists for the role at all, LABEL_WEAK entries pass through
+// unfiltered and behave exactly as MARKER_HIGH used to (including: two
+// DISTINCT LABEL_WEAK values with no label anywhere still fail closed as
+// AMBIGUOUS — this stage narrows false positives, it does not weaken the
+// fail-closed guarantee for genuinely unresolvable input).
+function primaryTierEvidence(sameRole: readonly NumericRoleEvidence[]): readonly NumericRoleEvidence[] {
+  const hasLabelStrong = sameRole.some((entry) => entry.confidence === "LABEL_STRONG");
+  if (!hasLabelStrong) return sameRole;
+  return sameRole.filter((entry) => entry.confidence !== "LABEL_WEAK");
+}
 
 /* -------------------------------------------------------------------------- */
 /* Numeric comparison                                                         */
@@ -100,12 +131,16 @@ function claimMatchesEvidence(claim: NumericRoleClaim, evidence: NumericRoleEvid
 /* matching logic                                                             */
 /* -------------------------------------------------------------------------- */
 
-// Only MARKER_HIGH entries are considered — a single MARKER_HIGH value plus
-// an unrelated MARKER_LOW mention of a different number must never trigger
-// this (MARKER_LOW was never strong enough to assert anything on its own,
-// so it cannot make the source "ambiguous" either).
+// Only LABEL_STRONG/LABEL_WEAK entries are considered — a single high-tier
+// value plus an unrelated MARKER_LOW mention of a different number must
+// never trigger this (MARKER_LOW was never strong enough to assert anything
+// on its own, so it cannot make the source "ambiguous" either). Callers
+// already pass this function evidence that primaryTierEvidence() has
+// filtered, so in practice at most ONE of LABEL_STRONG/LABEL_WEAK is ever
+// actually present here for a given role — this check simply covers both
+// tier names rather than assuming which one survived filtering.
 function distinctHighConfidenceValues(sameRole: readonly NumericRoleEvidence[]): NumericRoleEvidence[] {
-  const highConfidence = sameRole.filter((entry) => entry.confidence === "MARKER_HIGH");
+  const highConfidence = sameRole.filter((entry) => entry.confidence === "LABEL_STRONG" || entry.confidence === "LABEL_WEAK");
   const distinct: NumericRoleEvidence[] = [];
   for (const entry of highConfidence) {
     if (!distinct.some((existing) => sameNumericValue(existing.value, entry.value))) distinct.push(entry);
@@ -114,7 +149,7 @@ function distinctHighConfidenceValues(sameRole: readonly NumericRoleEvidence[]):
 }
 
 // Detects when the source text itself carries two or more DISTINCT,
-// explicit MARKER_HIGH values for the same role (e.g. "ставка 10, ставка
+// explicit high-tier values for the same role (e.g. "ставка 10, ставка
 // 20", or two different "коэффициент" mentions) — a property of the
 // SOURCE, independent of what the claim says. Checked before any matching
 // logic runs: even a claim that happens to equal ONE of the conflicting
@@ -128,7 +163,7 @@ function distinctHighConfidenceValues(sameRole: readonly NumericRoleEvidence[]):
 function detectSameRoleAmbiguity(claim: NumericRoleClaim, sameRole: readonly NumericRoleEvidence[]): NumericRoleVerification | null {
   if (distinctHighConfidenceValues(sameRole).length < 2) return null;
 
-  const highConfidenceEntries = sameRole.filter((entry) => entry.confidence === "MARKER_HIGH");
+  const highConfidenceEntries = sameRole.filter((entry) => entry.confidence === "LABEL_STRONG" || entry.confidence === "LABEL_WEAK");
   return {
     verdict: "AMBIGUOUS",
     supportingEvidence: highConfidenceEntries.filter((entry) => claimMatchesEvidence(claim, entry)),
@@ -153,12 +188,19 @@ export function verifyNumericRoleClaim(claim: NumericRoleClaim, evidence: readon
   }
 
   const sameRole = evidence.filter((entry) => entry.role === claim.role);
+  // SCREENSHOT QA-CORE S2 — see primaryTierEvidence()'s own header: whenever
+  // this role has any LABEL_STRONG evidence, every LABEL_WEAK entry is
+  // excluded from everything below (ambiguity detection AND matching/
+  // contradiction) — it never gets a vote once an explicit field label
+  // exists. MARKER_LOW/SOLE_CANDIDATE are untouched by this filter either
+  // way.
+  const primaryEvidence = primaryTierEvidence(sameRole);
 
-  const ambiguity = detectSameRoleAmbiguity(claim, sameRole);
+  const ambiguity = detectSameRoleAmbiguity(claim, primaryEvidence);
   if (ambiguity !== null) return ambiguity;
 
-  const matching = sameRole.filter((entry) => claimMatchesEvidence(claim, entry));
-  const conflicting = sameRole.filter((entry) => !claimMatchesEvidence(claim, entry));
+  const matching = primaryEvidence.filter((entry) => claimMatchesEvidence(claim, entry));
+  const conflicting = primaryEvidence.filter((entry) => !claimMatchesEvidence(claim, entry));
 
   const strongMatching = matching.filter((entry) => CORROBORATING_CONFIDENCES.has(entry.confidence));
   if (strongMatching.length > 0) {

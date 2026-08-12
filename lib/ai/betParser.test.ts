@@ -1675,3 +1675,58 @@ test("S1: CHAT mode never normalizes the claim, even for an identically-polluted
     claimedParticipant: "Bayern Win (П1)",
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* SCREENSHOT QA-CORE S2 — real Leipzig/Gladbach fixture, full-parser-level   */
+/* regression. Reconstructed, representative OCR text (not the literal       */
+/* captured transcript), same convention as BAYERN_STUTTGART_OCR_TEXT above. */
+/* "Potential payout", not "Possible win" — see the identical fixture's own  */
+/* comment in numericRoleVerifier.test.ts for the latent, unrelated          */
+/* marketIntentEvidence.ts gap this sidesteps.                               */
+/* -------------------------------------------------------------------------- */
+
+const LEIPZIG_GLADBACH_OCR_TEXT = [
+  "Germany - Bundesliga",
+  "RB Leipzig - Borussia Mönchengladbach",
+  "28.08.2026 20:30",
+  "1X2",
+  "W1 - RB Leipzig",
+  "1.53",
+  "",
+  "Stake",
+  "100",
+  "USD",
+  "10 25 50 100 200",
+  "",
+  "Potential payout",
+  "153.00 USD",
+  "Place Bet 100.00 USD",
+].join("\n");
+
+test("S2 real Leipzig/Gladbach fixture: the full OCR-mode parse succeeds — SINGLE, correct event/selection/odds/stake, no numeric_mismatch", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({
+        sport: "Football",
+        event: "RB Leipzig vs Borussia Mönchengladbach",
+        market: "1X2",
+        selection: "RB Leipzig Win",
+        stake: 100,
+        odds: 1.53,
+      }),
+    );
+
+  const result = await parseBetSlipMessage(LEIPZIG_GLADBACH_OCR_TEXT, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `expected a valid parse, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+
+  assert.equal(result.type, "SINGLE");
+  assert.equal(result.selections.length, 1);
+  assert.equal(result.selections[0].sport, "Football");
+  assert.equal(result.selections[0].event, "RB Leipzig vs Borussia Mönchengladbach");
+  assert.equal(result.selections[0].selection, "RB Leipzig Win");
+  assert.equal(result.selections[0].submittedOdds, 1.53);
+  assert.equal(result.stake, 100);
+});

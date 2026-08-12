@@ -24,10 +24,10 @@ test("1. 'Арсенал ТБ 2.5, ставка 10' — LINE 2.5, STAKE 10", () 
   assert.equal(lines.length, 1);
   assert.equal(stakes.length, 1);
   assertSpanText(text, lines[0], "2.5");
-  assert.equal(lines[0].confidence, "MARKER_HIGH");
+  assert.equal(lines[0].confidence, "LABEL_STRONG");
   assertSpanText(text, stakes[0], "10");
   assert.equal(stakes[0].marker, "ставка");
-  assert.equal(stakes[0].confidence, "MARKER_HIGH");
+  assert.equal(stakes[0].confidence, "LABEL_STRONG");
 });
 
 test("2. 'Арсенал ТБ 10, ставка 10' — LINE 10 and STAKE 10 as two separate source occurrences", () => {
@@ -304,6 +304,11 @@ test("currency-suffix stake marker: '10 USDC' (number before marker)", () => {
   assert.equal(stakes.length, 1);
   assertSpanText(text, stakes[0], "10");
   assert.equal(stakes[0].marker, "usdc");
+  // SCREENSHOT QA-CORE S2 — a bare currency suffix with no field-name label
+  // is LABEL_WEAK, not LABEL_STRONG: see numericRoleVerifier.ts's own
+  // tiering, which keeps this from ever out-ranking an explicit "ставка"/
+  // "stake" label elsewhere in the same text.
+  assert.equal(stakes[0].confidence, "LABEL_WEAK");
 });
 
 test("ставлю and экспресс markers are recognized as distinct STAKE markers", () => {
@@ -413,10 +418,10 @@ test("H3: 'Арсенал фора -1.5 ставка 10' -> LINE -1.5, STAKE 10,
   const stakes = findByRole(evidence, "STAKE");
   assert.equal(lines.length, 1);
   assert.equal(lines[0].value, "-1.5");
-  assert.equal(lines[0].confidence, "MARKER_HIGH");
+  assert.equal(lines[0].confidence, "LABEL_STRONG");
   assert.equal(stakes.length, 1);
   assert.equal(stakes[0].value, "10");
-  assert.equal(stakes[0].confidence, "MARKER_HIGH");
+  assert.equal(stakes[0].confidence, "LABEL_STRONG");
 });
 
 test("H3: 'Arsenal handicap -1.5 stake 10' -> LINE -1.5, STAKE 10, no role mix-up", () => {
@@ -515,7 +520,7 @@ test("H3: does not mutate originalText", () => {
  * end-to-end verdict-level proof against the actual Bayern/Stuttgart shape).
  * ============================================================================ */
 
-test("QA-1.3: 'Сумма ставки 100 USD' (single line, with colon-less label) produces MARKER_HIGH STAKE=100, marker 'сумма ставки'", () => {
+test("QA-1.3: 'Сумма ставки 100 USD' (single line, with colon-less label) produces LABEL_STRONG STAKE=100, marker 'сумма ставки'", () => {
   // Two STAKE entries are expected here, not one: the "сумма ставки" label
   // marker AND the pre-existing "usdc" currency-suffix marker both
   // independently fire on the same "100" — both agree on the same value,
@@ -526,19 +531,19 @@ test("QA-1.3: 'Сумма ставки 100 USD' (single line, with colon-less la
   const labeled = stakes.find((s) => s.marker === "сумма ставки");
   assert.ok(labeled, "expected a 'сумма ставки' STAKE entry");
   assert.equal(labeled!.value, "100");
-  assert.equal(labeled!.confidence, "MARKER_HIGH");
+  assert.equal(labeled!.confidence, "LABEL_STRONG");
   for (const stake of stakes) {
     assert.ok(sameNumericValue(stake.value, "100"));
   }
 });
 
-test("QA-1.3: 'Сумма ставки' label and its number on SEPARATE OCR lines still produce MARKER_HIGH STAKE evidence", () => {
+test("QA-1.3: 'Сумма ставки' label and its number on SEPARATE OCR lines still produce LABEL_STRONG STAKE evidence", () => {
   const text = "Сумма ставки\n100\nUSD";
   const stakes = findByRole(extractNumericRoleEvidence(text), "STAKE");
-  assert.ok(stakes.some((s) => s.value === "100" && s.marker === "сумма ставки" && s.confidence === "MARKER_HIGH"));
+  assert.ok(stakes.some((s) => s.value === "100" && s.marker === "сумма ставки" && s.confidence === "LABEL_STRONG"));
 });
 
-test("QA-1.3: 'Размер ставки: 66.67' and 'Сумма пари 20' are both recognized MARKER_HIGH STAKE label forms", () => {
+test("QA-1.3: 'Размер ставки: 66.67' and 'Сумма пари 20' are both recognized LABEL_STRONG STAKE label forms", () => {
   const razmer = findByRole(extractNumericRoleEvidence("Размер ставки: 66.67"), "STAKE");
   assert.equal(razmer.length, 1);
   assert.equal(razmer[0].value, "66.67");
