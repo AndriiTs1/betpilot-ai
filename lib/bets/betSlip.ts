@@ -52,6 +52,44 @@ export interface BetSlipSelectionInput {
   // TOTALS/SPREAD or matches on this value; it only survives the pipeline
   // so a later phase can.
   line?: string | null;
+  // SCREENSHOT QA-1.6 — set ONLY for the one narrow, explicitly-classified
+  // case betParser.ts's classifyReconcilable1X2Mismatch recognizes: the
+  // player/OCR text contains explicit 1X2 shorthand evidence (e.g. "П1") for
+  // HOME or AWAY, but Claude's own claim normalized the selection to a bare
+  // participant name (marketType MONEYLINE_2WAY, selectionType PARTICIPANT)
+  // — a real, provable production case (SCREENSHOT QA-1.2 through QA-1.5),
+  // not a general-purpose escape hatch. Every OTHER market/selection
+  // contradiction is still rejected immediately in betParser.ts, exactly as
+  // before; this field only exists to carry the ONE piece of information a
+  // LATER stage needs to finish that specific, narrow decision once real
+  // data becomes available.
+  //
+  // Deliberately NOT resolved here: betParser.ts is a pure, offline text
+  // parser with no provider/event access at all, so it cannot know which
+  // side ("HOME" or "AWAY") the claimed participant name actually
+  // corresponds to — only that the raw text evidence said HOME or AWAY,
+  // and what text Claude claimed as the participant. buildBetSlipPreview.ts
+  // is the nearest point that has the odds provider's own resolved
+  // homeTeamName/awayTeamName for this exact event (see its own
+  // reconcile1X2ParticipantClaim) — never guessed from OCR/event-string
+  // word order, which lib/odds/oddsVerifier.ts's own comments document as
+  // unreliable (the provider's home/away order doesn't have to match the
+  // order text lists them in).
+  pendingMarketReconciliation?: PendingMarketReconciliation | null;
+}
+
+// SCREENSHOT QA-1.6 — see BetSlipSelectionInput.pendingMarketReconciliation
+// above for the full rationale. requiredSide is the side the ORIGINAL TEXT
+// evidence asserted (from a real MONEYLINE_3WAY/HOME or MONEYLINE_3WAY/AWAY
+// evidence token, e.g. "П1"/"П2"/"Home win") — never DRAW, which has no
+// participant-name equivalent and is never reconcilable this way.
+// claimedParticipant is Claude's own raw, unmodified selection text (e.g.
+// "Bayern Munich") — compared later against the real provider event's own
+// team names via lib/odds/teamNameMatcher.ts's resolveParticipantSide,
+// never against the OCR event string.
+export interface PendingMarketReconciliation {
+  readonly requiredSide: "HOME" | "AWAY";
+  readonly claimedParticipant: string;
 }
 
 export interface ParsedBetSlip {

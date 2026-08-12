@@ -4,7 +4,7 @@ import { z } from "zod";
 // at compile time), so this is not a real runtime circular dependency —
 // only this file ends up depending on betSlip.ts at runtime, not the
 // reverse.
-import { normalizeParsedBet, type ParsedBetSlip } from "@/lib/bets/betSlip";
+import { normalizeParsedBet, type ParsedBetSlip, type PendingMarketReconciliation } from "@/lib/bets/betSlip";
 import { chatPrompt, ocrPrompt } from "./betParserPrompt";
 import { mapRawBetSlipToParsedBetSlip, type RawBetSelectionFields, type NumericRoleObservation, type MarketIntentObservation } from "./betDraftMapper";
 
@@ -517,6 +517,61 @@ function isUnreliableMarketClaim(observation: MarketIntentObservation): boolean 
   return observation.verification.verdict === "CONTRADICTED" || observation.verification.verdict === "AMBIGUOUS";
 }
 
+// SCREENSHOT QA-1.2 through QA-1.5 — a real, proven production case: a
+// bookmaker screenshot's OCR text contains explicit 1X2 shorthand ("П1"/
+// "П2"/"Home win"/"Away win", classified by lib/ai/marketIntentEvidence.ts
+// as MONEYLINE_3WAY/HOME or MONEYLINE_3WAY/AWAY), but Claude's own
+// extraction normalizes the selection to the team's real name — a
+// legitimate, even desirable translation that the claim-side classifier
+// (lib/odds/shorthandClassifier.ts) can only ever read back as generic
+// MONEYLINE_2WAY/PARTICIPANT (see that file's own comments: a bare
+// participant name carries no market-shape information of its own). This
+// function recognizes ONLY that one exact, narrow signature — never a
+// general "let a contradiction through" escape hatch:
+//
+//   claim  = { MONEYLINE_2WAY, PARTICIPANT }
+//   verdict = CONTRADICTED (never AMBIGUOUS — a source with two DISTINCT
+//             high-confidence market signatures is genuinely ambiguous and
+//             must still fail closed here, exactly as before)
+//   every conflicting evidence entry shares one signature:
+//             { MONEYLINE_3WAY, HOME } or { MONEYLINE_3WAY, AWAY }
+//
+// Every other CONTRADICTED/AMBIGUOUS combination (DRAW mismatches, SPREAD/
+// TOTALS/TEAM_TOTAL contradictions, an unrelated MONEYLINE disagreement,
+// AMBIGUOUS source text) returns null here and is rejected immediately by
+// the caller, completely unchanged from before this stage.
+//
+// This function does NOT decide whether the claim is actually correct — it
+// cannot: it has no provider/event access, only the original text and
+// Claude's own claim. It only decides whether the question is WORTH
+// deferring to a later stage that does have real data — see
+// buildBetSlipPreview.ts's reconcile1X2ParticipantClaim, the only place
+// that ever turns this into an accept/reject decision.
+function classifyReconcilable1X2Mismatch(
+  observation: MarketIntentObservation,
+  claimedSelectionText: string | undefined,
+): PendingMarketReconciliation | null {
+  if (observation.verification.verdict !== "CONTRADICTED") return null;
+  if (observation.claim.marketType !== "MONEYLINE_2WAY" || observation.claim.selectionType !== "PARTICIPANT") return null;
+
+  const conflicting = observation.verification.conflictingEvidence;
+  if (conflicting.length === 0) return null;
+
+  const evidenceSide = conflicting[0].classification.selectionType;
+  if (evidenceSide !== "HOME" && evidenceSide !== "AWAY") return null;
+  if (conflicting[0].classification.marketType !== "MONEYLINE_3WAY") return null;
+  // A CONTRADICTED verdict (as opposed to AMBIGUOUS) already guarantees
+  // every conflicting entry shares this exact signature — see
+  // marketIntentVerifier.ts's own verifyMarketIntentClaim (signatures.size
+  // === 1 is required to ever reach CONTRADICTED at all) — so checking
+  // only the first entry here is not a shortcut, it is the full set.
+
+  const claimedParticipant = claimedSelectionText?.trim();
+  if (!claimedParticipant) return null;
+
+  return { requiredSide: evidenceSide, claimedParticipant };
+}
+
 // Wraps mapRawBetSlipToParsedBetSlip() so a programmer-error throw (the
 // mapper/adapter only ever throws for a non-finite stake/odds or a sport
 // with no raw text at all — both impossible given betFieldsSchema/
@@ -568,6 +623,26 @@ function buildParsedBetSlipResult(
 
     const unreliableMarketClaim = marketIntentObservations.find(isUnreliableMarketClaim);
     if (unreliableMarketClaim) {
+      // SCREENSHOT QA-1.6 — before rejecting, check whether this is
+      // specifically the one narrow, proven-real 1X2-shorthand-vs-
+      // normalized-participant-name case (see classifyReconcilable1X2Mismatch's
+      // own header). Only that exact signature ever defers instead of
+      // rejecting here — every other contradiction/ambiguity falls straight
+      // through to the unchanged rejection below.
+      const pendingMarketReconciliation = classifyReconcilable1X2Mismatch(
+        unreliableMarketClaim,
+        raw.selections[0]?.selection,
+      );
+
+      if (pendingMarketReconciliation) {
+        const [firstSelection, ...restSelections] = parsedSlip.selections;
+        return {
+          valid: true,
+          ...parsedSlip,
+          selections: [{ ...firstSelection, pendingMarketReconciliation }, ...restSelections],
+        };
+      }
+
       // Same internal-diagnostic-only discipline as numeric_mismatch above
       // — never sent to the client, never exposes CONTRADICTED/AMBIGUOUS/
       // MarketIntentVerdict or the claimed marketType/selectionType to the

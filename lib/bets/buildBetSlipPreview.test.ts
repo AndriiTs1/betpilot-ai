@@ -2365,3 +2365,221 @@ test("H3 production fix: buildBetSlipPreview — 'Arsenal Win' + marketRawText '
   assert.equal(previewSelection.oddsStatus, "VERIFIED");
   assert.equal(previewSelection.currentOdds, 1.16);
 });
+
+/* ============================================================================
+ * SCREENSHOT QA-1.6 — event-aware 1X2/participant reconciliation.
+ * betParser.ts defers (never rejects) the one narrow, proven-real case where
+ * OCR text evidence is explicit 1X2 shorthand (HOME/AWAY) but Claude's claim
+ * normalized to a bare participant name — this is the ONLY place that
+ * decision is ever finished, once the real provider-resolved event exists.
+ * ============================================================================ */
+
+// providerEventId/providerSportKey are required alongside homeTeamName/
+// awayTeamName — theOddsApiProvider.ts's buildMatchedEvent only derives
+// matchedEvent (and therefore homeTeamName/awayTeamName survive the
+// legacy-bridge round-trip at all) when BOTH provider identifiers are also
+// present; a legacy OddsCheckResult with team names but no provider event
+// id is treated the same as one with neither.
+function verifiedWithTeams(sourceOdds: number, submittedOdds: number, homeTeamName: string, awayTeamName: string): OddsCheckResult {
+  return {
+    ...verified(sourceOdds, submittedOdds),
+    homeTeamName,
+    awayTeamName,
+    providerEventId: "evt-qa16",
+    providerSportKey: "soccer_epl",
+    eventStartTime: "2026-08-28T20:30:00.000Z",
+  };
+}
+
+function pendingSlip(
+  requiredSide: "HOME" | "AWAY",
+  claimedParticipant: string,
+  overrides: Partial<{ event: string; submittedOdds: number | null; stake: number }> = {},
+): ParsedBetSlip {
+  return {
+    type: "SINGLE",
+    stake: overrides.stake ?? 100,
+    selections: [
+      {
+        sport: "Football",
+        event: overrides.event ?? "Bayern Munich vs VfB Stuttgart",
+        market: "1X2",
+        selection: claimedParticipant,
+        submittedOdds: overrides.submittedOdds ?? 1.42,
+        pendingMarketReconciliation: { requiredSide, claimedParticipant },
+      },
+    ],
+  };
+}
+
+test("QA-1.6 A (HOME positive): claimed participant matches the real home team — accepted, canonical meaning becomes MONEYLINE_3WAY/HOME", async () => {
+  const slip = pendingSlip("HOME", "Bayern Munich");
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => verifiedWithTeams(1.42, 1.42, "Bayern Munich", "VfB Stuttgart"),
+  });
+
+  const previewSelection = result.preview.selections[0];
+  assert.equal(previewSelection.oddsStatus, "VERIFIED");
+  assert.equal(previewSelection.marketType, "MONEYLINE_3WAY");
+  assert.equal(previewSelection.participant, null, "HOME/AWAY carry no participant field");
+
+  assert.ok(result.previewToken !== null);
+  const verifiedToken = verifyPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verifiedToken.ok, true);
+  if (!verifiedToken.ok) return;
+  assert.equal(verifiedToken.payload.canonicalMarketType, "MONEYLINE_3WAY");
+  assert.equal(verifiedToken.payload.canonicalSelectionType, "HOME");
+});
+
+test("QA-1.6 B (AWAY positive): claimed participant matches the real away team — accepted, canonical meaning becomes MONEYLINE_3WAY/AWAY", async () => {
+  const slip = pendingSlip("AWAY", "VfB Stuttgart");
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => verifiedWithTeams(3.8, 3.8, "Bayern Munich", "VfB Stuttgart"),
+  });
+
+  const previewSelection = result.preview.selections[0];
+  assert.equal(previewSelection.oddsStatus, "VERIFIED");
+  assert.equal(previewSelection.marketType, "MONEYLINE_3WAY");
+
+  assert.ok(result.previewToken !== null);
+  const verifiedToken = verifyPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verifiedToken.ok, true);
+  if (!verifiedToken.ok) return;
+  assert.equal(verifiedToken.payload.canonicalMarketType, "MONEYLINE_3WAY");
+  assert.equal(verifiedToken.payload.canonicalSelectionType, "AWAY");
+});
+
+test("QA-1.6 C: 'Home win' normalized to the home participant, provider confirms HOME — accepted", async () => {
+  const slip = pendingSlip("HOME", "Arsenal", { event: "Arsenal vs Chelsea", submittedOdds: 1.5 });
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => verifiedWithTeams(1.5, 1.5, "Arsenal", "Chelsea"),
+  });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[0].marketType, "MONEYLINE_3WAY");
+});
+
+test("QA-1.6 D: 'Away win' normalized to the away participant, provider confirms AWAY — accepted", async () => {
+  const slip = pendingSlip("AWAY", "Chelsea", { event: "Arsenal vs Chelsea", submittedOdds: 4.2 });
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => verifiedWithTeams(4.2, 4.2, "Arsenal", "Chelsea"),
+  });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[0].marketType, "MONEYLINE_3WAY");
+});
+
+test("QA-1.6 E: HOME evidence but the claimed participant resolves to the AWAY team — rejected (MARKET_INTENT_UNRECONCILED)", async () => {
+  const slip = pendingSlip("HOME", "VfB Stuttgart");
+
+  await assert.rejects(
+    () =>
+      buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+        verifyOddsFn: async () => verifiedWithTeams(1.42, 1.42, "Bayern Munich", "VfB Stuttgart"),
+      }),
+    (err: unknown) => err instanceof BetSlipValidationError && err.code === "MARKET_INTENT_UNRECONCILED",
+  );
+});
+
+test("QA-1.6 F: AWAY evidence but the claimed participant resolves to the HOME team — rejected (MARKET_INTENT_UNRECONCILED)", async () => {
+  const slip = pendingSlip("AWAY", "Bayern Munich");
+
+  await assert.rejects(
+    () =>
+      buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+        verifyOddsFn: async () => verifiedWithTeams(1.42, 1.42, "Bayern Munich", "VfB Stuttgart"),
+      }),
+    (err: unknown) => err instanceof BetSlipValidationError && err.code === "MARKET_INTENT_UNRECONCILED",
+  );
+});
+
+test("QA-1.6 H: claimed participant matches neither real team (NO_MATCH) — rejected", async () => {
+  const slip = pendingSlip("HOME", "Real Madrid");
+
+  await assert.rejects(
+    () =>
+      buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+        verifyOddsFn: async () => verifiedWithTeams(1.42, 1.42, "Bayern Munich", "VfB Stuttgart"),
+      }),
+    (err: unknown) => err instanceof BetSlipValidationError && err.code === "MARKET_INTENT_UNRECONCILED",
+  );
+});
+
+test("QA-1.6 I: claimed participant matches both real teams ambiguously — rejected, never silently picks a side", async () => {
+  // "Manchester" fuzzy-overlaps both "Manchester United" and "Manchester
+  // City" well past resolveParticipantSide's own threshold — a genuine
+  // AMBIGUOUS case, unrelated to which team is home/away.
+  const slip = pendingSlip("HOME", "Manchester", { event: "Manchester United vs Manchester City" });
+
+  await assert.rejects(
+    () =>
+      buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+        verifyOddsFn: async () => verifiedWithTeams(1.42, 1.42, "Manchester United", "Manchester City"),
+      }),
+    (err: unknown) => err instanceof BetSlipValidationError && err.code === "MARKET_INTENT_UNRECONCILED",
+  );
+});
+
+test("QA-1.6: the event never resolves (no homeTeamName/awayTeamName) — rejected rather than silently accepted", async () => {
+  const slip = pendingSlip("HOME", "Bayern Munich");
+
+  await assert.rejects(
+    () =>
+      buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+        verifyOddsFn: async () => notFound(1.42),
+      }),
+    (err: unknown) => err instanceof BetSlipValidationError && err.code === "MARKET_INTENT_UNRECONCILED",
+  );
+});
+
+test("QA-1.6: genuine MONEYLINE_2WAY selections (no pendingMarketReconciliation) are completely unaffected", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [
+      { sport: "Tennis", event: "Djokovic vs Alcaraz", market: null, selection: "Djokovic", submittedOdds: 1.5 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => verifiedWithTeams(1.5, 1.5, "Djokovic", "Alcaraz"),
+  });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[0].marketType, "MONEYLINE_2WAY");
+});
+
+test("QA-1.6 real rrrr.png incident regression: Bayern/Stuttgart SINGLE reaches a successful preview, no numeric_mismatch, no market_mismatch, canonical MONEYLINE_3WAY/HOME, stake 100, odds 1.42", async () => {
+  // Exactly the shape QA-1.2 through QA-1.5 traced from real production
+  // diagnostics: OCR evidence "П1" (HOME), Claude normalizes the selection
+  // to the team's real name, stake/odds already corroborated by QA-1.3.
+  const slip = pendingSlip("HOME", "Bayern Munich", {
+    event: "Bayern Munich vs VfB Stuttgart",
+    submittedOdds: 1.42,
+    stake: 100,
+  });
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => verifiedWithTeams(1.42, 1.42, "Bayern Munich", "VfB Stuttgart"),
+  });
+
+  const previewSelection = result.preview.selections[0];
+  assert.equal(previewSelection.oddsStatus, "VERIFIED");
+  assert.equal(previewSelection.marketType, "MONEYLINE_3WAY");
+  assert.equal(previewSelection.submittedOdds, 1.42);
+  assert.equal(result.preview.stake, 100);
+  assert.equal(result.preview.potentialWin, 142); // 100 * 1.42
+
+  assert.ok(result.previewToken !== null, "provider verification continues normally — a real previewToken is signed");
+  const verifiedToken = verifyPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verifiedToken.ok, true);
+  if (!verifiedToken.ok) return;
+  assert.equal(verifiedToken.payload.canonicalMarketType, "MONEYLINE_3WAY");
+  assert.equal(verifiedToken.payload.canonicalSelectionType, "HOME");
+  assert.equal(verifiedToken.payload.stake, 100);
+  assert.equal(verifiedToken.payload.odds, 1.42);
+});

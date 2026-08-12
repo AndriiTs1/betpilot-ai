@@ -1,6 +1,6 @@
 import { Prisma } from "@/lib/generated/prisma/client";
 import type { BetSelectionOddsStatus } from "@/lib/generated/prisma/client";
-import type { ParsedBetSlip } from "@/lib/bets/betSlip";
+import type { ParsedBetSlip, PendingMarketReconciliation } from "@/lib/bets/betSlip";
 import { validateBetSlipType, BetSlipValidationError } from "@/lib/bets/betSlipRules";
 import { computeTotalOdds, computePotentialWin } from "@/lib/bets/expressMath";
 import { mapOddsCheckToSelectionStatus } from "@/lib/odds/mapOddsStatus";
@@ -14,6 +14,7 @@ import {
   verificationResultToLegacyOddsCheck,
   type ReconstructedOddsCheck,
 } from "@/lib/odds/legacyOddsBridge";
+import { resolveParticipantSide } from "@/lib/odds/teamNameMatcher";
 import { signPreviewToken, signExpressPreviewToken } from "@/lib/betPreview/previewToken";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
@@ -231,6 +232,47 @@ function buildProviderTokenFields(
   };
 }
 
+// SCREENSHOT QA-1.6 — the ONE place a pendingMarketReconciliation
+// (lib/bets/betSlip.ts) is ever turned into an accept/reject decision. This
+// is the nearest point in the pipeline that has real, provider-resolved
+// event identity (oddsCheck.homeTeamName/awayTeamName — never the raw OCR/
+// player event string, never guessed from word order). Reuses
+// resolveParticipantSide (lib/odds/teamNameMatcher.ts) completely
+// unmodified — the exact same deterministic fuzzy-name-matching primitive
+// lib/bets/settlement/evaluateSelectionOutcome.ts already relies on in
+// production for the identical "does this participant name mean home or
+// away" question, just asked here at preview time instead of settlement
+// time.
+//
+// Returns the CORRECTED CanonicalSelection (marketType MONEYLINE_3WAY,
+// selectionType HOME/AWAY, no participant — the real 1X2 shape, never an
+// accidental generic MONEYLINE_2WAY/PARTICIPANT reading left in place) on
+// success, or null on any failure to reconcile — never partially applies a
+// correction. Null causes the caller to reject the whole preview; this
+// function itself never rejects/throws, staying a pure decision function
+// like every other verifier in this codebase.
+//
+// Never reached for DRAW evidence — betParser.ts's own
+// classifyReconcilable1X2Mismatch only ever produces a pendingMarketReconciliation
+// for HOME/AWAY evidence, exactly because a claimed participant name has no
+// DRAW equivalent (SCREENSHOT QA-1.5's own semantic analysis).
+function reconcile1X2ParticipantClaim(
+  original: CanonicalSelection,
+  pending: PendingMarketReconciliation,
+  oddsCheck: OddsCheckResult | null,
+): CanonicalSelection | null {
+  if (!oddsCheck || !oddsCheck.homeTeamName || !oddsCheck.awayTeamName) return null;
+
+  const resolution = resolveParticipantSide(pending.claimedParticipant, oddsCheck.homeTeamName, oddsCheck.awayTeamName);
+  // HOME evidence + resolves AWAY -> reject. AWAY evidence + resolves HOME
+  // -> reject. NO_MATCH -> reject. AMBIGUOUS (matches both/neither
+  // decisively) -> reject. Only an exact match to the side the original
+  // text evidence actually asserted ever reconciles.
+  if (resolution.kind !== pending.requiredSide) return null;
+
+  return { ...original, marketType: "MONEYLINE_3WAY", selectionType: pending.requiredSide, participant: undefined };
+}
+
 export interface BuildBetSlipPreviewOptions {
   // Existing seam (unchanged type) — still the most direct way for a test
   // to control odds-check outcomes without knowing about the canonical
@@ -328,6 +370,33 @@ export async function buildBetSlipPreview(
   const previewSelections: BetSlipPreviewSelection[] = slip.selections.map((selection, index) => {
     const reconstructed = reconstructedByIndex.get(index);
     const oddsCheck: OddsCheckResult | null = reconstructed?.oddsCheck ?? null;
+
+    // SCREENSHOT QA-1.6 — the request already went to the odds provider
+    // with the original (uncorrected) MONEYLINE_2WAY/PARTICIPANT shape
+    // above (a bare participant name always resolves against the
+    // provider's own real outcome names via fuzzy team-name matching —
+    // lib/odds/theOddsApiProvider.ts's selectionToLegacyText — so pricing
+    // itself was never blocked by this). Now that oddsCheck may carry the
+    // provider's real homeTeamName/awayTeamName, this is the first point
+    // able to finish the ONE deferred decision betParser.ts staged. Mutates
+    // requests[index] in place so every existing downstream read of it
+    // (below, and buildProviderTokenFields further down) automatically
+    // picks up the correction with no other code changes.
+    if (selection.pendingMarketReconciliation) {
+      const original = requests[index]?.selection;
+      const reconciled = original
+        ? reconcile1X2ParticipantClaim(original, selection.pendingMarketReconciliation, oddsCheck)
+        : null;
+
+      if (!reconciled) {
+        throw new BetSlipValidationError(
+          "MARKET_INTENT_UNRECONCILED",
+          `Could not reconcile a MONEYLINE_2WAY/PARTICIPANT claim against real event participants for selection ${index}`,
+        );
+      }
+
+      requests[index] = { ...requests[index], selection: reconciled };
+    }
 
     // Stage 14.4A security cleanup: this used to log selection.event
     // directly (plus, on the rejected-check path, oddsCheck.note /

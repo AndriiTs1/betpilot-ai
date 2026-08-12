@@ -1393,3 +1393,144 @@ test("QA-1.3: the real Bayern/Stuttgart OCR text no longer fails BA-2B's numeric
   assert.equal(result.selections[0].submittedOdds, 1.42);
   assert.equal(result.stake, 100);
 });
+
+/* -------------------------------------------------------------------------- */
+/* SCREENSHOT QA-1.6 — early-gate 1X2/participant reconciliation deferral    */
+/* -------------------------------------------------------------------------- */
+
+test("QA-1.6 positive: claim = MONEYLINE_2WAY/PARTICIPANT ('Bayern Munich') vs evidence = MONEYLINE_3WAY/HOME ('П1') is DEFERRED, not rejected — valid:true with pendingMarketReconciliation attached", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({
+        sport: "Football",
+        event: "Bayern Munich vs VfB Stuttgart",
+        market: "1X2",
+        selection: "Bayern Munich",
+        stake: 100,
+        odds: 1.42,
+      }),
+    );
+
+  const result = await parseBetSlipMessage(BAYERN_STUTTGART_OCR_TEXT, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `expected deferred-valid, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+
+  assert.deepEqual(result.selections[0].pendingMarketReconciliation, {
+    requiredSide: "HOME",
+    claimedParticipant: "Bayern Munich",
+  });
+});
+
+test("QA-1.6 positive: claim = PARTICIPANT ('VfB Stuttgart') vs evidence = MONEYLINE_3WAY/AWAY ('П2') is DEFERRED with requiredSide AWAY", async () => {
+  const text = ["Германия - Бундеслига", "Бавария - Штутгарт", "Исход (1X2)", "П2 - Штутгарт", "1.42"].join("\n");
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({
+        sport: "Football",
+        event: "Bayern Munich vs VfB Stuttgart",
+        market: "1X2",
+        selection: "VfB Stuttgart",
+        stake: 100,
+        odds: 1.42,
+      }),
+    );
+
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `expected deferred-valid, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+
+  assert.deepEqual(result.selections[0].pendingMarketReconciliation, {
+    requiredSide: "AWAY",
+    claimedParticipant: "VfB Stuttgart",
+  });
+});
+
+test("QA-1.6 negative G: DRAW/X evidence vs a PARTICIPANT claim is still rejected immediately (never deferred) — a participant name has no DRAW equivalent", async () => {
+  const text = "X\nBayern Munich vs VfB Stuttgart";
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({ event: "Bayern Munich vs VfB Stuttgart", selection: "Bayern Munich", stake: 10 }),
+    );
+
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+test("QA-1.6 negative J: a SPREAD-evidence contradiction (claim=DRAW) is still rejected immediately, unchanged", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal vs Chelsea", selection: "Draw", stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал Ф1(-1.5) ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+test("QA-1.6 negative K: a TOTALS-evidence contradiction (claim=DRAW) is still rejected immediately, unchanged", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal vs Chelsea", selection: "Draw", stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2.5 ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+test("QA-1.6 negative L: a TEAM_TOTAL-evidence contradiction (claim=DRAW) is still rejected immediately, unchanged", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal vs Chelsea", selection: "Draw", stake: 10 }));
+
+  const result = await parseBetSlipMessage("Арсенал ИТБ 1.5 ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+test("QA-1.6 negative: AMBIGUOUS market-intent source text is still rejected immediately, never deferred (only a clean single-signature CONTRADICTED can defer)", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({ event: "Arsenal vs Chelsea", selection: "Arsenal", stake: 10 }),
+    );
+
+  // "ничья Арсенал победа" carries two distinct MONEYLINE-family signatures
+  // in the source text itself (DRAW and PARTICIPANT-winner-suffix) — this
+  // must stay AMBIGUOUS, never re-classified as the narrow deferrable case.
+  const result = await parseBetSlipMessage("ничья Арсенал победа", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+test("QA-1.6 typed-chat regression: 'Arsenal win'/'Bayern Munich win'/'Arsenal -1.5'/'Over 2.5' are all unaffected — no pendingMarketReconciliation, valid as before", async () => {
+  const cases: Array<{ text: string; input: ReturnType<typeof singleToolInput> }> = [
+    { text: "Arsenal win", input: singleToolInput({ event: "Arsenal", selection: "Arsenal", stake: 10 }) },
+    { text: "Bayern Munich win", input: singleToolInput({ event: "Bayern Munich", selection: "Bayern Munich", stake: 10 }) },
+    { text: "Arsenal -1.5", input: singleToolInput({ market: "Handicap", selection: "Arsenal -1.5", line: "-1.5", stake: 10 }) },
+    { text: "Over 2.5", input: singleToolInput({ market: "Totals", selection: "Over 2.5", line: "2.5", stake: 10 }) },
+  ];
+
+  for (const { text, input } of cases) {
+    currentHandler = async () => anthropicToolUseResponse("extract_bet", input);
+    const result = await parseBetSlipMessage(text, "CHAT");
+    assert.equal(result.valid, true, `expected "${text}" to remain valid`);
+    if (!result.valid) continue;
+    assert.equal(
+      result.selections[0].pendingMarketReconciliation ?? null,
+      null,
+      `"${text}" must never carry a pendingMarketReconciliation`,
+    );
+  }
+});

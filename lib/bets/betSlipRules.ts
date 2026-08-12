@@ -12,7 +12,15 @@ export type BetSlipValidationErrorCode =
   | "SINGLE_INVALID_SELECTION_COUNT"
   | "EXPRESS_TOO_FEW_SELECTIONS"
   | "EXPRESS_TOO_MANY_SELECTIONS"
-  | "UNKNOWN_BET_SLIP_TYPE";
+  | "UNKNOWN_BET_SLIP_TYPE"
+  // SCREENSHOT QA-1.6 — a selection carried a pendingMarketReconciliation
+  // (lib/bets/betSlip.ts) that buildBetSlipPreview.ts could not confirm
+  // against the real, provider-resolved event: the event never matched, the
+  // claimed participant name matched neither/both real team names, or it
+  // matched the WRONG side of the required HOME/AWAY evidence. Never thrown
+  // for any other kind of market/selection contradiction — those are
+  // rejected earlier, in betParser.ts, before a ParsedBetSlip is ever built.
+  | "MARKET_INTENT_UNRECONCILED";
 
 // A named error class + a machine-checkable `code`, not a bare Error with
 // only prose — callers (and tests) branch on `code`, never on parsing
