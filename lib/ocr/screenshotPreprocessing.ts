@@ -99,6 +99,49 @@ export function looksLikeFullScreenScreenshot(dimensions: ImageDimensions): bool
   );
 }
 
+// SCREENSHOT QA-1.8 — a second, deliberately narrow gate consulted
+// alongside looksLikeFullScreenScreenshot(), not a replacement for it: a
+// genuine full-height mobile screenshot (e.g. 1024x1536) trips that OR-based
+// height check the same way a real full-desktop capture does, even though
+// it's already a tight, contained crop with nothing for region detection to
+// usefully remove. This function recognizes that specific case so the
+// caller can skip the Claude region-detection round trip for it, without
+// loosening the existing threshold for anything else.
+//
+// Three independent conditions must all hold — this is intentionally not
+// "is it tall", to avoid catching genuine large captures that happen to be
+// portrait:
+//   - portrait orientation (height > width) — a landscape image is never a
+//     phone screenshot in this app's context;
+//   - width at or below PORTRAIT_MOBILE_MAX_WIDTH_PX — comfortably covers
+//     real device screenshot widths (roughly 1024-1290px physical pixels on
+//     iOS at @2x/@3x, ~1080-1200px on common Android devices), while
+//     staying well under 1440 (a QHD Android physical width) so a
+//     high-resolution Android screenshot at that width is deliberately left
+//     on the existing region-detection path rather than guessed at;
+//   - aspect ratio within [PORTRAIT_MOBILE_MIN_ASPECT_RATIO,
+//     PORTRAIT_MOBILE_MAX_ASPECT_RATIO] — covers the real range of modern
+//     phone screen ratios (roughly 4:3 through 21:9), while excluding a
+//     degenerate, extremely elongated image (e.g. a stitched multi-screenshot
+//     scroll capture) that isn't a single phone screen.
+//
+// Dimensions/aspect ratio only, exactly like looksLikeFullScreenScreenshot()
+// itself — no AI/model call, and the image's own bytes are never inspected
+// or altered by this check.
+export const PORTRAIT_MOBILE_MAX_WIDTH_PX = 1300;
+export const PORTRAIT_MOBILE_MIN_ASPECT_RATIO = 1.3;
+export const PORTRAIT_MOBILE_MAX_ASPECT_RATIO = 2.5;
+
+export function clearlyLooksLikePortraitMobileScreenshot(dimensions: ImageDimensions): boolean {
+  const { width, height } = dimensions;
+
+  if (height <= width) return false;
+  if (width > PORTRAIT_MOBILE_MAX_WIDTH_PX) return false;
+
+  const aspectRatio = height / width;
+  return aspectRatio >= PORTRAIT_MOBILE_MIN_ASPECT_RATIO && aspectRatio <= PORTRAIT_MOBILE_MAX_ASPECT_RATIO;
+}
+
 // Resizes down (never up — `withoutEnlargement`) for the detection-only
 // call. Re-encoded as JPEG regardless of the original format: the
 // detection model only ever needs to *locate* the betting content, not

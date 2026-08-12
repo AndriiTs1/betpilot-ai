@@ -5,6 +5,7 @@ import {
   readImageDimensions,
   exceedsMaxDimension,
   looksLikeFullScreenScreenshot,
+  clearlyLooksLikePortraitMobileScreenshot,
   createDetectionCopy,
   cropToRegion,
   type ImageDimensions,
@@ -138,7 +139,16 @@ export async function recognizeBetSlipScreenshot(
     };
   }
 
-  if (!dimensions || !looksLikeFullScreenScreenshot(dimensions)) {
+  // SCREENSHOT QA-1.8 — clearlyLooksLikePortraitMobileScreenshot() is
+  // checked here, not folded into looksLikeFullScreenScreenshot() itself:
+  // that function's own return value is also reported verbatim as a QA1
+  // diagnostic field (baseDiagnostics.looksLikeFullScreenScreenshot below),
+  // so its meaning must stay exactly what it already is. A portrait mobile
+  // screenshot that trips the height-based looksLikeFullScreenScreenshot()
+  // check still lands on this same "skip region detection" branch — same
+  // regionDetection summary ("skipped_small_image"), same unmodified buffer
+  // reaching OCR — it just gets there for a second, independent reason.
+  if (!dimensions || !looksLikeFullScreenScreenshot(dimensions) || clearlyLooksLikePortraitMobileScreenshot(dimensions)) {
     // The existing, unchanged cropped-slip path: no region-detection call,
     // no extra buffer — recognizeScreenshot() gets exactly what it always
     // got before this module existed. Also the fallback for a buffer sharp

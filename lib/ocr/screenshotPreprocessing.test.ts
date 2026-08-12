@@ -5,11 +5,13 @@ import {
   readImageDimensions,
   exceedsMaxDimension,
   looksLikeFullScreenScreenshot,
+  clearlyLooksLikePortraitMobileScreenshot,
   createDetectionCopy,
   cropToRegion,
   clampAndPadRegion,
   MAX_IMAGE_DIMENSION_PX,
   LARGE_SCREENSHOT_MIN_DIMENSION_PX,
+  PORTRAIT_MOBILE_MAX_WIDTH_PX,
   MIN_REGION_FRACTION,
 } from "./screenshotPreprocessing";
 
@@ -67,6 +69,63 @@ test("looksLikeFullScreenScreenshot: true at/above the threshold on either axis"
 
 test("looksLikeFullScreenScreenshot: true for the task's own example resolution (1500x1000)", () => {
   assert.equal(looksLikeFullScreenScreenshot({ width: 1500, height: 1000 }), true);
+});
+
+// ---------------------------------------------------------------------
+// clearlyLooksLikePortraitMobileScreenshot — SCREENSHOT QA-1.8
+// ---------------------------------------------------------------------
+
+test("clearlyLooksLikePortraitMobileScreenshot: the real rrrr.png dimensions (1024x1536) qualify", () => {
+  assert.equal(clearlyLooksLikePortraitMobileScreenshot({ width: 1024, height: 1536 }), true);
+});
+
+test("clearlyLooksLikePortraitMobileScreenshot: a common iPhone screenshot resolution (1170x2532) qualifies", () => {
+  assert.equal(clearlyLooksLikePortraitMobileScreenshot({ width: 1170, height: 2532 }), true);
+});
+
+test("clearlyLooksLikePortraitMobileScreenshot: a common Android/Full-HD portrait resolution (1080x1920) qualifies", () => {
+  assert.equal(clearlyLooksLikePortraitMobileScreenshot({ width: 1080, height: 1920 }), true);
+});
+
+test("clearlyLooksLikePortraitMobileScreenshot: a landscape desktop resolution (1920x1080) does not qualify", () => {
+  assert.equal(clearlyLooksLikePortraitMobileScreenshot({ width: 1920, height: 1080 }), false);
+});
+
+test("clearlyLooksLikePortraitMobileScreenshot: a larger landscape desktop resolution (2560x1440) does not qualify", () => {
+  assert.equal(clearlyLooksLikePortraitMobileScreenshot({ width: 2560, height: 1440 }), false);
+});
+
+test("clearlyLooksLikePortraitMobileScreenshot: a portrait but too-wide-to-safely-call-phone-sized image (1440x2560) does not qualify", () => {
+  assert.equal(clearlyLooksLikePortraitMobileScreenshot({ width: 1440, height: 2560 }), false);
+});
+
+test("clearlyLooksLikePortraitMobileScreenshot: width exactly at the ceiling still qualifies if the aspect ratio fits", () => {
+  assert.equal(
+    clearlyLooksLikePortraitMobileScreenshot({ width: PORTRAIT_MOBILE_MAX_WIDTH_PX, height: Math.round(PORTRAIT_MOBILE_MAX_WIDTH_PX * 1.5) }),
+    true,
+  );
+});
+
+test("clearlyLooksLikePortraitMobileScreenshot: width one pixel past the ceiling does not qualify", () => {
+  assert.equal(
+    clearlyLooksLikePortraitMobileScreenshot({
+      width: PORTRAIT_MOBILE_MAX_WIDTH_PX + 1,
+      height: Math.round((PORTRAIT_MOBILE_MAX_WIDTH_PX + 1) * 1.5),
+    }),
+    false,
+  );
+});
+
+test("clearlyLooksLikePortraitMobileScreenshot: a square image does not qualify (not portrait)", () => {
+  assert.equal(clearlyLooksLikePortraitMobileScreenshot({ width: 1024, height: 1024 }), false);
+});
+
+test("clearlyLooksLikePortraitMobileScreenshot: an extremely elongated stitched/scroll-capture aspect ratio does not qualify", () => {
+  assert.equal(clearlyLooksLikePortraitMobileScreenshot({ width: 800, height: 4000 }), false);
+});
+
+test("clearlyLooksLikePortraitMobileScreenshot: a small, already-cropped slip is also portrait-mobile-shaped (both gates agree)", () => {
+  assert.equal(clearlyLooksLikePortraitMobileScreenshot({ width: 480, height: 800 }), true);
 });
 
 // ---------------------------------------------------------------------

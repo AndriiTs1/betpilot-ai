@@ -70,6 +70,130 @@ test("recognizeBetSlipScreenshot: an undecodable buffer (sharp can't read metada
 });
 
 // ---------------------------------------------------------------------
+// 1b. Portrait mobile screenshot (SCREENSHOT QA-1.8) — tall enough to trip
+//     looksLikeFullScreenScreenshot() on height alone, but clearly a
+//     contained phone screenshot, not a desktop capture: skips region
+//     detection the same way the small/already-cropped case does.
+// ---------------------------------------------------------------------
+
+test("recognizeBetSlipScreenshot: the real rrrr.png dimensions (1024x1536) bypass region detection and reach OCR unchanged", async () => {
+  const buffer = await solidImage(1024, 1536);
+  let detectRegionCalled = false;
+  let receivedBuffer: Buffer | null = null;
+
+  const outcome = await recognizeBetSlipScreenshot({
+    buffer,
+    intake: { mimeType: "image/jpeg" },
+    provider: fakeProvider((input) => {
+      receivedBuffer = input.buffer;
+      return ocrSuccess();
+    }),
+    detectRegion: async () => {
+      detectRegionCalled = true;
+      throw new Error("must not be called for a portrait mobile screenshot");
+    },
+  });
+
+  assert.equal(outcome.kind, "OCR_RESULT");
+  assert.equal(detectRegionCalled, false, "region detection must be bypassed");
+  assert.equal(outcome.kind === "OCR_RESULT" && outcome.diagnostics.regionDetection.outcome, "skipped_small_image");
+  assert.deepEqual(receivedBuffer, buffer, "OCR must receive the exact original, unmodified buffer");
+});
+
+test("recognizeBetSlipScreenshot: a common iPhone screenshot resolution (1170x2532) bypasses region detection", async () => {
+  const buffer = await solidImage(1170, 2532);
+  let detectRegionCalled = false;
+
+  const outcome = await recognizeBetSlipScreenshot({
+    buffer,
+    intake: { mimeType: "image/jpeg" },
+    provider: fakeProvider(() => ocrSuccess()),
+    detectRegion: async () => {
+      detectRegionCalled = true;
+      throw new Error("must not be called");
+    },
+  });
+
+  assert.equal(outcome.kind, "OCR_RESULT");
+  assert.equal(detectRegionCalled, false);
+  assert.equal(outcome.kind === "OCR_RESULT" && outcome.diagnostics.regionDetection.outcome, "skipped_small_image");
+});
+
+test("recognizeBetSlipScreenshot: a common Android/Full-HD portrait resolution (1080x1920) bypasses region detection", async () => {
+  const buffer = await solidImage(1080, 1920);
+  let detectRegionCalled = false;
+
+  const outcome = await recognizeBetSlipScreenshot({
+    buffer,
+    intake: { mimeType: "image/jpeg" },
+    provider: fakeProvider(() => ocrSuccess()),
+    detectRegion: async () => {
+      detectRegionCalled = true;
+      throw new Error("must not be called");
+    },
+  });
+
+  assert.equal(outcome.kind, "OCR_RESULT");
+  assert.equal(detectRegionCalled, false);
+  assert.equal(outcome.kind === "OCR_RESULT" && outcome.diagnostics.regionDetection.outcome, "skipped_small_image");
+});
+
+test("recognizeBetSlipScreenshot: a landscape desktop resolution (1920x1080) still runs region detection", async () => {
+  const buffer = await solidImage(1920, 1080);
+  let detectRegionCalled = false;
+
+  const outcome = await recognizeBetSlipScreenshot({
+    buffer,
+    intake: { mimeType: "image/jpeg" },
+    provider: fakeProvider(() => ocrSuccess()),
+    detectRegion: async () => {
+      detectRegionCalled = true;
+      return { kind: "NOT_FOUND", reason: "n/a", durationMs: 1 };
+    },
+  });
+
+  assert.equal(outcome.kind, "OCR_RESULT");
+  assert.equal(detectRegionCalled, true, "a genuine desktop resolution must still attempt region detection");
+  assert.equal(outcome.kind === "OCR_RESULT" && outcome.diagnostics.regionDetection.outcome, "region_not_found");
+});
+
+test("recognizeBetSlipScreenshot: a larger landscape desktop resolution (2560x1440) still runs region detection", async () => {
+  const buffer = await solidImage(2560, 1440);
+  let detectRegionCalled = false;
+
+  const outcome = await recognizeBetSlipScreenshot({
+    buffer,
+    intake: { mimeType: "image/jpeg" },
+    provider: fakeProvider(() => ocrSuccess()),
+    detectRegion: async () => {
+      detectRegionCalled = true;
+      return { kind: "NOT_FOUND", reason: "n/a", durationMs: 1 };
+    },
+  });
+
+  assert.equal(outcome.kind, "OCR_RESULT");
+  assert.equal(detectRegionCalled, true, "a genuine desktop resolution must still attempt region detection");
+});
+
+test("recognizeBetSlipScreenshot: a portrait but too-wide-to-safely-call-phone-sized image (1440x2560) still runs region detection", async () => {
+  const buffer = await solidImage(1440, 2560);
+  let detectRegionCalled = false;
+
+  const outcome = await recognizeBetSlipScreenshot({
+    buffer,
+    intake: { mimeType: "image/jpeg" },
+    provider: fakeProvider(() => ocrSuccess()),
+    detectRegion: async () => {
+      detectRegionCalled = true;
+      return { kind: "NOT_FOUND", reason: "n/a", durationMs: 1 };
+    },
+  });
+
+  assert.equal(outcome.kind, "OCR_RESULT");
+  assert.equal(detectRegionCalled, true, "an ambiguous portrait resolution must not be assumed phone-sized");
+});
+
+// ---------------------------------------------------------------------
 // 2. Full desktop screenshot — region found, cropped, padded
 // ---------------------------------------------------------------------
 
