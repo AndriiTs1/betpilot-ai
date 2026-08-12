@@ -1831,6 +1831,75 @@ test("Stage 4.2B3: recognition reuse logs recognition_reused on the second call,
   assert.ok(!secondEvents.includes("parser_succeeded"), "the parser must not run on a recognition cache hit");
 });
 
+/* -------------------------------------------------------------------------- */
+/* SCREENSHOT QA-4 — Fix A: a cached recognition created BEFORE the S1        */
+/* claimedParticipant normalizer existed must not keep failing reconciliation */
+/* forever. Reproduces the exact production branch (recognition_reused with a */
+/* still-unnormalized "Bayern Win (П1)" claimedParticipant) by injecting that */
+/* pre-S1 shape directly into the FIRST call's fake parser — the only way to  */
+/* construct a "row from before this normalizer shipped" without a real      */
+/* database migration.                                                       */
+/* -------------------------------------------------------------------------- */
+
+function bayernStuttgartHomeReconciliationOddsFn(): BuildBetSlipPreviewOptions["verifyOddsFn"] {
+  return async () => ({
+    matched: true,
+    withinTolerance: true,
+    sourceOdds: 1.42,
+    submittedOdds: 1.42,
+    discrepancyPercent: 0,
+    bookmaker: "test-bookmaker",
+    note: null,
+    homeTeamName: "Bayern Munich",
+    awayTeamName: "VfB Stuttgart",
+    providerEventId: "evt-qa4",
+    providerSportKey: "soccer_epl",
+    eventStartTime: "2026-08-28T20:30:00.000Z",
+  });
+}
+
+test("SCREENSHOT QA-4 Fix A: a cache hit on a pre-S1 recognition (stale, unnormalized claimedParticipant) now reconciles successfully instead of repeating MARKET_INTENT_UNRECONCILED forever", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const db = registeredDb();
+
+  const staleSlip = singleSlip({
+    selections: [
+      {
+        sport: "Football",
+        event: "Bayern Munich vs VfB Stuttgart",
+        market: "1X2",
+        // The exact raw production shape from before S1 shipped — never
+        // cleaned, because this simulates a row the OLD parser wrote.
+        selection: "Bayern Win (П1)",
+        submittedOdds: 1.42,
+        pendingMarketReconciliation: { requiredSide: "HOME", claimedParticipant: "Bayern Win (П1)" },
+      },
+    ],
+    stake: 100,
+  });
+
+  const first = await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ db, parseBetSlip: fakeParseBetSlip(staleSlip), verifyOddsFn: bayernStuttgartHomeReconciliationOddsFn() }),
+  );
+  // The stale recognition itself still gets created successfully — S1 never
+  // ran for it (that's the whole point: it predates S1).
+  assert.equal(first.status, 200);
+  assert.equal(db._debug.recognitions.length, 1);
+
+  const second = await handleScreenshotPreview(
+    buildRequest(initData, jpegBytes(), "image/jpeg"),
+    baseOptions({ db, verifyOddsFn: bayernStuttgartHomeReconciliationOddsFn() }),
+  );
+
+  const secondEvents = parsedLogEvents().map((e) => e.event);
+  assert.ok(secondEvents.includes("recognition_reused"), "must still be a genuine cache hit, not a fresh re-parse");
+
+  assert.equal(second.status, 200, "Fix A: the cached, stale claimedParticipant must be re-normalized before reconciliation, not left to fail forever");
+  const body = await second.json();
+  assert.equal(body.preview.selections[0].marketType, "MONEYLINE_3WAY");
+});
+
 test("Stage 4.2B3: a second identical upload within the verification TTL reuses the verification — odds are not re-checked", async () => {
   const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
   const db = registeredDb();

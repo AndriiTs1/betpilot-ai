@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db/client";
 import type { PrismaClient } from "@/lib/generated/prisma/client";
 import { verifyInitData } from "@/lib/telegram/verifyInitData";
 import { parseBetSlipMessage, type ParseBetSlipResult } from "@/lib/ai/betParser";
+import { normalizeOcrParticipantClaim } from "@/lib/ai/ocrParticipantClaimNormalizer";
 import type { ParsedBetSlip } from "@/lib/bets/betSlip";
 import { buildBetSlipPreview, BetSlipValidationError, type BuildBetSlipPreviewOptions } from "@/lib/bets/buildBetSlipPreview";
 import { recognizeBetSlipScreenshot, type ScreenshotPipelineDiagnostics } from "@/lib/ocr/recognizeBetSlipScreenshot";
@@ -145,6 +146,49 @@ function logRegionDetectionOutcome(diagnostics: ScreenshotPipelineDiagnostics): 
       logScreenshotPipelineEvent("region_detection_error", { durationMs });
       return;
   }
+}
+
+// SCREENSHOT QA-4 — re-applies the exact same OCR-mode participant-claim
+// normalization a fresh parse already gets (lib/ai/betParser.ts's
+// buildParsedBetSlipResult, gated on mode === "OCR") to a POSSIBLY-STALE
+// cached recognition. ScreenshotRecognition rows are permanent and
+// immutable (lib/bets/screenshotRecognitionService.ts — "Read-only lookup.
+// Never creates, never mutates.", no TTL, no version stamp): a row created
+// before lib/ai/ocrParticipantClaimNormalizer.ts existed still stores its
+// original, unnormalized claimedParticipant forever, so a cache hit
+// (route.ts's own recognition_reused path) for that exact image would
+// otherwise keep failing reconciliation indefinitely even after the
+// parser-level fix ships — confirmed in production (SCREENSHOT QA-4:
+// rrrr.png's cached recognition still carried "Bayern Win (П1)" after S1
+// deployed). Applied unconditionally (not only on a cache hit) because
+// normalizeOcrParticipantClaim() is idempotent on an already-clean value
+// (see ocrParticipantClaimNormalizer.test.ts's own "clean participant name
+// with no noise is returned unchanged" coverage) — a freshly-created row's
+// claimedParticipant round-trips unchanged, so there is no need to
+// distinguish "fresh" from "cached" here at all. ScreenshotRecognition is
+// exclusively written by this route (OCR mode only, by construction — text
+// bets have no equivalent recognition cache; see
+// screenshotRecognitionService.ts's own file header), so this can never
+// reach or affect typed-chat behavior. Every other field is passed through
+// completely unchanged — this never re-derives, corrects, or reinterprets
+// anything about the parse itself, only the one input
+// reconcile1X2ParticipantClaim (buildBetSlipPreview.ts) treats as
+// machine-matching text.
+function normalizeCachedParticipantClaims(slip: ParsedBetSlip): ParsedBetSlip {
+  return {
+    ...slip,
+    selections: slip.selections.map((selection) =>
+      selection.pendingMarketReconciliation
+        ? {
+            ...selection,
+            pendingMarketReconciliation: {
+              ...selection.pendingMarketReconciliation,
+              claimedParticipant: normalizeOcrParticipantClaim(selection.pendingMarketReconciliation.claimedParticipant),
+            },
+          }
+        : selection,
+    ),
+  };
 }
 
 function mapOcrFailureToResponse(failure: OcrFailure): NextResponse {
@@ -527,7 +571,12 @@ export async function handleScreenshotPreview(
       logScreenshotPipelineEvent("recognition_created");
     }
 
-    const slip = recognitionRecord.parsedBet;
+    // SCREENSHOT QA-4 — see normalizeCachedParticipantClaims's own header:
+    // guards against a permanently-cached recognition (recognitionRecord may
+    // have come from findScreenshotRecognition above, not this request's own
+    // fresh parse) still carrying a claimedParticipant from before this
+    // normalizer existed.
+    const slip = normalizeCachedParticipantClaims(recognitionRecord.parsedBet);
 
     // Stage 4.2B3 — explicit Refresh Odds: an optional form field no
     // existing caller ever sends (fully backward compatible default:

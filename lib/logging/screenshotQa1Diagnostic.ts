@@ -85,6 +85,42 @@ export interface Qa1ParserDiagnostic {
   selections: Qa1ParserSelectionDiagnostic[] | null;
 }
 
+// SCREENSHOT QA-4 — the boundary the QA-4 production audit found genuinely
+// invisible: a numeric_mismatch rejection's own `errorCode` (above) says
+// role and verdict via the console.error text line only, and neither that
+// nor the QA1 parser stage ever expose WHICH numbers actually competed, or
+// whether SCREENSHOT QA-CORE S2's LABEL_STRONG/LABEL_WEAK tiering
+// (lib/ai/numericRoleVerifier.ts) actually engaged for a given rejection.
+// Fires only for the exact role/observation that caused a numeric_mismatch
+// rejection (lib/ai/betParser.ts's own unreliableClaim) — never for a
+// CORROBORATED/UNVERIFIED claim, which needs no explanation. `value` is
+// always the number exactly as extracted (e.g. "100", "50") — never a
+// larger substring, never marker-adjacent OCR context — and `marker` is
+// always one of the closed vocabulary words already documented in
+// lib/ai/numericRoleEvidence.ts (ставка/stake/usd/на/...), the same safety
+// class already logged elsewhere in this module. supportingEvidence/
+// conflictingEvidence are exactly the (already tier-filtered) arrays that
+// produced the verdict below — every entry here is by construction already
+// LABEL_STRONG/LABEL_WEAK (whichever tier survived filtering) or MARKER_LOW,
+// so their presence alone shows whether a real field label or an unlabeled
+// currency figure is what conflicted.
+export interface Qa1NumericEvidenceEntry {
+  value: string;
+  confidence: "LABEL_STRONG" | "LABEL_WEAK" | "MARKER_LOW" | "SOLE_CANDIDATE";
+  marker: string | null;
+}
+
+export interface Qa1NumericEvidenceDiagnostic {
+  stage: "numeric_evidence";
+  role: "STAKE" | "LINE" | "ODDS";
+  verdict: "CORROBORATED" | "CONTRADICTED" | "UNVERIFIED" | "AMBIGUOUS";
+  // The value Claude itself claimed for this role, stringified exactly as
+  // NumericRoleClaim.value already carries it — never reformatted.
+  claimedValue: string;
+  supportingEvidence: Qa1NumericEvidenceEntry[];
+  conflictingEvidence: Qa1NumericEvidenceEntry[];
+}
+
 // SCREENSHOT QA-2.1 — the ONE previously-invisible boundary from the QA-2
 // dual-failure audit: buildBetSlipPreview.ts's reconcile1X2ParticipantClaim
 // (lib/bets/buildBetSlipPreview.ts), reached only when a selection carries a
@@ -145,7 +181,8 @@ export type Qa1Diagnostic =
   | Qa1RegionDetectionDiagnostic
   | Qa1OcrDiagnostic
   | Qa1ParserDiagnostic
-  | Qa1ReconciliationDiagnostic;
+  | Qa1ReconciliationDiagnostic
+  | Qa1NumericEvidenceDiagnostic;
 
 export function logScreenshotQa1Diagnostic(diagnostic: Qa1Diagnostic): void {
   console.log(SCREENSHOT_QA1_DIAGNOSTIC_MARKER, JSON.stringify(diagnostic));

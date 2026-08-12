@@ -8,6 +8,8 @@ import { normalizeParsedBet, type ParsedBetSlip, type PendingMarketReconciliatio
 import { chatPrompt, ocrPrompt } from "./betParserPrompt";
 import { mapRawBetSlipToParsedBetSlip, type RawBetSelectionFields, type NumericRoleObservation, type MarketIntentObservation } from "./betDraftMapper";
 import { normalizeOcrParticipantClaim } from "./ocrParticipantClaimNormalizer";
+import { logScreenshotQa1Diagnostic, type Qa1NumericEvidenceEntry } from "@/lib/logging/screenshotQa1Diagnostic";
+import type { NumericRoleEvidence } from "./numericRoleEvidence";
 
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "llama3.2";
@@ -610,6 +612,28 @@ function buildParsedBetSlipResult(
     // happens to surface — a detail no caller currently branches on).
     const unreliableClaim = numericRoleObservations.find(isUnreliableNumericClaim);
     if (unreliableClaim) {
+      // SCREENSHOT QA-4 — OCR-mode only (mirrors the S1 claim-normalizer's
+      // own mode gate immediately below in this same function): logs
+      // exactly which evidence produced this rejection, so a future
+      // reproduction never again has to guess at competing values from a
+      // bare role/verdict string alone. See screenshotQa1Diagnostic.ts's own
+      // Qa1NumericEvidenceDiagnostic header for the full safety rationale.
+      if (mode === "OCR") {
+        const toDiagnosticEntry = (entry: NumericRoleEvidence): Qa1NumericEvidenceEntry => ({
+          value: entry.value,
+          confidence: entry.confidence,
+          marker: entry.marker,
+        });
+        logScreenshotQa1Diagnostic({
+          stage: "numeric_evidence",
+          role: unreliableClaim.role,
+          verdict: unreliableClaim.verification.verdict,
+          claimedValue: unreliableClaim.claimedValue,
+          supportingEvidence: unreliableClaim.verification.supportingEvidence.map(toDiagnosticEntry),
+          conflictingEvidence: unreliableClaim.verification.conflictingEvidence.map(toDiagnosticEntry),
+        });
+      }
+
       // Internal diagnostic only — never sent to the client. Both preview
       // routes already log `parsed.error` server-side and respond with
       // their own generic PARSE_FAILED/IMAGE_NOT_RECOGNIZED body

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { extractBetTool, rejectBetTool, extractExpressBetTool, parseBetSlipMessage, parseBetMessage, MAX_DECIMAL_ODDS } from "./betParser";
 import { chatPrompt, ocrPrompt } from "./betParserPrompt";
+import { SCREENSHOT_QA1_DIAGNOSTIC_MARKER } from "@/lib/logging/screenshotQa1Diagnostic";
 
 // Regression test for a real production incident (Stage 12, Phase 3
 // hotfix): Anthropic's strict-mode tool schema only supports `minItems`
@@ -1933,4 +1934,142 @@ test("S3 EXPRESS known gap (documented, not fixed): a shorthand-polluted 1X2 cla
   // changes.
   assert.equal(result.selections[0].selection, "Bayern Win (П1)");
   assert.equal(result.selections[0].pendingMarketReconciliation ?? null, null);
+});
+
+/* ============================================================================
+ * SCREENSHOT QA-4 — numeric_evidence diagnostic. The QA-4 production audit
+ * for Case B (rrr2.png) found a numeric_mismatch/CONTRADICTED rejection with
+ * no way to see WHICH values actually competed, or whether SCREENSHOT
+ * QA-CORE S2's LABEL_STRONG/LABEL_WEAK tiering had engaged. These tests
+ * prove the new diagnostic surfaces exactly that, OCR-mode only.
+ * ============================================================================ */
+
+function captureConsoleLog(): { loggedCalls: unknown[][]; restore: () => void } {
+  const originalConsoleLog = console.log;
+  const loggedCalls: unknown[][] = [];
+  console.log = (...args: unknown[]) => loggedCalls.push(args);
+  return {
+    loggedCalls,
+    restore: () => {
+      console.log = originalConsoleLog;
+    },
+  };
+}
+
+function numericEvidenceDiagnostics(loggedCalls: unknown[][]): Array<Record<string, unknown>> {
+  const results: Array<Record<string, unknown>> = [];
+  for (const call of loggedCalls) {
+    if (call[0] === SCREENSHOT_QA1_DIAGNOSTIC_MARKER && typeof call[1] === "string") {
+      const parsed = JSON.parse(call[1]) as Record<string, unknown>;
+      if (parsed.stage === "numeric_evidence") results.push(parsed);
+    }
+  }
+  return results;
+}
+
+test("QA-4 numeric_evidence diagnostic: OCR-mode CONTRADICTED (LABEL_STRONG present, claim disagrees) logs role/verdict/claimedValue/conflictingEvidence", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    currentHandler = async () =>
+      anthropicToolUseResponse("extract_bet", singleToolInput({ event: "RB Leipzig vs Borussia Mönchengladbach", selection: "RB Leipzig", stake: 100 }));
+
+    const result = await parseBetSlipMessage("RB Leipzig - Borussia Mönchengladbach\nStake 50\n1.53", "OCR");
+
+    assert.equal(result.valid, false);
+    if (result.valid) return;
+    assert.equal(result.code, "numeric_mismatch");
+
+    const diagnostics = numericEvidenceDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].role, "STAKE");
+    assert.equal(diagnostics[0].verdict, "CONTRADICTED");
+    assert.equal(diagnostics[0].claimedValue, "100");
+    assert.equal((diagnostics[0].conflictingEvidence as unknown[]).length, 1);
+    assert.deepEqual(diagnostics[0].conflictingEvidence, [{ value: "50", confidence: "LABEL_STRONG", marker: "stake" }]);
+    assert.deepEqual(diagnostics[0].supportingEvidence, []);
+  } finally {
+    restore();
+  }
+});
+
+test("QA-4 numeric_evidence diagnostic: OCR-mode AMBIGUOUS (two conflicting LABEL_STRONG values) logs both competing entries", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    currentHandler = async () =>
+      anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal vs Chelsea", selection: "Arsenal", stake: 10 }));
+
+    const result = await parseBetSlipMessage("Арсенал победа, ставка 10, ставка 20", "OCR");
+
+    assert.equal(result.valid, false);
+    if (result.valid) return;
+    assert.equal(result.code, "numeric_mismatch");
+
+    const diagnostics = numericEvidenceDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].verdict, "AMBIGUOUS");
+    assert.equal(diagnostics[0].claimedValue, "10");
+    assert.equal((diagnostics[0].supportingEvidence as unknown[]).length, 1);
+    assert.equal((diagnostics[0].conflictingEvidence as unknown[]).length, 1);
+  } finally {
+    restore();
+  }
+});
+
+test("QA-4 numeric_evidence diagnostic: never fires for CHAT mode, even for the identical rejection", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    currentHandler = async () =>
+      anthropicToolUseResponse("extract_bet", singleToolInput({ event: "RB Leipzig vs Borussia Mönchengladbach", selection: "RB Leipzig", stake: 100 }));
+
+    const result = await parseBetSlipMessage("RB Leipzig - Borussia Mönchengladbach\nstake 50\n1.53", "CHAT");
+
+    assert.equal(result.valid, false);
+    if (result.valid) return;
+    assert.equal(result.code, "numeric_mismatch");
+    assert.equal(numericEvidenceDiagnostics(loggedCalls).length, 0, "CHAT mode must never log the screenshot-only diagnostic");
+  } finally {
+    restore();
+  }
+});
+
+test("QA-4 numeric_evidence diagnostic: never fires when the numeric claim is fine (CORROBORATED/UNVERIFIED) — only an actual rejection needs explaining", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    currentHandler = async () =>
+      anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal vs Chelsea", selection: "Arsenal", stake: 10 }));
+
+    const result = await parseBetSlipMessage("Арсенал победа, ставка 10", "OCR");
+
+    assert.equal(result.valid, true);
+    assert.equal(numericEvidenceDiagnostics(loggedCalls).length, 0);
+  } finally {
+    restore();
+  }
+});
+
+test("QA-4 numeric_evidence diagnostic: never leaks raw OCR text, only closed enum/number/marker fields", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    const secretMarker = "SECRET_OCR_LINE_MARKER_9182";
+    currentHandler = async () =>
+      anthropicToolUseResponse("extract_bet", singleToolInput({ event: "RB Leipzig vs Borussia Mönchengladbach", selection: "RB Leipzig", stake: 100 }));
+
+    await parseBetSlipMessage(`${secretMarker}\nStake 50\n1.53`, "OCR");
+
+    const rawLoggedText = JSON.stringify(loggedCalls);
+    assert.equal(rawLoggedText.includes(secretMarker), false);
+
+    const diagnostics = numericEvidenceDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 1);
+    for (const entry of [...(diagnostics[0].supportingEvidence as Record<string, unknown>[]), ...(diagnostics[0].conflictingEvidence as Record<string, unknown>[])]) {
+      for (const [key, value] of Object.entries(entry)) {
+        assert.ok(
+          value === null || typeof value === "string",
+          `numeric evidence field "${key}" must be a string or null, got ${typeof value}`,
+        );
+      }
+    }
+  } finally {
+    restore();
+  }
 });
