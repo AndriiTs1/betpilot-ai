@@ -154,7 +154,14 @@ function mapOcrFailureToResponse(failure: OcrFailure): NextResponse {
     case "UNSUPPORTED_FORMAT":
       return NextResponse.json({ error: "UNSUPPORTED_FILE_TYPE" }, { status: 415 });
     case "NO_TEXT_FOUND":
-      return NextResponse.json({ error: "IMAGE_NOT_RECOGNIZED" }, { status: 422 });
+      // SCREENSHOT QA-CORE S3 — its own distinct code (previously folded
+      // into the same generic IMAGE_NOT_RECOGNIZED the parser-rejection path
+      // below also uses), so the client can tell "OCR found no legible text
+      // at all" apart from "OCR succeeded but the parser couldn't build a
+      // valid bet from it" — two genuinely different causes that used to
+      // share one message. OCR itself is unmodified; this only changes
+      // which JSON code an already-existing failure classification maps to.
+      return NextResponse.json({ error: "OCR_NO_TEXT" }, { status: 422 });
     case "PROVIDER_UNAVAILABLE":
       return NextResponse.json({ error: "AI_NOT_CONFIGURED" }, { status: 500 });
     case "PROVIDER_TIMEOUT":
@@ -479,18 +486,23 @@ export async function handleScreenshotPreview(
         // A parser-layer timeout gets its own honest response — never
         // reported as an image-quality problem — same distinction the old
         // image-specific parser made. Every other parse failure (rejected,
-        // no tool call, malformed fields, non-timeout API error) is folded
-        // into the single IMAGE_NOT_RECOGNIZED code and the single
-        // parser_rejected log event, because ParseBetSlipResult — shared
-        // with the text-bet flow, which already treats every other parse
-        // failure identically as PARSE_FAILED — carries no finer-grained
-        // discriminated reason beyond the timeout code for those cases.
+        // no tool call, malformed fields, non-timeout API error) still maps
+        // to the same IMAGE_NOT_RECOGNIZED top-level code and the single
+        // parser_rejected log event — changing that would be a real,
+        // out-of-scope behavior change — but SCREENSHOT QA-CORE S3 now also
+        // includes parsed.code itself as `detail` (already a closed,
+        // internal-safe enum: "numeric_mismatch" | "market_mismatch" |
+        // undefined, never parsed.error's own free-text detail), exactly
+        // mirroring the INVALID_BET_SLIP response below's existing
+        // {error, detail} shape, so the client can tell a numeric-ambiguity
+        // rejection apart from a market-mismatch or a generic/schema
+        // rejection instead of collapsing all three into one message.
         if (parsed.code === "timeout") {
           logScreenshotPipelineEvent("parser_timed_out", { durationMs: parserDurationMs, parserMode: "OCR" });
           return NextResponse.json({ error: "AI_TIMEOUT" }, { status: 504 });
         }
         logScreenshotPipelineEvent("parser_rejected", { durationMs: parserDurationMs, parserMode: "OCR" });
-        return NextResponse.json({ error: "IMAGE_NOT_RECOGNIZED" }, { status: 422 });
+        return NextResponse.json({ error: "IMAGE_NOT_RECOGNIZED", detail: parsed.code ?? "unspecified" }, { status: 422 });
       }
 
       // parseBetSlipMessage()'s success shape already *is* ParsedBetSlip — no

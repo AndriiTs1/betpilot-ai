@@ -36,6 +36,11 @@ export type BetScreenshotErrorCode =
   | "AI_NOT_CONFIGURED"
   | "AI_TIMEOUT"
   | "AI_UNAVAILABLE"
+  // SCREENSHOT QA-CORE S3 — its own code, split off from IMAGE_NOT_RECOGNIZED
+  // below (OCR found no legible text at all vs. OCR succeeded but the parser
+  // couldn't build a valid bet from it — two different causes, previously
+  // sharing one message).
+  | "OCR_NO_TEXT"
   | "IMAGE_NOT_RECOGNIZED"
   | "INCOMPLETE_BET_DATA"
   | "INVALID_BET_SLIP"
@@ -51,7 +56,16 @@ export type BetScreenshotErrorCode =
 // leaving an error branch for a response the server can never send again
 // would be misleading, not just unused.
 export type BetScreenshotFailure =
-  | { kind: "http"; code: BetScreenshotErrorCode | "UNKNOWN" }
+  // SCREENSHOT QA-CORE S3 — `detail` mirrors the server's own existing
+  // {error, detail} response shape (INVALID_BET_SLIP already carried a
+  // detail; IMAGE_NOT_RECOGNIZED now does too — see route.ts). Always a
+  // closed, already-safe enum string when present (a BetSlipValidationErrorCode
+  // or a ParseBetSlipResult code) — never raw exception text, never provider
+  // detail. Optional/null whenever the server response carried no detail
+  // field at all — every pre-existing client-side-only failure construction
+  // (upload validation, rejected before any request is even sent) simply
+  // omits it, unaffected by this addition.
+  | { kind: "http"; code: BetScreenshotErrorCode | "UNKNOWN"; detail?: string | null }
   | { kind: "network" }
   | { kind: "timeout" }
   | { kind: "invalid_response" };
@@ -101,7 +115,15 @@ export async function fetchBetScreenshotPreview(
         ? ((body as { error: string }).error as BetScreenshotErrorCode | "UNKNOWN")
         : "UNKNOWN";
 
-    return { ok: false, failure: { kind: "http", code } };
+    // SCREENSHOT QA-CORE S3 — same optional-field extraction discipline as
+    // `code` above; a missing/non-string detail is simply null, never
+    // fabricated.
+    const detail =
+      typeof body === "object" && body !== null && typeof (body as { detail?: unknown }).detail === "string"
+        ? (body as { detail: string }).detail
+        : null;
+
+    return { ok: false, failure: { kind: "http", code, detail } };
   }
 
   const body: unknown = await response.json().catch(() => null);
@@ -142,11 +164,36 @@ export function getBetScreenshotErrorMessage(failure: BetScreenshotFailure): str
     case "AI_UNAVAILABLE":
     case "AI_NOT_CONFIGURED":
       return "Bet recognition is temporarily unavailable. Please try again later.";
+    // SCREENSHOT QA-CORE S3 — OCR genuinely found no legible text at all
+    // (distinct from IMAGE_NOT_RECOGNIZED below, where OCR succeeded but the
+    // bet itself couldn't be confidently extracted).
+    case "OCR_NO_TEXT":
+      return "We couldn't read enough text from this image. Try a clearer screenshot.";
     case "IMAGE_NOT_RECOGNIZED":
+      // SCREENSHOT QA-CORE S3 — `detail` (when present) is the parser's own
+      // already-safe rejection code (numeric_mismatch/market_mismatch),
+      // never raw text — see route.ts's own comment on this field. Every
+      // other cause (OCR succeeded but the parser genuinely rejected the
+      // slip, or a schema/tool-call failure with no finer-grained code)
+      // keeps today's existing, still-accurate message.
+      if (failure.detail === "numeric_mismatch") {
+        return "We spotted more than one possible stake or odds value on this screenshot. Please make sure only your actual bet is visible, or enter it manually.";
+      }
+      if (failure.detail === "market_mismatch") {
+        return "We couldn't confidently match the selection on this screenshot. Please try a clearer screenshot or enter the bet manually.";
+      }
       return "We couldn't recognize a bet slip in this image. Please try a clearer screenshot.";
     case "INCOMPLETE_BET_DATA":
       return "We could only partially read this bet slip. Please try a clearer screenshot.";
     case "INVALID_BET_SLIP":
+      // SCREENSHOT QA-CORE S3 — confirmed production defect (QA-2): every
+      // BetSlipValidationErrorCode used to share this one message, even
+      // MARKET_INTENT_UNRECONCILED, which has nothing to do with selection
+      // count. `detail` already carried the real code — see route.ts — it
+      // was simply never read here until now.
+      if (failure.detail === "MARKET_INTENT_UNRECONCILED") {
+        return "We couldn't confirm which team or match your selection refers to. Please try again or enter the bet manually.";
+      }
       return "This bet doesn't have a valid number of selections. Please try again.";
     case "INTERNAL_ERROR":
     default:

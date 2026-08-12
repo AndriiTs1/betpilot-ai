@@ -447,7 +447,7 @@ test("screenshot preview: a MIME/signature mismatch is rejected before OCR", asy
 // OCR failure mapping
 // ---------------------------------------------------------------------
 
-test("screenshot preview: OCR NO_TEXT_FOUND maps to IMAGE_NOT_RECOGNIZED", async () => {
+test("screenshot preview: OCR NO_TEXT_FOUND maps to its own OCR_NO_TEXT code (SCREENSHOT QA-CORE S3 — previously the same generic IMAGE_NOT_RECOGNIZED the parser-rejection path also used)", async () => {
   const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
   const request = buildRequest(initData, jpegBytes(), "image/jpeg");
 
@@ -461,7 +461,7 @@ test("screenshot preview: OCR NO_TEXT_FOUND maps to IMAGE_NOT_RECOGNIZED", async
 
   const response = await handleScreenshotPreview(request, baseOptions({ ocrProvider }));
   assert.equal(response.status, 422);
-  assert.deepEqual(await response.json(), { error: "IMAGE_NOT_RECOGNIZED" });
+  assert.deepEqual(await response.json(), { error: "OCR_NO_TEXT" });
 });
 
 test("screenshot preview: OCR PROVIDER_TIMEOUT maps to AI_TIMEOUT", async () => {
@@ -531,7 +531,41 @@ test("screenshot preview: a bet parser rejection maps to IMAGE_NOT_RECOGNIZED, n
   );
 
   assert.equal(response.status, 422);
-  assert.deepEqual(await response.json(), { error: "IMAGE_NOT_RECOGNIZED" });
+  // SCREENSHOT QA-CORE S3 — detail is "unspecified" whenever
+  // ParseBetSlipResult carries no discriminated code at all (a generic
+  // reject_bet/schema failure, as here) — distinct from the numeric_mismatch/
+  // market_mismatch cases covered separately below.
+  assert.deepEqual(await response.json(), { error: "IMAGE_NOT_RECOGNIZED", detail: "unspecified" });
+});
+
+test("screenshot preview: a numeric_mismatch parser rejection surfaces detail: 'numeric_mismatch' (SCREENSHOT QA-CORE S3)", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  const response = await handleScreenshotPreview(
+    request,
+    baseOptions({
+      parseBetSlip: fakeParseBetSlip({ valid: false, error: "Numeric claim not corroborated", code: "numeric_mismatch" }),
+    }),
+  );
+
+  assert.equal(response.status, 422);
+  assert.deepEqual(await response.json(), { error: "IMAGE_NOT_RECOGNIZED", detail: "numeric_mismatch" });
+});
+
+test("screenshot preview: a market_mismatch parser rejection surfaces detail: 'market_mismatch' (SCREENSHOT QA-CORE S3)", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  const response = await handleScreenshotPreview(
+    request,
+    baseOptions({
+      parseBetSlip: fakeParseBetSlip({ valid: false, error: "Market claim not corroborated", code: "market_mismatch" }),
+    }),
+  );
+
+  assert.equal(response.status, 422);
+  assert.deepEqual(await response.json(), { error: "IMAGE_NOT_RECOGNIZED", detail: "market_mismatch" });
 });
 
 // ---------------------------------------------------------------------
@@ -644,7 +678,7 @@ test("screenshot preview: a bet-parser API error (non-timeout) maps to IMAGE_NOT
   );
 
   assert.equal(response.status, 422);
-  assert.deepEqual(await response.json(), { error: "IMAGE_NOT_RECOGNIZED" });
+  assert.deepEqual(await response.json(), { error: "IMAGE_NOT_RECOGNIZED", detail: "unspecified" });
 });
 
 test("screenshot preview: the bet parser throwing (not rejecting) is still handled safely", async () => {

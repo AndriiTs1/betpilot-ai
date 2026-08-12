@@ -1730,3 +1730,207 @@ test("S2 real Leipzig/Gladbach fixture: the full OCR-mode parse succeeds — SIN
   assert.equal(result.selections[0].submittedOdds, 1.53);
   assert.equal(result.stake, 100);
 });
+
+/* ============================================================================
+ * SCREENSHOT QA-CORE S3 Part A — EXPRESS parity.
+ *
+ * INVESTIGATION FIRST: computeMarketIntentObservations (betDraftMapper.ts)
+ * returns [] for any EXPRESS slip — confirmed by direct inspection, not
+ * assumed — so the 1X2-shorthand-vs-participant-name reconciliation
+ * deferral S1 fixed for SINGLE (classifyReconcilable1X2Mismatch) NEVER
+ * engages for EXPRESS legs at all, before OR after S1/S2. This is not a
+ * regression S1/S2 introduced; it is a pre-existing, already-documented
+ * limitation (see betDraftMapper.ts's own computeMarketIntentObservations
+ * comment: "SINGLE only... an EXPRESS slip's originalText can contain
+ * several legs' worth of market-shape tokens with no reliable way to say
+ * which belongs to which leg").
+ *
+ * Extending it safely requires solving LEG ATTRIBUTION of market-intent
+ * evidence: extractMarketIntentEvidence() has no per-leg awareness and
+ * returns every signal found anywhere in the whole originalText. Naively
+ * running each leg's claim against that same undifferentiated evidence set
+ * would either (a) falsely flag genuinely correct multi-market EXPRESS
+ * slips as AMBIGUOUS (2+ legs almost always produce 2+ distinct market-shape
+ * signatures in the source text — one per leg), or worse (b) risk silently
+ * reconciling leg A's claim against evidence that actually belongs to leg
+ * B's event, a real financial-correctness risk. Per this stage's explicit
+ * "do not weaken fail-closed safety" and "STOP a sub-part and report if
+ * architectural assumptions are false" instructions, this specific gap is
+ * NOT force-fixed here — it needs its own dedicated leg-attribution design,
+ * separately reviewed.
+ *
+ * What IS proven below: EXPRESS parsing itself (MONEYLINE with a CLEAN
+ * participant claim, SPREAD, TOTALS, mixed markets, quick-stake UI noise,
+ * per-leg odds, one global stake, DRAW, cross-leg role isolation) works
+ * correctly end-to-end — i.e. EXPRESS is not broken by S1 or S2 — and the
+ * one known gap (a shorthand-polluted EXPRESS leg claim) is pinned down as
+ * an explicit, deliberate regression test rather than left as a silent
+ * unknown.
+ * ============================================================================ */
+
+test("S3 EXPRESS x2 (1X2 + TOTALS): both legs, global stake, and per-leg odds all parse correctly with quick-stake UI noise present", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_express_bet", {
+      stake: 50,
+      selections: [
+        { sport: "Football", league: null, event: "RB Leipzig vs Borussia Mönchengladbach", market: "1X2", selection: "RB Leipzig", period: null, line: null, odds: 1.53 },
+        { sport: "Football", league: null, event: "Arsenal vs Chelsea", market: "Totals", selection: "Over", period: null, line: "2.5", odds: 1.9 },
+      ],
+    });
+
+  const text = [
+    "RB Leipzig - Borussia Mönchengladbach",
+    "W1",
+    "1.53",
+    "Arsenal - Chelsea",
+    "TB 2.5",
+    "1.90",
+    "Stake",
+    "50",
+    "10 25 50 100 200",
+    "Place Bet 50.00 USD",
+  ].join("\n");
+
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `expected a valid parse, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+
+  assert.equal(result.type, "EXPRESS");
+  assert.equal(result.stake, 50);
+  assert.equal(result.selections.length, 2);
+  assert.equal(result.selections[0].event, "RB Leipzig vs Borussia Mönchengladbach");
+  assert.equal(result.selections[0].selection, "RB Leipzig");
+  assert.equal(result.selections[0].submittedOdds, 1.53);
+  assert.equal(result.selections[1].event, "Arsenal vs Chelsea");
+  assert.equal(result.selections[1].market, "Totals");
+  assert.equal(result.selections[1].line, "2.5");
+  assert.equal(result.selections[1].submittedOdds, 1.9);
+});
+
+test("S3 EXPRESS x3 (MONEYLINE + SPREAD + TOTALS): three legs, mixed markets, all parse correctly", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_express_bet", {
+      stake: 30,
+      selections: [
+        { sport: "Football", league: null, event: "Bayern Munich vs VfB Stuttgart", market: null, selection: "Bayern Munich", period: null, line: null, odds: 1.42 },
+        { sport: "Football", league: null, event: "Arsenal vs Chelsea", market: "Handicap", selection: "Arsenal -1.5", period: null, line: "-1.5", odds: 2.1 },
+        { sport: "Football", league: null, event: "Real Madrid vs Barcelona", market: "Totals", selection: "Under", period: null, line: "3.5", odds: 1.85 },
+      ],
+    });
+
+  const text = [
+    "Bayern Munich vs VfB Stuttgart, Bayern Munich win",
+    "1.42",
+    "Arsenal vs Chelsea, Ф1(-1.5)",
+    "2.10",
+    "Real Madrid vs Barcelona, ТМ 3.5",
+    "1.85",
+    "ставка 30",
+  ].join("\n");
+
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `expected a valid parse, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+
+  assert.equal(result.type, "EXPRESS");
+  assert.equal(result.stake, 30);
+  assert.equal(result.selections.length, 3);
+  assert.equal(result.selections[0].selection, "Bayern Munich");
+  assert.equal(result.selections[1].line, "-1.5");
+  assert.equal(result.selections[1].submittedOdds, 2.1);
+  assert.equal(result.selections[2].line, "3.5");
+  assert.equal(result.selections[2].submittedOdds, 1.85);
+});
+
+test("S3 EXPRESS: an explicit DRAW leg parses fine alongside other legs (display text only — canonical DRAW/participant classification is buildBetSlipPreview's concern, unaffected by S1/S2)", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_express_bet", {
+      stake: 15,
+      selections: [
+        { sport: "Football", league: null, event: "Arsenal vs Chelsea", market: null, selection: "Draw", period: null, line: null, odds: 3.4 },
+        { sport: "Football", league: null, event: "Real Madrid vs Barcelona", market: "Totals", selection: "Over", period: null, line: "2.5", odds: 1.9 },
+      ],
+    });
+
+  const text = "Arsenal - Chelsea\nX\n3.40\nReal Madrid - Barcelona\nТБ 2.5\n1.90\nставка 15";
+
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `expected a valid parse, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+  assert.equal(result.selections[0].selection, "Draw");
+});
+
+test("S3 EXPRESS + S2 regression: quick-stake UI noise never disrupts a correctly labeled global EXPRESS stake", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_express_bet", {
+      stake: 100,
+      selections: [
+        { sport: "Football", league: null, event: "Arsenal vs Chelsea", market: "Totals", selection: "Over", period: null, line: "2.5", odds: 1.9 },
+        { sport: "Football", league: null, event: "Real Madrid vs Barcelona", market: "Totals", selection: "Under", period: null, line: "3.5", odds: 1.85 },
+      ],
+    });
+
+  const text = [
+    "Arsenal - Chelsea, ТБ 2.5",
+    "1.90",
+    "Real Madrid - Barcelona, ТМ 3.5",
+    "1.85",
+    "Stake",
+    "100",
+    "10 25 50 100 200",
+    "Potential payout",
+    "285.00 USD",
+    "Place Bet 100.00 USD",
+  ].join("\n");
+
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `expected a valid parse, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+  assert.equal(result.stake, 100);
+});
+
+test("S3 EXPRESS: cross-leg numeric role isolation — two different per-leg LINE values never contaminate the single, unambiguous global STAKE claim", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_express_bet", {
+      stake: 20,
+      selections: [
+        { sport: "Football", league: null, event: "Arsenal", market: "Totals", selection: "Over", period: null, line: "2.5", odds: null },
+        { sport: "Football", league: null, event: "Real Madrid", market: null, selection: "Win", period: null, line: null, odds: null },
+      ],
+    });
+
+  const result = await parseBetSlipMessage("Арсенал ТБ 2.5 + Реал победа, экспресс 20", "CHAT");
+
+  assert.equal(result.valid, true, result.valid ? "" : `expected a valid parse, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+  assert.equal(result.stake, 20);
+});
+
+test("S3 EXPRESS known gap (documented, not fixed): a shorthand-polluted 1X2 claim in an EXPRESS leg passes through completely unchecked — neither rejected nor reconciled, same as before S1/S2", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_express_bet", {
+      stake: 20,
+      selections: [
+        { sport: "Football", league: null, event: "Bayern Munich vs VfB Stuttgart", market: "1X2", selection: "Bayern Win (П1)", period: null, line: null, odds: 1.42 },
+        { sport: "Football", league: null, event: "Arsenal vs Chelsea", market: "Totals", selection: "Over", period: null, line: "2.5", odds: 1.9 },
+      ],
+    });
+
+  const text = "Bayern Munich vs VfB Stuttgart\nП1\n1.42\nArsenal vs Chelsea\nTB 2.5\n1.90\nэкспресс 20";
+
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `expected a valid parse, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+  // No market-intent check runs for EXPRESS at all (computeMarketIntentObservations
+  // returns [] for type !== "SINGLE") — the polluted display text survives
+  // unmodified, and no pendingMarketReconciliation is ever attached. This is
+  // the exact, confirmed pre-existing behavior — not a target this stage
+  // changes.
+  assert.equal(result.selections[0].selection, "Bayern Win (П1)");
+  assert.equal(result.selections[0].pendingMarketReconciliation ?? null, null);
+});
