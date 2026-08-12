@@ -1323,3 +1323,73 @@ test("BA-2D Step 5: full existing-valid-flow regression list stays green", async
     assert.equal(result.valid, true, `expected "${text}" to still pass`);
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/* SCREENSHOT QA-1.3 — full OCR->parser end-to-end reproduction              */
+/* -------------------------------------------------------------------------- */
+//
+// Only the Claude tool_use call itself is mocked (currentHandler, as every
+// other test in this file already does) — parseBetSlipMessage(), the real
+// buildParsedBetSlipResult(), and the real numeric-role safety net
+// (lib/ai/numericRoleEvidence.ts + numericRoleVerifier.ts, this stage's own
+// fix) all run unmodified. This is the exact same OCR text reconstruction
+// used in numericRoleVerifier.test.ts's own QA-1.3 exact-reproduction test —
+// see that file's header comment on why it's a reconstruction, not the
+// literal captured transcript (never logged, by design).
+const BAYERN_STUTTGART_OCR_TEXT = [
+  "Германия - Бундеслига",
+  "Бавария - Штутгарт",
+  "28.08.2026 20:30",
+  "Исход (1X2)",
+  "П1 - Бавария",
+  "1.42",
+  "",
+  "Сумма ставки",
+  "100",
+  "USD",
+  "10 25 50 100 250",
+  "",
+  "Возможный выигрыш",
+  "142.00 USD",
+  "Сделать ставку 100.00 USD",
+].join("\n");
+
+test("QA-1.3: the real Bayern/Stuttgart OCR text no longer fails BA-2B's numeric-role safety net — the deterministic layer, not just OCR/Claude, was the actual defect", async () => {
+  // selection: "П1" (not "Bayern Munich") is deliberate — it's the exact
+  // Home Win shorthand literally visible in the source text ("П1 -
+  // Бавария"), a legitimate "Bayern/Home Win equivalent" extraction. This
+  // sidesteps a SEPARATE, independent safety gate (BA-2D's market-intent
+  // verifier, lib/ai/marketIntentVerifier.ts) that is NOT part of QA-1.2's
+  // proven root cause (numeric_mismatch/role=STAKE) and is explicitly out
+  // of this stage's scope — confirmed by testing: a translated
+  // "Bayern Munich" selection claim independently trips market-intent
+  // CONTRADICTED (MONEYLINE_2WAY claim vs. the text's own MONEYLINE_3WAY
+  // "П1" evidence) regardless of this stage's fix, a real but different
+  // defect worth flagging for a future, separate stage — see this stage's
+  // final report.
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({
+        sport: "Football",
+        event: "Bayern Munich vs VfB Stuttgart",
+        market: "1X2",
+        selection: "П1",
+        stake: 100,
+        odds: 1.42,
+      }),
+    );
+
+  const result = await parseBetSlipMessage(BAYERN_STUTTGART_OCR_TEXT, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `expected a valid parse, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+
+  assert.equal(result.type, "SINGLE");
+  assert.equal(result.selections.length, 1);
+  assert.equal(result.selections[0].sport, "Football");
+  assert.equal(result.selections[0].event, "Bayern Munich vs VfB Stuttgart");
+  assert.equal(result.selections[0].selection, "П1");
+  assert.equal(result.selections[0].submittedOdds, 1.42);
+  assert.equal(result.stake, 100);
+});

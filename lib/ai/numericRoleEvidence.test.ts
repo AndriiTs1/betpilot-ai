@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractNumericRoleEvidence, type NumericRoleEvidence } from "./numericRoleEvidence";
+import { extractNumericRoleEvidence, sameNumericValue, type NumericRoleEvidence } from "./numericRoleEvidence";
 
 function findByRole(evidence: readonly NumericRoleEvidence[], role: NumericRoleEvidence["role"]): NumericRoleEvidence[] {
   return evidence.filter((e) => e.role === role);
@@ -507,4 +507,104 @@ test("H3: does not mutate originalText", () => {
   const before = text.slice();
   extractNumericRoleEvidence(text);
   assert.equal(text, before);
+});
+
+/* ============================================================================
+ * SCREENSHOT QA-1.3 — real bookmaker-slip STAKE label forms + false-positive
+ * currency-suffix exclusion (see numericRoleVerifier.test.ts for the
+ * end-to-end verdict-level proof against the actual Bayern/Stuttgart shape).
+ * ============================================================================ */
+
+test("QA-1.3: 'Сумма ставки 100 USD' (single line, with colon-less label) produces MARKER_HIGH STAKE=100, marker 'сумма ставки'", () => {
+  // Two STAKE entries are expected here, not one: the "сумма ставки" label
+  // marker AND the pre-existing "usdc" currency-suffix marker both
+  // independently fire on the same "100" — both agree on the same value,
+  // which is harmless (see the "repeated same value" tests below); this
+  // test only asserts the NEW label marker itself is present and correct.
+  const text = "Сумма ставки 100 USD";
+  const stakes = findByRole(extractNumericRoleEvidence(text), "STAKE");
+  const labeled = stakes.find((s) => s.marker === "сумма ставки");
+  assert.ok(labeled, "expected a 'сумма ставки' STAKE entry");
+  assert.equal(labeled!.value, "100");
+  assert.equal(labeled!.confidence, "MARKER_HIGH");
+  for (const stake of stakes) {
+    assert.ok(sameNumericValue(stake.value, "100"));
+  }
+});
+
+test("QA-1.3: 'Сумма ставки' label and its number on SEPARATE OCR lines still produce MARKER_HIGH STAKE evidence", () => {
+  const text = "Сумма ставки\n100\nUSD";
+  const stakes = findByRole(extractNumericRoleEvidence(text), "STAKE");
+  assert.ok(stakes.some((s) => s.value === "100" && s.marker === "сумма ставки" && s.confidence === "MARKER_HIGH"));
+});
+
+test("QA-1.3: 'Размер ставки: 66.67' and 'Сумма пари 20' are both recognized MARKER_HIGH STAKE label forms", () => {
+  const razmer = findByRole(extractNumericRoleEvidence("Размер ставки: 66.67"), "STAKE");
+  assert.equal(razmer.length, 1);
+  assert.equal(razmer[0].value, "66.67");
+  assert.equal(razmer[0].marker, "размер ставки");
+
+  const pari = findByRole(extractNumericRoleEvidence("Сумма пари 20"), "STAKE");
+  assert.equal(pari.length, 1);
+  assert.equal(pari[0].value, "20");
+  assert.equal(pari[0].marker, "сумма пари");
+});
+
+test("QA-1.3: English 'Stake' label and its number on separate lines still corroborate (pre-existing \\s* behavior, explicitly proven for the adjacent-line case)", () => {
+  const text = "Stake\n25";
+  const stakes = findByRole(extractNumericRoleEvidence(text), "STAKE");
+  assert.equal(stakes.length, 1);
+  assert.equal(stakes[0].value, "25");
+  assert.equal(stakes[0].marker, "stake");
+});
+
+test("QA-1.3: a currency-suffixed number is NOT tagged STAKE when it directly follows 'Возможный выигрыш' (potential win)", () => {
+  const text = "Возможный выигрыш\n142.00 USD";
+  const stakes = findByRole(extractNumericRoleEvidence(text), "STAKE");
+  assert.equal(stakes.length, 0, "142.00 must never become STAKE evidence merely because it has a currency suffix");
+});
+
+test("QA-1.3: a currency-suffixed number is NOT tagged STAKE when it directly follows 'выплата' (payout) or 'баланс'/'balance'", () => {
+  assert.equal(findByRole(extractNumericRoleEvidence("Выплата\n50 USD"), "STAKE").length, 0);
+  assert.equal(findByRole(extractNumericRoleEvidence("Баланс\n300 USD"), "STAKE").length, 0);
+  assert.equal(findByRole(extractNumericRoleEvidence("Balance\n300 USD"), "STAKE").length, 0);
+  assert.equal(findByRole(extractNumericRoleEvidence("Payout\n300 USD"), "STAKE").length, 0);
+});
+
+test("QA-1.3: the currency-suffix exclusion is narrowly scoped — an unrelated preceding word never suppresses a genuine stake figure", () => {
+  const stakes = findByRole(extractNumericRoleEvidence("Футбол Бавария Штутгарт 100 USD"), "STAKE");
+  assert.equal(stakes.length, 1);
+  assert.equal(stakes[0].value, "100");
+});
+
+test("QA-1.3 full Bayern/Stuttgart shape: exact bookmaker OCR layout — the real stake label field corroborates 100, quick-select buttons and potential-win never compete", () => {
+  const text = [
+    "Германия - Бундеслига",
+    "Бавария - Штутгарт",
+    "28.08.2026 20:30",
+    "Исход (1X2)",
+    "П1 - Бавария",
+    "1.42",
+    "",
+    "Сумма ставки",
+    "100",
+    "USD",
+    "10 25 50 100 250",
+    "",
+    "Возможный выигрыш",
+    "142.00 USD",
+    "Сделать ставку 100.00 USD",
+  ].join("\n");
+
+  const evidence = extractNumericRoleEvidence(text);
+  const stakes = findByRole(evidence, "STAKE");
+
+  // Every STAKE entry found must agree with the real stake (100) — none may
+  // carry the potential-win value (142.00).
+  assert.ok(stakes.length > 0, "expected at least one STAKE entry (the real 'Сумма ставки' label)");
+  for (const stake of stakes) {
+    assert.ok(sameNumericValue(stake.value, "100"), `unexpected STAKE evidence value: ${stake.value}`);
+  }
+  // The explicit label itself must be present among them.
+  assert.ok(stakes.some((s) => s.marker === "сумма ставки"));
 });

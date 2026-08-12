@@ -382,3 +382,95 @@ test("28. originalText is never rewritten by comma normalization", () => {
   extractNumericRoleEvidence(text);
   assert.equal(text, before);
 });
+
+/* ============================================================================
+ * SCREENSHOT QA-1.3 — exact production regression + negative safety tests.
+ * QA-1.2's production diagnostic proved this real Bayern/Stuttgart screenshot
+ * failed with STAKE=AMBIGUOUS (role=STAKE) even though OCR legibly captured
+ * the odds/stake/selection marker — see numericRoleEvidence.ts's own header
+ * comment on the currency-suffix "usdc" marker for the exact mechanism.
+ * ============================================================================ */
+
+// Reconstructed as closely as possible to the real visible bookmaker-app
+// layout (Германия - Бундеслига / Бавария - Штутгарт / Исход (1X2) / П1 -
+// Бавария / 1.42 / quick-select buttons / Сумма ставки / Возможный выигрыш /
+// confirm button) — the real raw OCR transcript itself was never logged by
+// design (SCREENSHOT QA-1.1's own diagnostic deliberately logs only boolean
+// content indicators, never the transcript), so this is the closest safely
+// obtainable equivalent, not the literal captured string.
+const BAYERN_STUTTGART_OCR_TEXT = [
+  "Германия - Бундеслига",
+  "Бавария - Штутгарт",
+  "28.08.2026 20:30",
+  "Исход (1X2)",
+  "П1 - Бавария",
+  "1.42",
+  "",
+  "Сумма ставки",
+  "100",
+  "USD",
+  "10 25 50 100 250",
+  "",
+  "Возможный выигрыш",
+  "142.00 USD",
+  "Сделать ставку 100.00 USD",
+].join("\n");
+
+test("QA-1.3 exact reproduction: the real Bayern/Stuttgart OCR shape — STAKE claim 100 is CORROBORATED, not AMBIGUOUS", () => {
+  const evidence = extractNumericRoleEvidence(BAYERN_STUTTGART_OCR_TEXT);
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+  assert.ok(result.supportingEvidence.length > 0);
+  assert.equal(result.conflictingEvidence.length, 0);
+});
+
+test("QA-1.3 negative A: quick-select preset numbers alone, no explicit stake label, never confidently corroborate a stake claim", () => {
+  const evidence = extractNumericRoleEvidence("10 25 50 100 250");
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.notEqual(result.verdict, "CORROBORATED");
+});
+
+test("QA-1.3 negative B: 'Сумма ставки 50' but the claim says 100 — CONTRADICTED, not silently accepted", () => {
+  const evidence = extractNumericRoleEvidence("Сумма ставки 50");
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.equal(result.verdict, "CONTRADICTED");
+});
+
+test("QA-1.3 negative C: two conflicting 'Сумма ставки' labels for different values — AMBIGUOUS, genuine ambiguity not guessed at", () => {
+  const evidence = extractNumericRoleEvidence("Сумма ставки 50\nСумма ставки 100");
+  const result50 = verifyNumericRoleClaim(claim("STAKE", 50), evidence);
+  const result100 = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.equal(result50.verdict, "AMBIGUOUS");
+  assert.equal(result100.verdict, "AMBIGUOUS");
+});
+
+test("QA-1.3 negative D: 'Возможный выигрыш 142.00 USD' (potential win) never corroborates or contradicts a STAKE claim — it produces no STAKE evidence at all", () => {
+  const evidence = extractNumericRoleEvidence("Возможный выигрыш\n142.00 USD");
+  assert.equal(evidence.filter((e) => e.role === "STAKE").length, 0);
+  // A claimed stake of 142 must be UNVERIFIED (no evidence either way), not
+  // falsely CORROBORATED by the potential-win figure.
+  const result = verifyNumericRoleClaim(claim("STAKE", 142), evidence);
+  assert.notEqual(result.verdict, "CORROBORATED");
+});
+
+test("QA-1.3 negative E: the odds value '1.42' never becomes STAKE evidence in the full real-shape text", () => {
+  const evidence = extractNumericRoleEvidence(BAYERN_STUTTGART_OCR_TEXT);
+  const oddsAsStake = evidence.filter((e) => e.role === "STAKE" && e.value === "1.42");
+  assert.equal(oddsAsStake.length, 0);
+});
+
+test("QA-1.3 negative F: a balance figure with a currency suffix does not corroborate a STAKE claim when a real labeled stake conflicts with it", () => {
+  const evidence = extractNumericRoleEvidence("Баланс\n300 USD\nСумма ставки 100");
+  const result300 = verifyNumericRoleClaim(claim("STAKE", 300), evidence);
+  const result100 = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.notEqual(result300.verdict, "CORROBORATED");
+  assert.equal(result100.verdict, "CORROBORATED");
+});
+
+test("QA-1.3 role regression: the new STAKE vocabulary does not steal LINE/ODDS roles — spread/totals/odds extraction in the real shape is unaffected", () => {
+  const text = "Арсенал ТБ 2.5, коэффициент 1.90, Сумма ставки 10";
+  const evidence = extractNumericRoleEvidence(text);
+  assert.equal(verifyNumericRoleClaim(claim("LINE", 2.5), evidence).verdict, "CORROBORATED");
+  assert.equal(verifyNumericRoleClaim(claim("ODDS", 1.9), evidence).verdict, "CORROBORATED");
+  assert.equal(verifyNumericRoleClaim(claim("STAKE", 10), evidence).verdict, "CORROBORATED");
+});

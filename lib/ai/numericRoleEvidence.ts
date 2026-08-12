@@ -135,9 +135,26 @@ const NOT_WORD_AFTER = "(?![a-zа-яё0-9])";
 // Ukrainian betting usage — no distinct Ukrainian-only stake word is added
 // here; inventing one without a concrete example to verify against would be
 // exactly the kind of guess this stage's brief explicitly warns against.
+//
+// SCREENSHOT QA-1.3 — "сумма ставки"/"размер ставки"/"сумма пари" added
+// alongside "ставка" for a proven, real reason: a bookmaker UI's own field
+// label is a DIFFERENT grammatical form ("ставки", genitive) than the
+// player's own spoken/typed "ставка" (nominative) — the literal substring
+// "ставка" never appears inside "Сумма ставки" at all, so a real screenshot
+// like "Сумма ставки\n100\nUSD" produced ZERO STAKE marker evidence before
+// this change (confirmed via SCREENSHOT QA-1.2's production diagnostic:
+// containsStake100=true at the OCR stage, yet the numeric-role verifier
+// still returned STAKE=AMBIGUOUS). `\s*` between the label and the number
+// already matches a newline exactly like every other whitespace character
+// (JS's `\s` includes `\n`/`\r`), so these patterns work identically
+// whether the label and number are on the same OCR line or separate ones —
+// no special-casing needed for that.
 const MARKER_BEFORE_NUMBER_SPECS: readonly MarkerBeforeNumberSpec[] = [
   { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "ставка", pattern: new RegExp(`${NOT_WORD_BEFORE}ставка\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
   { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "ставлю", pattern: new RegExp(`${NOT_WORD_BEFORE}ставлю\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
+  { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "сумма ставки", pattern: new RegExp(`${NOT_WORD_BEFORE}сумма\\s+ставки\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
+  { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "размер ставки", pattern: new RegExp(`${NOT_WORD_BEFORE}размер\\s+ставки\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
+  { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "сумма пари", pattern: new RegExp(`${NOT_WORD_BEFORE}сумма\\s+пари\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
   { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "экспресс", pattern: new RegExp(`${NOT_WORD_BEFORE}(?:экспресс|express)\\s*[:=]?\\s*([+-]?\\d+(?:[.,]\\d+)?)`, "gi") },
   { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "stake", pattern: /\bstake\s*[:=]?\s*([+-]?\d+(?:[.,]\d+)?)/gi },
   { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "bet", pattern: /\bbet\s*[:=]?\s*([+-]?\d+(?:[.,]\d+)?)/gi },
@@ -165,6 +182,37 @@ const NUMBER_BEFORE_MARKER_SPECS: readonly NumberBeforeMarkerSpec[] = [
   { role: "STAKE", confidence: "MARKER_HIGH", markerLabel: "usdc", pattern: /([+-]?\d+(?:[.,]\d+)?)\s*(?:usdc|usd|\$)\b/gi },
 ];
 
+// SCREENSHOT QA-1.3 — the ROOT CAUSE the production diagnostic (QA-1.2)
+// actually proved: "<number> USD"/"<number>$" is a genuinely useful STAKE
+// signal in isolation (a player message like "100 USD on Arsenal" has
+// nothing else to go on), but a real bookmaker slip commonly repeats the
+// SAME currency-suffix shape for figures that are emphatically NOT the
+// stake — "Возможный выигрыш\n142.00 USD" (potential win) is the exact
+// figure that turned the real screenshot's stake claim from a clean
+// CORROBORATED match into a false AMBIGUOUS one (a second, DIFFERENT
+// MARKER_HIGH STAKE value competing with the real 100). This is a bounded,
+// PRECEDING-text check (not a hand-picked "last/biggest number" heuristic,
+// and not a new confidence tier) — it excludes a currency-suffixed number
+// only when an explicit non-stake monetary label sits immediately before
+// it, exactly mirroring findLineEvidence's own "small bounded window,
+// explicit vocabulary only" discipline elsewhere in this file. 60 chars
+// comfortably covers a label and its value sitting on adjacent OCR lines
+// (e.g. "Возможный выигрыш\n142.00" is ~19 chars) without reaching back far
+// enough to swallow unrelated earlier content. Deliberately NOT "сумма"/
+// "amount" alone (too broad, would suppress the real stake's own "Сумма
+// ставки" label) — every word here unambiguously means "this number is a
+// different figure than the stake," never a guess.
+const STAKE_CURRENCY_EXCLUSION_LOOKBEHIND_CHARS = 60;
+const STAKE_CURRENCY_EXCLUSION_PATTERN = new RegExp(
+  `${NOT_WORD_BEFORE}(?:выигрыш|выплата|баланс)${NOT_WORD_AFTER}|\\b(?:payout|balance)\\b`,
+  "i",
+);
+
+function isPrecededByStakeExclusionLabel(text: string, numberStart: number): boolean {
+  const windowStart = Math.max(0, numberStart - STAKE_CURRENCY_EXCLUSION_LOOKBEHIND_CHARS);
+  return STAKE_CURRENCY_EXCLUSION_PATTERN.test(text.slice(windowStart, numberStart));
+}
+
 function findMarkerBeforeNumberEvidence(text: string): NumericRoleEvidence[] {
   const evidence: NumericRoleEvidence[] = [];
   for (const spec of MARKER_BEFORE_NUMBER_SPECS) {
@@ -180,8 +228,22 @@ function findMarkerBeforeNumberEvidence(text: string): NumericRoleEvidence[] {
   return evidence;
 }
 
-function findNumberBeforeMarkerEvidence(text: string): NumericRoleEvidence[] {
+interface NumberBeforeMarkerResult {
+  readonly evidence: NumericRoleEvidence[];
+  // SCREENSHOT QA-1.3 — spans excluded by isPrecededByStakeExclusionLabel
+  // (a currency-suffixed number that's actually a potential win/payout/
+  // balance, not the stake). Reported separately from `evidence` — NOT
+  // silently dropped — so the caller can fold them into
+  // findSoleCandidateEvidence's own consumedSpans below: an excluded number
+  // must never fall through to the SOLE_CANDIDATE fallback and become weak
+  // STAKE evidence anyway, which would defeat the whole point of excluding
+  // it in the first place.
+  readonly excludedSpans: ReadonlyArray<{ start: number; end: number }>;
+}
+
+function findNumberBeforeMarkerEvidence(text: string): NumberBeforeMarkerResult {
   const evidence: NumericRoleEvidence[] = [];
+  const excludedSpans: Array<{ start: number; end: number }> = [];
   for (const spec of NUMBER_BEFORE_MARKER_SPECS) {
     const pattern = new RegExp(spec.pattern);
     let match: RegExpExecArray | null;
@@ -189,10 +251,18 @@ function findNumberBeforeMarkerEvidence(text: string): NumericRoleEvidence[] {
       const captured = match[1];
       const start = match.index;
       const end = start + captured.length;
+      // Only ever applies to STAKE — a future non-STAKE NUMBER_BEFORE_MARKER_SPEC
+      // (none exist today) would be unaffected, since this exclusion exists
+      // specifically for "this currency figure isn't the stake," a
+      // STAKE-only concern.
+      if (spec.role === "STAKE" && isPrecededByStakeExclusionLabel(text, start)) {
+        excludedSpans.push({ start, end });
+        continue;
+      }
       evidence.push({ role: spec.role, value: captured, marker: spec.markerLabel, confidence: spec.confidence, start, end });
     }
   }
-  return evidence;
+  return { evidence, excludedSpans };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -405,10 +475,18 @@ function findSoleCandidateEvidence(
 export function extractNumericRoleEvidence(originalText: string): readonly NumericRoleEvidence[] {
   const occurrences = findAllNumberOccurrences(originalText);
 
-  const markerEvidence = [...findMarkerBeforeNumberEvidence(originalText), ...findNumberBeforeMarkerEvidence(originalText)];
+  const numberBeforeMarkerResult = findNumberBeforeMarkerEvidence(originalText);
+  const markerEvidence = [...findMarkerBeforeNumberEvidence(originalText), ...numberBeforeMarkerResult.evidence];
   const { lineEvidence, consumedSpans } = findLineEvidence(originalText, occurrences, markerEvidence);
   const claimedSoFar = [...markerEvidence, ...lineEvidence];
-  const soleCandidateEvidence = findSoleCandidateEvidence(occurrences, claimedSoFar, consumedSpans);
+  // SCREENSHOT QA-1.3 — excludedSpans (a currency-suffixed potential-win/
+  // payout/balance figure) are folded in here alongside consumedSpans, so
+  // an excluded number is treated exactly like a shorthand-consumed one:
+  // never left over for SOLE_CANDIDATE to mistake for the stake.
+  const soleCandidateEvidence = findSoleCandidateEvidence(occurrences, claimedSoFar, [
+    ...consumedSpans,
+    ...numberBeforeMarkerResult.excludedSpans,
+  ]);
 
   return [...markerEvidence, ...lineEvidence, ...soleCandidateEvidence].sort((a, b) => a.start - b.start);
 }
