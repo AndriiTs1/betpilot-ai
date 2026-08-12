@@ -541,6 +541,10 @@ export async function handleScreenshotPreview(
       try {
         built = await buildBetSlipPreview(slip, player.id, previewTokenSecret, {
           verifyOddsFn: options.verifyOddsFn,
+          // SCREENSHOT QA-2.1 — screenshot preview only (see
+          // BuildBetSlipPreviewOptions's own comment); text preview/confirm
+          // never set this and are completely unaffected.
+          logQa1ReconciliationDiagnostic: true,
         });
       } catch (err) {
         if (err instanceof BetSlipValidationError) {

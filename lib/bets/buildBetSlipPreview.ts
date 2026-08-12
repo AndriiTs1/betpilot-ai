@@ -18,6 +18,7 @@ import { resolveParticipantSide } from "@/lib/odds/teamNameMatcher";
 import { signPreviewToken, signExpressPreviewToken } from "@/lib/betPreview/previewToken";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
+import { logScreenshotQa1Diagnostic } from "@/lib/logging/screenshotQa1Diagnostic";
 import { formatFullEventName } from "@/lib/bets/formatFullEventName";
 
 // Stage 12, Phase 3 — the one shared pipeline both the text and screenshot
@@ -283,6 +284,16 @@ export interface BuildBetSlipPreviewOptions {
   // OddsVerificationService-shaped dependency (a real instance, or
   // anything providing a compatible verifyMany) directly.
   oddsVerificationService?: Pick<OddsVerificationService, "verifyMany">;
+  // SCREENSHOT QA-2.1 — off by default, so every existing caller (text
+  // preview/confirm, dashboard debug preview) gets byte-for-byte the same
+  // behavior and logging as before this option existed. Only the screenshot
+  // preview route opts in, keeping [SCREENSHOT_QA1_DIAGNOSTIC] output
+  // scoped to screenshot requests, matching its own name/existing
+  // convention (every other stage is likewise only ever logged from
+  // app/api/miniapp/bets/screenshot/preview/route.ts). Side-effect-only
+  // when true — see the call site below; never changes which branch
+  // executes or what reconcile1X2ParticipantClaim itself decides.
+  logQa1ReconciliationDiagnostic?: boolean;
 }
 
 export async function buildBetSlipPreview(
@@ -387,6 +398,42 @@ export async function buildBetSlipPreview(
       const reconciled = original
         ? reconcile1X2ParticipantClaim(original, selection.pendingMarketReconciliation, oddsCheck)
         : null;
+
+      // SCREENSHOT QA-2.1 — diagnostic-only, gated behind
+      // options.logQa1ReconciliationDiagnostic (screenshot preview only —
+      // see BuildBetSlipPreviewOptions above). resolutionKind is computed by
+      // an independent, second call to the exact same pure
+      // resolveParticipantSide() reconcile1X2ParticipantClaim already called
+      // above with the exact same inputs, so it can only ever report the
+      // same outcome that already happened — it never feeds back into
+      // `reconciled` or any other decision. Mirrors
+      // recognizeBetSlipScreenshot.ts's own summarizeRegionOutcome()
+      // convention (SCREENSHOT QA-1.1): read-only, side-effect-only, purely
+      // for observability.
+      if (options.logQa1ReconciliationDiagnostic) {
+        const resolutionKind =
+          oddsCheck?.homeTeamName && oddsCheck?.awayTeamName
+            ? resolveParticipantSide(
+                selection.pendingMarketReconciliation.claimedParticipant,
+                oddsCheck.homeTeamName,
+                oddsCheck.awayTeamName,
+              ).kind
+            : null;
+
+        logScreenshotQa1Diagnostic({
+          stage: "reconciliation",
+          claimedParticipant: selection.pendingMarketReconciliation.claimedParticipant,
+          requiredSide: selection.pendingMarketReconciliation.requiredSide,
+          marketTypeBefore: original?.marketType ?? null,
+          selectionTypeBefore: original?.selectionType ?? null,
+          oddsCheckMatched: oddsCheck?.matched ?? false,
+          providerEventIdPresent: oddsCheck?.providerEventId !== undefined,
+          homeTeamName: oddsCheck?.homeTeamName ?? null,
+          awayTeamName: oddsCheck?.awayTeamName ?? null,
+          resolutionKind,
+          reconciled: reconciled !== null,
+        });
+      }
 
       if (!reconciled) {
         throw new BetSlipValidationError(

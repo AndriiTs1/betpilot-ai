@@ -85,7 +85,67 @@ export interface Qa1ParserDiagnostic {
   selections: Qa1ParserSelectionDiagnostic[] | null;
 }
 
-export type Qa1Diagnostic = Qa1PreprocessingDiagnostic | Qa1RegionDetectionDiagnostic | Qa1OcrDiagnostic | Qa1ParserDiagnostic;
+// SCREENSHOT QA-2.1 — the ONE previously-invisible boundary from the QA-2
+// dual-failure audit: buildBetSlipPreview.ts's reconcile1X2ParticipantClaim
+// (lib/bets/buildBetSlipPreview.ts), reached only when a selection carries a
+// pendingMarketReconciliation (lib/bets/betSlip.ts). Distinguishes the two
+// branches a MARKET_INTENT_UNRECONCILED rejection could previously have come
+// from without telling them apart: (A) the odds provider never resolved a
+// real event/team names at all (oddsCheckMatched false, or
+// homeTeamName/awayTeamName absent — resolutionKind stays null, since
+// resolveParticipantSide is never even called in that case), vs (B) an event
+// was resolved but the claimed participant name didn't cleanly resolve to
+// the required side (resolutionKind is NO_MATCH/AMBIGUOUS, or resolves to
+// the wrong HOME/AWAY side).
+//
+// Every field here is either a boolean/enum/number, or plain text content
+// already of the same kind Qa1ParserDiagnostic above logs (a team/
+// participant name is public sports data, the same category as
+// selection.event/selection already logged there) — never player id, auth,
+// tokens, or raw image/OCR content, same invariant as every other stage in
+// this module.
+export interface Qa1ReconciliationDiagnostic {
+  stage: "reconciliation";
+  // Claude's own raw claimed participant text (e.g. "Bayern Munich") and the
+  // side the original OCR/message text evidence asserted — both already
+  // known pre-reconciliation, from lib/bets/betSlip.ts's
+  // PendingMarketReconciliation.
+  claimedParticipant: string;
+  requiredSide: "HOME" | "AWAY";
+  // The CanonicalSelection shape BEFORE reconciliation — always
+  // MONEYLINE_2WAY/PARTICIPANT in production today (the only shape
+  // classifyReconcilable1X2Mismatch ever produces a pendingMarketReconciliation
+  // for), reported as plain strings rather than importing lib/odds/domain.ts's
+  // MarketType/SelectionType enums into this otherwise dependency-free module.
+  marketTypeBefore: string | null;
+  selectionTypeBefore: string | null;
+  // Whether the odds provider matched a real event at all, and whether a
+  // providerEventId was present — the first fork in the "why didn't this
+  // reconcile" question (branch A above).
+  oddsCheckMatched: boolean;
+  providerEventIdPresent: boolean;
+  // The provider's own resolved team names, when present — null whenever
+  // the event never matched (branch A). Public sports data, not secret.
+  homeTeamName: string | null;
+  awayTeamName: string | null;
+  // The second fork (branch B): what resolveParticipantSide (lib/odds/
+  // teamNameMatcher.ts) actually decided, computed independently and purely
+  // for observability — see buildBetSlipPreview.ts's own comment at the
+  // call site. null only when resolution was never attempted at all
+  // (homeTeamName/awayTeamName absent — branch A, not a real "NO_MATCH").
+  resolutionKind: "HOME" | "AWAY" | "NO_MATCH" | "AMBIGUOUS" | null;
+  // The real, production outcome of reconcile1X2ParticipantClaim for this
+  // selection — never recomputed or duplicated, always the exact same value
+  // the caller's own accept/reject branch already used.
+  reconciled: boolean;
+}
+
+export type Qa1Diagnostic =
+  | Qa1PreprocessingDiagnostic
+  | Qa1RegionDetectionDiagnostic
+  | Qa1OcrDiagnostic
+  | Qa1ParserDiagnostic
+  | Qa1ReconciliationDiagnostic;
 
 export function logScreenshotQa1Diagnostic(diagnostic: Qa1Diagnostic): void {
   console.log(SCREENSHOT_QA1_DIAGNOSTIC_MARKER, JSON.stringify(diagnostic));

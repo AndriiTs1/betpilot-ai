@@ -13,6 +13,7 @@ import type { VerificationResult } from "@/lib/odds/verification";
 import type { OddsProvider, ProviderHealthResult, VerifySelectionRequest } from "@/lib/odds/oddsProvider";
 import { canConfirmBetSlip } from "@/components/miniapp/canConfirmBetSlip";
 import type { BetPreview } from "@/components/miniapp/betPreviewApi";
+import { SCREENSHOT_QA1_DIAGNOSTIC_MARKER } from "@/lib/logging/screenshotQa1Diagnostic";
 
 const TEST_SECRET = "test-preview-token-secret";
 
@@ -2582,4 +2583,208 @@ test("QA-1.6 real rrrr.png incident regression: Bayern/Stuttgart SINGLE reaches 
   assert.equal(verifiedToken.payload.canonicalSelectionType, "HOME");
   assert.equal(verifiedToken.payload.stake, 100);
   assert.equal(verifiedToken.payload.odds, 1.42);
+});
+
+/* ============================================================================
+ * SCREENSHOT QA-2.1 — reconciliation-boundary diagnostic. Extends
+ * [SCREENSHOT_QA1_DIAGNOSTIC] (lib/logging/screenshotQa1Diagnostic.ts) with a
+ * "reconciliation" stage so a future MARKET_INTENT_UNRECONCILED reproduction
+ * can tell branch A (no real event/team names — resolutionKind stays null,
+ * resolveParticipantSide never even runs) apart from branch B (event
+ * resolved, but resolveParticipantSide returned NO_MATCH/AMBIGUOUS/the wrong
+ * side). Gated behind logQa1ReconciliationDiagnostic (default off) — every
+ * test in this file above this line already proves the reconciliation
+ * DECISION itself (accept/reject) is byte-for-byte unchanged; these tests
+ * only add coverage for the new diagnostic log line itself.
+ * ============================================================================ */
+
+function captureConsoleLog(): { loggedCalls: unknown[][]; restore: () => void } {
+  const originalConsoleLog = console.log;
+  const loggedCalls: unknown[][] = [];
+  console.log = (...args: unknown[]) => loggedCalls.push(args);
+  return {
+    loggedCalls,
+    restore: () => {
+      console.log = originalConsoleLog;
+    },
+  };
+}
+
+function reconciliationDiagnostics(loggedCalls: unknown[][]): Array<Record<string, unknown>> {
+  const results: Array<Record<string, unknown>> = [];
+  for (const call of loggedCalls) {
+    if (call[0] === SCREENSHOT_QA1_DIAGNOSTIC_MARKER && typeof call[1] === "string") {
+      const parsed = JSON.parse(call[1]) as Record<string, unknown>;
+      if (parsed.stage === "reconciliation") results.push(parsed);
+    }
+  }
+  return results;
+}
+
+test("QA-2.1 diagnostic 1: no event match — oddsCheckMatched false, no team names, resolutionKind null (branch A, resolution never attempted), reconciled false", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    const slip = pendingSlip("HOME", "Bayern Munich");
+
+    await assert.rejects(() =>
+      buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+        verifyOddsFn: async () => notFound(1.42),
+        logQa1ReconciliationDiagnostic: true,
+      }),
+    );
+
+    const diagnostics = reconciliationDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].claimedParticipant, "Bayern Munich");
+    assert.equal(diagnostics[0].requiredSide, "HOME");
+    assert.equal(diagnostics[0].oddsCheckMatched, false);
+    assert.equal(diagnostics[0].providerEventIdPresent, false);
+    assert.equal(diagnostics[0].homeTeamName, null);
+    assert.equal(diagnostics[0].awayTeamName, null);
+    assert.equal(diagnostics[0].resolutionKind, null, "branch A: resolveParticipantSide is never called without both team names");
+    assert.equal(diagnostics[0].reconciled, false);
+  } finally {
+    restore();
+  }
+});
+
+test("QA-2.1 diagnostic 2: matched event + HOME — resolutionKind HOME, reconciled true", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    const slip = pendingSlip("HOME", "Bayern Munich");
+
+    await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+      verifyOddsFn: async () => verifiedWithTeams(1.42, 1.42, "Bayern Munich", "VfB Stuttgart"),
+      logQa1ReconciliationDiagnostic: true,
+    });
+
+    const diagnostics = reconciliationDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].oddsCheckMatched, true);
+    assert.equal(diagnostics[0].providerEventIdPresent, true);
+    assert.equal(diagnostics[0].homeTeamName, "Bayern Munich");
+    assert.equal(diagnostics[0].awayTeamName, "VfB Stuttgart");
+    assert.equal(diagnostics[0].resolutionKind, "HOME");
+    assert.equal(diagnostics[0].reconciled, true);
+    assert.equal(diagnostics[0].marketTypeBefore, "MONEYLINE_2WAY");
+    assert.equal(diagnostics[0].selectionTypeBefore, "PARTICIPANT");
+  } finally {
+    restore();
+  }
+});
+
+test("QA-2.1 diagnostic 3: matched event + AWAY — resolutionKind AWAY, reconciled true", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    const slip = pendingSlip("AWAY", "VfB Stuttgart");
+
+    await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+      verifyOddsFn: async () => verifiedWithTeams(3.8, 3.8, "Bayern Munich", "VfB Stuttgart"),
+      logQa1ReconciliationDiagnostic: true,
+    });
+
+    const diagnostics = reconciliationDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].resolutionKind, "AWAY");
+    assert.equal(diagnostics[0].reconciled, true);
+  } finally {
+    restore();
+  }
+});
+
+test("QA-2.1 diagnostic 4: NO_MATCH — event resolved but claimed participant matches neither real team, resolutionKind NO_MATCH, reconciled false (branch B)", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    const slip = pendingSlip("HOME", "Real Madrid");
+
+    await assert.rejects(() =>
+      buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+        verifyOddsFn: async () => verifiedWithTeams(1.42, 1.42, "Bayern Munich", "VfB Stuttgart"),
+        logQa1ReconciliationDiagnostic: true,
+      }),
+    );
+
+    const diagnostics = reconciliationDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].oddsCheckMatched, true, "branch B requires a real matched event, unlike branch A");
+    assert.equal(diagnostics[0].homeTeamName, "Bayern Munich");
+    assert.equal(diagnostics[0].awayTeamName, "VfB Stuttgart");
+    assert.equal(diagnostics[0].resolutionKind, "NO_MATCH");
+    assert.equal(diagnostics[0].reconciled, false);
+  } finally {
+    restore();
+  }
+});
+
+test("QA-2.1 diagnostic 5: AMBIGUOUS — claimed participant fuzzy-matches both real teams, resolutionKind AMBIGUOUS, reconciled false (branch B)", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    const slip = pendingSlip("HOME", "Manchester", { event: "Manchester United vs Manchester City" });
+
+    await assert.rejects(() =>
+      buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+        verifyOddsFn: async () => verifiedWithTeams(1.42, 1.42, "Manchester United", "Manchester City"),
+        logQa1ReconciliationDiagnostic: true,
+      }),
+    );
+
+    const diagnostics = reconciliationDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].oddsCheckMatched, true);
+    assert.equal(diagnostics[0].resolutionKind, "AMBIGUOUS");
+    assert.equal(diagnostics[0].reconciled, false);
+  } finally {
+    restore();
+  }
+});
+
+test("QA-2.1 diagnostic: the flag defaults to off — no reconciliation diagnostic is logged unless a caller explicitly opts in (proves text preview/confirm are unaffected)", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    const slip = pendingSlip("HOME", "Bayern Munich");
+
+    // No logQa1ReconciliationDiagnostic set at all — same call shape every
+    // existing production caller (text preview/confirm, dashboard debug
+    // preview) already uses today.
+    await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+      verifyOddsFn: async () => verifiedWithTeams(1.42, 1.42, "Bayern Munich", "VfB Stuttgart"),
+    });
+
+    assert.equal(reconciliationDiagnostics(loggedCalls).length, 0, "diagnostic must stay silent by default");
+  } finally {
+    restore();
+  }
+});
+
+test("QA-2.1 diagnostic 8: no secret leakage — never Telegram initData, player id, auth headers, tokens, DB URL, or raw OCR/image content", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    const secretPlayerId = "SECRET_PLAYER_ID_do_not_leak";
+    const slip = pendingSlip("HOME", "Bayern Munich");
+
+    await buildBetSlipPreview(slip, secretPlayerId, TEST_SECRET, {
+      verifyOddsFn: async () => verifiedWithTeams(1.42, 1.42, "Bayern Munich", "VfB Stuttgart"),
+      logQa1ReconciliationDiagnostic: true,
+    });
+
+    const diagnostics = reconciliationDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 1);
+
+    const rawLoggedText = JSON.stringify(loggedCalls);
+    for (const forbidden of [secretPlayerId, TEST_SECRET, "initData", "authorization", "Bearer", "postgres://", "DATABASE_URL"]) {
+      assert.equal(rawLoggedText.includes(forbidden), false, `reconciliation diagnostic must never contain: ${forbidden}`);
+    }
+
+    // Field-shape check — every value is a string/number/boolean/null, never
+    // a nested object or raw Error, matching this module's own "booleans/
+    // enums/numbers/already-disclosed content only" contract.
+    for (const [key, value] of Object.entries(diagnostics[0])) {
+      assert.ok(
+        value === null || ["string", "number", "boolean"].includes(typeof value),
+        `reconciliation diagnostic field "${key}" must be a primitive or null, got ${typeof value}`,
+      );
+    }
+  } finally {
+    restore();
+  }
 });

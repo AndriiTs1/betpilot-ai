@@ -1424,6 +1424,62 @@ test("QA-1.1 diagnostic: never logs the raw OCR transcript, initData, tokens, or
   assert.ok(qa1LoggedText.includes("Bayern Munich vs VfB Stuttgart"));
 });
 
+test("QA-2.1 diagnostic: route.ts wiring — a MARKET_INTENT_UNRECONCILED rejection logs a reconciliation-stage diagnostic distinguishing branch A (no event match) from branch B", async () => {
+  const initData = buildInitData(BOT_TOKEN, PLAYER_TELEGRAM_ID);
+  const request = buildRequest(initData, jpegBytes(), "image/jpeg");
+
+  const pendingSlip = singleSlip({
+    selections: [
+      {
+        sport: "Football",
+        event: "Bayern Munich vs VfB Stuttgart",
+        market: "1X2",
+        selection: "Bayern Munich",
+        submittedOdds: 1.42,
+        pendingMarketReconciliation: { requiredSide: "HOME", claimedParticipant: "Bayern Munich" },
+      },
+    ],
+    stake: 100,
+  });
+
+  const response = await handleScreenshotPreview(
+    request,
+    baseOptions({
+      ocrProvider: fakeOcrProvider(() => ocrSuccess("Bayern Munich vs Stuttgart П1 1.42 100")),
+      parseBetSlip: fakeParseBetSlip(pendingSlip),
+      // No homeTeamName/awayTeamName — the exact real-production shape from
+      // the QA-2 Bayern/Stuttgart reproduction: the odds provider never
+      // matched a real event for this fixture at all (branch A).
+      verifyOddsFn: async () => ({
+        matched: false,
+        withinTolerance: null,
+        sourceOdds: null,
+        submittedOdds: 1.42,
+        discrepancyPercent: null,
+        bookmaker: null,
+        note: null,
+      }),
+    }),
+  );
+
+  assert.equal(response.status, 422);
+  const body = await response.json();
+  assert.equal(body.error, "INVALID_BET_SLIP");
+  assert.equal(body.detail, "MARKET_INTENT_UNRECONCILED");
+
+  const diagnostics = qa1Diagnostics();
+  const reconciliation = diagnostics.find((d) => d.stage === "reconciliation");
+
+  assert.ok(reconciliation, "expected a reconciliation diagnostic to be logged by the route");
+  assert.equal(reconciliation!.claimedParticipant, "Bayern Munich");
+  assert.equal(reconciliation!.requiredSide, "HOME");
+  assert.equal(reconciliation!.oddsCheckMatched, false);
+  assert.equal(reconciliation!.homeTeamName, null);
+  assert.equal(reconciliation!.awayTeamName, null);
+  assert.equal(reconciliation!.resolutionKind, null, "branch A: no team names means resolution was never attempted");
+  assert.equal(reconciliation!.reconciled, false);
+});
+
 test("QA-1.1 diagnostic: diagnostic logging is side-effect-only — response status/body are identical with console.log mocked to a no-op vs capturing", async () => {
   // Deliberately the OCR-failure path (a deterministic, token-free response
   // — { error: "IMAGE_NOT_RECOGNIZED" }), not the full success path: a
