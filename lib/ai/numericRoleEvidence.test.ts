@@ -613,3 +613,31 @@ test("QA-1.3 full Bayern/Stuttgart shape: exact bookmaker OCR layout — the rea
   // The explicit label itself must be present among them.
   assert.ok(stakes.some((s) => s.marker === "сумма ставки"));
 });
+
+/* ============================================================================
+ * SCREENSHOT QA-CORE M1 — English "Potential winnings"/"Possible win" join
+ * the existing выигрыш/выплата/баланс/payout/balance exclusion vocabulary.
+ * ============================================================================ */
+
+test("M1: a currency-suffixed number is NOT tagged STAKE when it directly follows 'Potential winnings'", () => {
+  const text = "Potential winnings\n185.00 USD";
+  const stakes = findByRole(extractNumericRoleEvidence(text), "STAKE");
+  assert.equal(stakes.length, 0, "185.00 must never become STAKE evidence merely because it has a currency suffix");
+});
+
+test("M1: a currency-suffixed number is NOT tagged STAKE when it directly follows 'Possible win'", () => {
+  const text = "Possible win\n185.00 USD";
+  const stakes = findByRole(extractNumericRoleEvidence(text), "STAKE");
+  assert.equal(stakes.length, 0);
+});
+
+test("M1: 'Potential win' (no trailing 'nings') is also excluded", () => {
+  const text = "Potential win\n185.00 USD";
+  const stakes = findByRole(extractNumericRoleEvidence(text), "STAKE");
+  assert.equal(stakes.length, 0);
+});
+
+test("M1: the 'win' exclusion is narrowly scoped to 'potential win.../possible win...' — a bare market phrase like 'to win' near an unrelated currency-suffixed stake is never suppressed", () => {
+  const stakes = findByRole(extractNumericRoleEvidence("RB Leipzig to win\nStake\n100 USD"), "STAKE");
+  assert.ok(stakes.some((s) => sameNumericValue(s.value, "100")), "the real stake must still be recognized despite the nearby 'to win' market phrase");
+});

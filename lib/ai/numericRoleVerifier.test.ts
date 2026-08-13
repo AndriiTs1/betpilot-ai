@@ -608,3 +608,85 @@ test("S2 real Leipzig/Gladbach fixture: the odds claim (1.53) is unaffected by t
   assert.notEqual(result.verdict, "CONTRADICTED");
   assert.notEqual(result.verdict, "AMBIGUOUS");
 });
+
+/* ============================================================================
+ * SCREENSHOT QA-CORE M1 — the S2 fixture above (LEIPZIG_GLADBACH_OCR_TEXT)
+ * assumed an explicit "Stake" text label next to the amount. That assumption
+ * was wrong: the real production failure (numeric_mismatch, role=STAKE)
+ * persisted after S2 shipped. A deterministic reconstruction matching the
+ * task's own layout description ("stake FIELD visible" — the amount itself,
+ * not necessarily an adjacent text label, which is how a mobile stake input
+ * box commonly renders) reproduces the exact production verdict
+ * (CONTRADICTED) BEFORE this stage's fix: with no recognized STAKE label at
+ * all, the only STAKE-role evidence in the whole text was an unexcluded,
+ * currency-suffixed "Potential winnings" figure — "выигрыш" (the Russian
+ * equivalent) was already excluded, but the English phrasing was not. This
+ * is the real root cause and the real fix (STAKE_CURRENCY_EXCLUSION_PATTERN
+ * in numericRoleEvidence.ts now also recognizes "potential win(nings)"/
+ * "possible win(nings)"). The S2 fixture/tests above remain valid — a
+ * labeled stake genuinely should corroborate — they just never exercised
+ * the actual bug.
+ * ============================================================================ */
+
+const LEIPZIG_GLADBACH_UNLABELED_STAKE_OCR_TEXT = [
+  "Germany - Bundesliga",
+  "RB Leipzig - Borussia Mönchengladbach",
+  "28.08.2026 20:30",
+  "1X2",
+  "W1 - RB Leipzig",
+  "1.53",
+  "10  25  50  100  200",
+  "100",
+  "Potential winnings",
+  "153.00 USD",
+  "Place Bet",
+].join("\n");
+
+test("M1 real Leipzig/Gladbach fixture (unlabeled stake field, matching the actual production layout): claim STAKE=100 is UNVERIFIED, never CONTRADICTED or AMBIGUOUS", () => {
+  const evidence = extractNumericRoleEvidence(LEIPZIG_GLADBACH_UNLABELED_STAKE_OCR_TEXT);
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.notEqual(result.verdict, "CONTRADICTED", "the true stake must never be rejected merely because 'Potential winnings' carries a currency suffix");
+  assert.notEqual(result.verdict, "AMBIGUOUS");
+});
+
+test("M1 regression 1: labeled stake + same-value quick-stake preset -> accepted", () => {
+  const evidence = extractNumericRoleEvidence("Stake 100\n10 25 50 100 200");
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+});
+
+test("M1 regression 2: labeled stake + different-value quick-stake presets (even currency-suffixed) -> accepted", () => {
+  const evidence = extractNumericRoleEvidence("Stake 100\n10 USD 25 USD 50 USD 75 USD 200 USD");
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+});
+
+test("M1 regression 3: labeled stake + potential winnings -> accepted", () => {
+  const evidence = extractNumericRoleEvidence("Stake 100\nPotential winnings\n185.00 USD");
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+});
+
+test("M1 regression 4: labeled odds + unrelated UI numbers (balance, quick-stake row) -> accepted as extraction evidence", () => {
+  const evidence = extractNumericRoleEvidence("Odds 1.85\nBalance\n300 USD\n10 25 50 100 200");
+  const result = verifyNumericRoleClaim(claim("ODDS", 1.85), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+});
+
+test("M1 regression 5: two conflicting strong STAKE labels -> rejected (fail-closed preserved)", () => {
+  const evidence = extractNumericRoleEvidence("Stake 100\nStake 150");
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.equal(result.verdict, "AMBIGUOUS");
+});
+
+test("M1 regression 6: two genuinely conflicting strong ODDS labels -> rejected (fail-closed preserved)", () => {
+  const evidence = extractNumericRoleEvidence("Odds 1.85\nOdds 1.90");
+  const result = verifyNumericRoleClaim(claim("ODDS", 1.85), evidence);
+  assert.equal(result.verdict, "AMBIGUOUS");
+});
+
+test("M1 regression 7: LINE role remains protected — unaffected by the STAKE exclusion-vocabulary change", () => {
+  const evidence = extractNumericRoleEvidence("Арсенал ТБ 2.5 ставка 10");
+  const result = verifyNumericRoleClaim(claim("LINE", 2.5), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+});

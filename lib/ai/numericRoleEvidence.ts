@@ -221,9 +221,26 @@ const NUMBER_BEFORE_MARKER_SPECS: readonly NumberBeforeMarkerSpec[] = [
 // "amount" alone (too broad, would suppress the real stake's own "Сумма
 // ставки" label) — every word here unambiguously means "this number is a
 // different figure than the stake," never a guess.
+//
+// SCREENSHOT QA-CORE M1 — "выигрыш" already covers the Russian noun for
+// "winnings"; English mobile bookmaker UIs commonly label the identical
+// figure "Potential winnings"/"Possible win" instead of "Payout", which this
+// vocabulary didn't previously recognize (confirmed via a deterministic
+// reconstruction of the real RB Leipzig/Borussia Mönchengladbach layout: a
+// bare, unlabeled stake input carries no STAKE evidence of its own, so an
+// unexcluded "Potential winnings 185.00 USD" became the ONLY evidence for
+// the role and falsely CONTRADICTED the true stake). Deliberately the
+// qualified phrase "(potential|possible) win(nings?)?", never bare "win" —
+// bare "win" is a common substring of a market/selection descriptor
+// ("Team to win"), and this file's lookbehind window is a plain substring
+// search over up to 60 preceding characters, so an unqualified "win" could
+// wrongly exclude a genuine currency-suffixed stake sitting near an
+// unrelated "to win" selection phrase. Same reasoning as "сумма" being
+// rejected above: specific enough to unambiguously mean "this is the payout
+// figure," never a guess.
 const STAKE_CURRENCY_EXCLUSION_LOOKBEHIND_CHARS = 60;
 const STAKE_CURRENCY_EXCLUSION_PATTERN = new RegExp(
-  `${NOT_WORD_BEFORE}(?:выигрыш|выплата|баланс)${NOT_WORD_AFTER}|\\b(?:payout|balance)\\b`,
+  `${NOT_WORD_BEFORE}(?:выигрыш|выплата|баланс)${NOT_WORD_AFTER}|\\b(?:payout|balance|(?:potential|possible)\\s+win(?:nings?)?)\\b`,
   "i",
 );
 
