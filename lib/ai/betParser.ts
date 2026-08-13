@@ -588,7 +588,20 @@ function classifyReconcilable1X2Mismatch(
   const claimedParticipant = claimedSelectionText?.trim();
   if (!claimedParticipant) return null;
 
-  return { requiredSide: evidenceSide, claimedParticipant };
+  // MASTER STAGE M3.2 — explicitly compute whether the conflicting evidence
+  // named a participant of its own. Checks EVERY conflicting entry (not
+  // just the first): if ANY entry named a participant, this is treated as a
+  // real, named signal, never "safely unattributed" — conservative by
+  // design, matching this function's own existing "every entry must agree"
+  // discipline above. null only when NONE of them carried a name at all
+  // (every entry is a bare shorthand token, e.g. "2"/"П2" with no team text)
+  // — exactly the shape reconcile1X2ParticipantClaim's own new trust rule
+  // (buildBetSlipPreview.ts) checks for.
+  const namedConflictingParticipant = conflicting.find((entry) => entry.classification.participantName !== null)?.classification
+    .participantName;
+  const conflictingParticipantName = namedConflictingParticipant ?? null;
+
+  return { requiredSide: evidenceSide, claimedParticipant, conflictingParticipantName };
 }
 
 // MASTER STAGE M3.1, Phase B — the generalized deferral for TOTALS/SPREAD

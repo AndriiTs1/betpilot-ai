@@ -266,13 +266,43 @@ function reconcile1X2ParticipantClaim(
   if (!oddsCheck || !oddsCheck.homeTeamName || !oddsCheck.awayTeamName) return null;
 
   const resolution = resolveParticipantSide(pending.claimedParticipant, oddsCheck.homeTeamName, oddsCheck.awayTeamName);
-  // HOME evidence + resolves AWAY -> reject. AWAY evidence + resolves HOME
-  // -> reject. NO_MATCH -> reject. AMBIGUOUS (matches both/neither
-  // decisively) -> reject. Only an exact match to the side the original
-  // text evidence actually asserted ever reconciles.
-  if (resolution.kind !== pending.requiredSide) return null;
+  // HOME evidence + resolves AWAY -> reject, UNLESS the M3.2 override below
+  // applies. AWAY evidence + resolves HOME -> same. NO_MATCH -> always
+  // reject (never HOME/AWAY, so the override below can never apply either).
+  // AMBIGUOUS (matches both/neither decisively) -> always reject, same
+  // reason. An exact match to the side the original text evidence actually
+  // asserted always reconciles, same as before this stage.
+  if (resolution.kind === pending.requiredSide) {
+    return { ...original, marketType: "MONEYLINE_3WAY", selectionType: pending.requiredSide, participant: undefined };
+  }
 
-  return { ...original, marketType: "MONEYLINE_3WAY", selectionType: pending.requiredSide, participant: undefined };
+  // MASTER STAGE M3.2 — a decisive, provider-confirmed participant match
+  // outranks a conflicting UNATTRIBUTED bare 1X2 shorthand marker. Proven
+  // real production case: claim "Alavés" resolves decisively to HOME
+  // against the real provider event (exact string match), but a bare OCR
+  // marker with no participant name of its own (MONEYLINE_3WAY/AWAY,
+  // participantName: null — plausibly an unselected sibling outcome
+  // button's own UI text, not a deliberate statement) disagreed, and the
+  // claim was wrongly rejected. This override applies ONLY when:
+  //   1. resolution.kind is a clean HOME or AWAY (never AMBIGUOUS/NO_MATCH
+  //      — those can never reach this branch at all, since neither value
+  //      is ever === pending.requiredSide, so they fall through to `return
+  //      null` below exactly as before this stage);
+  //   2. pending.conflictingParticipantName is explicitly null — i.e. the
+  //      conflicting evidence that produced requiredSide genuinely named no
+  //      participant of its own (see betSlip.ts's own header for why
+  //      `undefined`, from any caller built before this field existed,
+  //      deliberately does NOT satisfy this check — the conservative,
+  //      pre-M3.2 reject-on-mismatch behavior is what those callers get).
+  // A conflicting entry that DID name a different participant (a real,
+  // named disagreement) still rejects unconditionally, regardless of how
+  // decisively the claim itself resolves — this override only ever
+  // discounts UI noise, never a genuine competing statement.
+  if ((resolution.kind === "HOME" || resolution.kind === "AWAY") && pending.conflictingParticipantName === null) {
+    return { ...original, marketType: "MONEYLINE_3WAY", selectionType: resolution.kind, participant: undefined };
+  }
+
+  return null;
 }
 
 export interface BuildBetSlipPreviewOptions {

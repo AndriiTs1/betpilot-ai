@@ -1422,6 +1422,7 @@ test("QA-1.6 positive: claim = MONEYLINE_2WAY/PARTICIPANT ('Bayern Munich') vs e
   assert.deepEqual(result.selections[0].pendingMarketReconciliation, {
     requiredSide: "HOME",
     claimedParticipant: "Bayern Munich",
+    conflictingParticipantName: null,
   });
 });
 
@@ -1448,6 +1449,7 @@ test("QA-1.6 positive: claim = PARTICIPANT ('VfB Stuttgart') vs evidence = MONEY
   assert.deepEqual(result.selections[0].pendingMarketReconciliation, {
     requiredSide: "AWAY",
     claimedParticipant: "VfB Stuttgart",
+    conflictingParticipantName: null,
   });
 });
 
@@ -1571,6 +1573,7 @@ test("S1: the real production claim 'Bayern Win (П1)' is deferred with a CLEAN 
   assert.deepEqual(result.selections[0].pendingMarketReconciliation, {
     requiredSide: "HOME",
     claimedParticipant: "Bayern",
+    conflictingParticipantName: null,
   });
 });
 
@@ -1658,6 +1661,7 @@ test("S1 (task requirement E): an OCR-mode 'RB Leipzig to win' claim IS deferred
   assert.deepEqual(result.selections[0].pendingMarketReconciliation, {
     requiredSide: "HOME",
     claimedParticipant: "RB Leipzig",
+    conflictingParticipantName: null,
   });
 });
 
@@ -1680,6 +1684,7 @@ test("S1: CHAT mode never normalizes the claim, even for an identically-polluted
     // normalizeOcrParticipantClaim(), proving the mode-gate is real, not
     // just coincidentally producing the same output.
     claimedParticipant: "Bayern Win (П1)",
+    conflictingParticipantName: null,
   });
 });
 

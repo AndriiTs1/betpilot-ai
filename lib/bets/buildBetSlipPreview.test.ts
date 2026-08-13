@@ -2417,7 +2417,7 @@ function verifiedWithTeams(sourceOdds: number, submittedOdds: number, homeTeamNa
 function pendingSlip(
   requiredSide: "HOME" | "AWAY",
   claimedParticipant: string,
-  overrides: Partial<{ event: string; submittedOdds: number | null; stake: number }> = {},
+  overrides: Partial<{ event: string; submittedOdds: number | null; stake: number; conflictingParticipantName: string | null }> = {},
 ): ParsedBetSlip {
   return {
     type: "SINGLE",
@@ -2429,7 +2429,16 @@ function pendingSlip(
         market: "1X2",
         selection: claimedParticipant,
         submittedOdds: overrides.submittedOdds ?? 1.42,
-        pendingMarketReconciliation: { requiredSide, claimedParticipant },
+        // "conflictingParticipantName in overrides" (not just checking
+        // truthiness) so a test can explicitly pass `null` — MASTER STAGE
+        // M3.2's own override only ever applies when this is explicitly
+        // null, never when merely absent/undefined (see betSlip.ts's own
+        // header for why that distinction is the whole point).
+        pendingMarketReconciliation: {
+          requiredSide,
+          claimedParticipant,
+          ...("conflictingParticipantName" in overrides ? { conflictingParticipantName: overrides.conflictingParticipantName } : {}),
+        },
       },
     ],
   };
@@ -2505,6 +2514,160 @@ test("M2 real production case, end-to-end: claim 'Real Madrid' against HOME 'Rea
   if (!verifiedToken.ok) return;
   assert.equal(verifiedToken.payload.canonicalMarketType, "MONEYLINE_3WAY");
   assert.equal(verifiedToken.payload.canonicalSelectionType, "HOME");
+});
+
+/* ============================================================================
+ * MASTER STAGE M3.2 — a decisive, provider-confirmed participant match must
+ * outrank a conflicting UNATTRIBUTED bare 1X2 shorthand marker. Real
+ * production case (laliga1.jpg): claim "Alavés" resolves decisively to HOME
+ * against the real provider event (exact match), but a bare OCR marker
+ * (MONEYLINE_3WAY/AWAY, no participant name of its own — plausibly an
+ * unselected sibling outcome button's own UI text) disagreed, and the whole
+ * bet was wrongly rejected as MARKET_INTENT_UNRECONCILED even though the
+ * provider event, participant, and current odds were all already resolved
+ * correctly.
+ * ============================================================================ */
+
+test("M3.2 case 1 (real production, laliga1): claim 'Alavés' vs bare unattributed AWAY marker, provider HOME 'Alavés' / AWAY 'Getafe' — accepted as HOME, not rejected", async () => {
+  const slip = pendingSlip("AWAY", "Alavés", {
+    event: "Alavés vs Getafe",
+    submittedOdds: 2.34,
+    conflictingParticipantName: null,
+  });
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => verifiedWithTeams(2.34, 2.34, "Alavés", "Getafe"),
+  });
+
+  const previewSelection = result.preview.selections[0];
+  assert.equal(previewSelection.oddsStatus, "VERIFIED");
+  assert.equal(previewSelection.marketType, "MONEYLINE_3WAY");
+
+  assert.ok(result.previewToken !== null, "the bet must now reach a signed preview token instead of MARKET_INTENT_UNRECONCILED");
+  const verifiedToken = verifyPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verifiedToken.ok, true);
+  if (!verifiedToken.ok) return;
+  assert.equal(verifiedToken.payload.canonicalMarketType, "MONEYLINE_3WAY");
+  // The canonical side is the PROVIDER-CONFIRMED resolution (HOME), never
+  // the unreliable bare marker's own requiredSide (AWAY) — this is the
+  // exact override this stage implements.
+  assert.equal(verifiedToken.payload.canonicalSelectionType, "HOME");
+});
+
+test("M3.2 case 2 (symmetric): claim resolves decisively to AWAY, bare unattributed HOME marker disagrees — accepted as AWAY", async () => {
+  const slip = pendingSlip("HOME", "Getafe", {
+    event: "Alavés vs Getafe",
+    submittedOdds: 3.4,
+    conflictingParticipantName: null,
+  });
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => verifiedWithTeams(3.4, 3.4, "Alavés", "Getafe"),
+  });
+
+  assert.ok(result.previewToken !== null);
+  const verifiedToken = verifyPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verifiedToken.ok, true);
+  if (!verifiedToken.ok) return;
+  assert.equal(verifiedToken.payload.canonicalMarketType, "MONEYLINE_3WAY");
+  assert.equal(verifiedToken.payload.canonicalSelectionType, "AWAY");
+});
+
+test("M3.2 CRITICAL SAFETY case 3: conflicting evidence explicitly NAMES a different participant (Getafe) — still rejected, never overridden, regardless of how decisively the claim resolves", async () => {
+  const slip = pendingSlip("AWAY", "Alavés", {
+    event: "Alavés vs Getafe",
+    submittedOdds: 2.34,
+    conflictingParticipantName: "Getafe",
+  });
+
+  await assert.rejects(
+    () =>
+      buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+        verifyOddsFn: async () => verifiedWithTeams(2.34, 2.34, "Alavés", "Getafe"),
+      }),
+    (err: unknown) => err instanceof BetSlipValidationError && err.code === "MARKET_INTENT_UNRECONCILED",
+    "a named, genuine disagreement must still be treated as unreconciled, even with a decisive participant match",
+  );
+});
+
+test("M3.2 CRITICAL SAFETY case 4: AMBIGUOUS participant resolution — still rejected (the override can never apply, since resolution.kind is never HOME/AWAY here)", async () => {
+  // "Real Madrid" vs a reserve/B-team fixture sharing most of the same
+  // words — the exact pre-existing AMBIGUOUS case teamNameMatcher.test.ts
+  // already protects, reused here at the full pipeline level.
+  const slip = pendingSlip("HOME", "Real Madrid", {
+    event: "Real Madrid vs Real Madrid Castilla",
+    submittedOdds: 1.9,
+    conflictingParticipantName: null,
+  });
+
+  await assert.rejects(
+    () =>
+      buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+        verifyOddsFn: async () => verifiedWithTeams(1.9, 1.9, "Real Madrid", "Real Madrid Castilla"),
+      }),
+    (err: unknown) => err instanceof BetSlipValidationError && err.code === "MARKET_INTENT_UNRECONCILED",
+  );
+});
+
+test("M3.2 CRITICAL SAFETY case 5: NO_MATCH participant resolution — still rejected", async () => {
+  const slip = pendingSlip("HOME", "Liverpool", {
+    event: "Alavés vs Getafe",
+    submittedOdds: 2.34,
+    conflictingParticipantName: null,
+  });
+
+  await assert.rejects(
+    () =>
+      buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+        verifyOddsFn: async () => verifiedWithTeams(2.34, 2.34, "Alavés", "Getafe"),
+      }),
+    (err: unknown) => err instanceof BetSlipValidationError && err.code === "MARKET_INTENT_UNRECONCILED",
+  );
+});
+
+test("M3.2 CRITICAL SAFETY case 6: unresolved provider event — still rejected (the override requires a real, matched event exactly like the original rule did)", async () => {
+  const slip = pendingSlip("AWAY", "Alavés", {
+    event: "Alavés vs Getafe",
+    submittedOdds: 2.34,
+    conflictingParticipantName: null,
+  });
+
+  await assert.rejects(
+    () =>
+      buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+        verifyOddsFn: async () => notFound(2.34),
+      }),
+    (err: unknown) => err instanceof BetSlipValidationError && err.code === "MARKET_INTENT_UNRECONCILED",
+  );
+});
+
+test("M3.2: an old-shape pendingMarketReconciliation with NO conflictingParticipantName field at all (undefined, not null) preserves the pre-M3.2 conservative reject-on-mismatch behavior — proves undefined is never silently treated as safe to override", async () => {
+  // Deliberately bypasses the pendingSlip() helper's own conditional-spread
+  // to construct the exact bare, 2-field legacy shape a caller built before
+  // this stage existed would still produce.
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 100,
+    selections: [
+      {
+        sport: "Football",
+        event: "Alavés vs Getafe",
+        market: "1X2",
+        selection: "Alavés",
+        submittedOdds: 2.34,
+        pendingMarketReconciliation: { requiredSide: "AWAY", claimedParticipant: "Alavés" },
+      },
+    ],
+  };
+
+  await assert.rejects(
+    () =>
+      buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+        verifyOddsFn: async () => verifiedWithTeams(2.34, 2.34, "Alavés", "Getafe"),
+      }),
+    (err: unknown) => err instanceof BetSlipValidationError && err.code === "MARKET_INTENT_UNRECONCILED",
+    "undefined conflictingParticipantName must never be treated as 'safely unattributed'",
+  );
 });
 
 test("QA-1.6 C: 'Home win' normalized to the home participant, provider confirms HOME — accepted", async () => {

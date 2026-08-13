@@ -87,9 +87,27 @@ export interface BetSlipSelectionInput {
 // "Bayern Munich") — compared later against the real provider event's own
 // team names via lib/odds/teamNameMatcher.ts's resolveParticipantSide,
 // never against the OCR event string.
+// MASTER STAGE M3.2 — the participant name (if any) the CONFLICTING
+// evidence itself named, distinct from claimedParticipant (the AI's own
+// claim). A proven real production case (claim "Alavés", provider HOME
+// "Alavés"/AWAY "Getafe", decisive exact match) was still rejected because
+// a BARE, unattributed OCR shorthand marker (e.g. a raw "2"/"П2" token with
+// no team name attached — plausibly an unselected sibling outcome button's
+// own UI text, not a deliberate statement) disagreed with the decisive
+// match. This field lets buildBetSlipPreview.ts's reconcile1X2ParticipantClaim
+// distinguish that case from a genuine NAMED disagreement (the conflicting
+// evidence explicitly stated a different team) — see that function's own
+// header for the full trust rule. Explicitly `null` when the conflicting
+// evidence carried no participant name at all; a non-null string when it
+// did. Optional (not required-nullable) specifically so existing
+// callers/fixtures built before this field existed keep compiling and
+// behaving exactly as before: an absent (undefined) value is treated as
+// "not known to be unattributed" — i.e. the conservative, pre-M3.2 reject-
+// on-mismatch behavior — never silently reinterpreted as safe to override.
 export interface PendingMarketReconciliation {
   readonly requiredSide: "HOME" | "AWAY";
   readonly claimedParticipant: string;
+  readonly conflictingParticipantName?: string | null;
 }
 
 export interface ParsedBetSlip {
