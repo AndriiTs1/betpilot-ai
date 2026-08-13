@@ -15,6 +15,7 @@ import {
   type ReconstructedOddsCheck,
 } from "@/lib/odds/legacyOddsBridge";
 import { resolveParticipantSide } from "@/lib/odds/teamNameMatcher";
+import { normalizeSelectionTextForCanonicalization } from "@/lib/ai/ocrParticipantClaimNormalizer";
 import { signPreviewToken, signExpressPreviewToken } from "@/lib/betPreview/previewToken";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
@@ -344,7 +345,30 @@ export async function buildBetSlipPreview(
         // actually resolved/validated.
         league: selection.league ?? null,
         event: selection.event,
-        selection: selection.selection,
+        // SCREENSHOT ODDS QA-2 — this is the ACTUAL provider-facing search
+        // text (legacySelectionToCanonicalRequest classifies it and, for a
+        // bare participant fallback, sends it straight to the odds
+        // provider's own team-name matching) — a completely different
+        // consumer than the human-readable `selection.selection` shown
+        // elsewhere in this file's own preview/token output, which stays
+        // untouched. A screenshot's raw display text can carry the same
+        // shorthand-plus-participant pollution SCREENSHOT QA-CORE S1 already
+        // fixed for reconciliation (e.g. "Bayern Win (П1)") — proven, via
+        // this exact production event, to ALSO defeat provider matching:
+        // legacySelectionToCanonicalRequest's own knownParticipantNames
+        // prefix-stripping only fires on an EXACT prefix match, which
+        // "Bayern Win (П1)" fails the same way it fails reconciliation.
+        // Deliberately the NARROWER normalizeSelectionTextForCanonicalization
+        // (not the full normalizeOcrParticipantClaim S1 uses for
+        // reconciliation) — see that function's own header for the real
+        // regression reusing the full one caused here (stripping a trailing
+        // "Win" suffix before classification, which weakens
+        // classifyBettingSelectionTextWithMarketHint's own market-hint-
+        // override-resistance). Safe to apply unconditionally (not
+        // mode-gated, unlike S1's own call site in betParser.ts): idempotent
+        // on already-clean text, so a typed-chat selection — essentially
+        // never polluted with 1X2 shorthand — passes through unchanged.
+        selection: normalizeSelectionTextForCanonicalization(selection.selection),
         submittedOdds: selection.submittedOdds,
         // Betting Markets V1, Phase 2 — threaded through to
         // CanonicalSelection.line so it survives into the signed preview
@@ -502,18 +526,29 @@ export async function buildBetSlipPreview(
     };
   });
 
-  // totalOdds/potentialWin become null (not thrown) whenever any leg's
-  // submitted odds is unknown — mirrors the pre-Phase-3 SINGLE behavior,
-  // where potentialWin was already nullable when odds was null. This
-  // function's job is to decide *when* it's safe to call the strict
-  // computeTotalOdds/computePotentialWin, not to duplicate their math.
-  //
-  // Step 15I — reads previewSelections (the EFFECTIVE, possibly
-  // auto-lookup-promoted odds), not the original slip.selections: a SINGLE
-  // selection that started with submittedOdds:null but was successfully
-  // auto-looked-up now has a real effective value here, and must count as
-  // "known" for totalOdds/potentialWin to be computed from it.
-  const allOddsKnown = previewSelections.every((selection) => selection.submittedOdds !== null);
+  // SCREENSHOT ODDS QA-2 — totalOdds/potentialWin are the ACTIONABLE numbers
+  // a player commits to; they must be computed from the provider's own
+  // CURRENT, VERIFIED price for every leg, never from whatever a player (or
+  // a screenshot's OCR'd number) merely submitted. Before this stage, this
+  // computation read previewSelections[i].submittedOdds — the EFFECTIVE
+  // submitted value (Step 15I), which for a screenshot bet is almost always
+  // non-null (OCR usually reads a visible odds figure) and therefore always
+  // won regardless of whether the provider ever actually verified it. A
+  // player/screenshot's stated odds is reference-only; only a leg whose
+  // odds check actually matched contributes an effective price here — an
+  // unmatched leg (NOT_FOUND/UNAVAILABLE) contributes none at all, making
+  // the whole bet's totalOdds/potentialWin null (not silently computed from
+  // an unverified number), exactly the same "any missing leg -> null total"
+  // shape this already had for a genuinely-unknown submittedOdds, just keyed
+  // on verification instead of submission. VERIFIED and ODDS_CHANGED both
+  // count (both have oddsCheck.matched === true and a real sourceOdds — a
+  // moved price is still today's real, actionable price; ODDS_CHANGED only
+  // ever gates CONFIRM-time reconfirmation, never PREVIEW-time display).
+  const effectiveVerifiedOdds: Array<number | null> = slip.selections.map((_selection, index) => {
+    const oddsCheck = reconstructedByIndex.get(index)?.oddsCheck ?? null;
+    return oddsCheck?.matched === true && oddsCheck.sourceOdds !== null ? oddsCheck.sourceOdds : null;
+  });
+  const allOddsKnown = effectiveVerifiedOdds.every((odds) => odds !== null);
 
   // Kept as a Decimal (not re-derived from the number a second time below)
   // so the EXPRESS branch's stake string comes from the exact same
@@ -524,11 +559,7 @@ export async function buildBetSlipPreview(
   let potentialWin: Prisma.Decimal | null = null;
 
   if (allOddsKnown) {
-    // Step 15I — reads previewSelections (effective odds), matching
-    // allOddsKnown above; same non-null-assertion shape this line already
-    // had before this step (now proven correct against the array
-    // allOddsKnown itself was just computed from, not a different one).
-    totalOdds = computeTotalOdds(previewSelections.map((selection) => new Prisma.Decimal(selection.submittedOdds!)));
+    totalOdds = computeTotalOdds(effectiveVerifiedOdds.map((odds) => new Prisma.Decimal(odds!)));
     potentialWin = computePotentialWin(stakeDecimal, totalOdds);
   }
 

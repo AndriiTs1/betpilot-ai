@@ -97,3 +97,41 @@ export function normalizeOcrParticipantClaim(rawSelectionText: string): string {
   const cleaned = text.trim();
   return cleaned.length > 0 ? cleaned : trimmed;
 }
+
+// SCREENSHOT ODDS QA-2 — a DELIBERATELY NARROWER sibling of
+// normalizeOcrParticipantClaim(), for a different consumer:
+// legacySelectionToCanonicalRequest() (lib/odds/legacyOddsBridge.ts), the
+// function that turns raw selection text into the odds-provider search
+// input. That function already has TWO of its own working mechanisms for
+// exactly this kind of noise — classifyOnce() (lib/odds/shorthandClassifier.ts)
+// already strips a trailing winner-suffix ("Arsenal Win" -> "Arsenal")
+// directly, and its own knownParticipantNames prefix loop already strips a
+// trailing bare shorthand token when it follows an EXACT participant-name
+// prefix ("RB Leipzig W1" -> "RB Leipzig" + "W1"). Reusing the FULL
+// normalizeOcrParticipantClaim() here — confirmed by a real regression
+// while building this fix — actively HURTS: pre-stripping "Arsenal Win" to
+// "Arsenal" before classification removes the exact word ("Win") classifyOnce
+// needs to derive a confident MONEYLINE claim on its own, which then lets an
+// unrelated market hint (e.g. marketRawText "Handicap") incorrectly win
+// instead — precisely the failure mode the "market hint never overrides a
+// real selection-derived claim" contract exists to prevent.
+//
+// This function strips ONLY the two noise shapes neither existing mechanism
+// already covers: a leading shorthand token ("П1 - Бавария" -> "Бавария")
+// and a TRAILING PARENTHETICAL shorthand annotation ("Bayern Win (П1)" ->
+// "Bayern Win", which classifyOnce's own winner-suffix stripping then
+// completes on its own, since "Bayern Win" — unlike "Bayern Win (П1)" —
+// genuinely ends in "Win"). Deliberately does NOT strip a trailing winner
+// suffix or a trailing bare shorthand token — those are left to the two
+// existing mechanisms above, so this function can never weaken either one.
+export function normalizeSelectionTextForCanonicalization(rawSelectionText: string): string {
+  const trimmed = rawSelectionText.trim();
+  if (trimmed.length === 0) return trimmed;
+
+  let text = trimmed;
+  text = stripLeadingShorthand(text);
+  text = stripTrailingParenShorthand(text);
+
+  const cleaned = text.trim();
+  return cleaned.length > 0 ? cleaned : trimmed;
+}

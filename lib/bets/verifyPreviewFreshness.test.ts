@@ -359,7 +359,7 @@ test("verifyPreviewFreshness: EXPRESS with one leg UNAVAILABLE returns VERIFICAT
   assert.deepEqual(decision, { kind: "VERIFICATION_UNAVAILABLE" });
 });
 
-test("verifyPreviewFreshness: EXPRESS ODDS_CHANGED + NOT_FOUND resolves to ODDS_CHANGED — a real price move is never waved through just because another leg is merely not-found", async () => {
+test("verifyPreviewFreshness: EXPRESS ODDS_CHANGED + NOT_FOUND resolves to SELECTION_UNAVAILABLE — SCREENSHOT ODDS QA-2 made buildBetSlipPreview's EXPRESS refreshedPreviewToken null whenever ANY leg is unverified (not just an exempt null-submittedOdds leg), which is exactly the null-token case this function's own header already documents as falling back to SELECTION_UNAVAILABLE rather than a reconfirmable ODDS_CHANGED — a real price move on one leg is still never silently confirmable while a sibling leg can't be priced at all", async () => {
   const payload = expressPayload();
 
   const decision = await verifyPreviewFreshness(payload, TEST_SECRET, {
@@ -369,10 +369,7 @@ test("verifyPreviewFreshness: EXPRESS ODDS_CHANGED + NOT_FOUND resolves to ODDS_
     }),
   });
 
-  assert.equal(decision.kind, "ODDS_CHANGED");
-  if (decision.kind !== "ODDS_CHANGED") return;
-  assert.equal(typeof decision.refreshedPreviewToken, "string");
-  assert.ok(decision.refreshedPreviewToken.length > 0);
+  assert.deepEqual(decision, { kind: "SELECTION_UNAVAILABLE" });
 });
 
 test("verifyPreviewFreshness: EXPRESS ODDS_CHANGED + UNAVAILABLE resolves to VERIFICATION_UNAVAILABLE, never a reconfirmable refreshed preview", async () => {

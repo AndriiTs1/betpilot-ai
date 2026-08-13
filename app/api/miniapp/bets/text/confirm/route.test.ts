@@ -784,7 +784,7 @@ test("confirm route: EXPRESS with one leg changed and one leg UNAVAILABLE return
   assert.equal(db._debug.createCallCount(), 0);
 });
 
-test("confirm route: EXPRESS with one leg changed and one leg NOT_FOUND returns 409 ODDS_CHANGED_RECONFIRM_REQUIRED — a real price move is never waved through by a merely-not-found sibling leg, no DB write", async () => {
+test("confirm route: EXPRESS with one leg changed and one leg NOT_FOUND returns 422 SELECTION_UNAVAILABLE, no DB write — SCREENSHOT ODDS QA-2 made buildBetSlipPreview's EXPRESS token null whenever ANY leg is unverified (previously only for an exempt null-submittedOdds leg), which triggers verifyPreviewFreshness.ts's own PRE-EXISTING null-token fallback (\"the response cannot be safely reconfirmed\") for the first time on this exact fixture — not a new decision, an already-written safety branch finally becoming reachable", async () => {
   const db = createFakeDb();
   const token = signExpressPreviewToken(expressTokenInput(), PREVIEW_SECRET);
 
@@ -798,11 +798,11 @@ test("confirm route: EXPRESS with one leg changed and one leg NOT_FOUND returns 
     }),
   );
 
-  assert.equal(res.status, 409);
-  const body = (await json(res)) as { error: string; refreshedPreview: unknown; refreshedPreviewToken: string | null };
-  assert.equal(body.error, "ODDS_CHANGED_RECONFIRM_REQUIRED");
-  assert.ok(body.refreshedPreview);
-  assert.equal(typeof body.refreshedPreviewToken, "string");
+  assert.equal(res.status, 422);
+  const body = (await json(res)) as { error: string; refreshedPreview?: unknown; refreshedPreviewToken?: unknown };
+  assert.equal(body.error, "SELECTION_UNAVAILABLE");
+  assert.equal(body.refreshedPreview, undefined);
+  assert.equal(body.refreshedPreviewToken, undefined);
   assert.equal(db._debug.betCount(), 0);
   assert.equal(db._debug.createCallCount(), 0);
 });

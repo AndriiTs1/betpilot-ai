@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeOcrParticipantClaim } from "./ocrParticipantClaimNormalizer";
+import { normalizeOcrParticipantClaim, normalizeSelectionTextForCanonicalization } from "./ocrParticipantClaimNormalizer";
 
 /* -------------------------------------------------------------------------- */
 /* SCREENSHOT QA-CORE S1 — required positive cases (task's own A/C/D/E)       */
@@ -64,4 +64,51 @@ test("whitespace is trimmed and normalized even when no shorthand noise is prese
 test("an empty string is returned as-is, never throws", () => {
   assert.equal(normalizeOcrParticipantClaim(""), "");
   assert.equal(normalizeOcrParticipantClaim("   "), "");
+});
+
+/* -------------------------------------------------------------------------- */
+/* SCREENSHOT ODDS QA-2 — normalizeSelectionTextForCanonicalization, the      */
+/* deliberately NARROWER sibling used for provider-request canonicalization  */
+/* (buildBetSlipPreview.ts), not reconciliation.                             */
+/* -------------------------------------------------------------------------- */
+
+test("normalizeSelectionTextForCanonicalization: strips a trailing parenthetical shorthand, same as the full normalizer", () => {
+  assert.equal(normalizeSelectionTextForCanonicalization("Bayern Win (П1)"), "Bayern Win");
+  assert.equal(normalizeSelectionTextForCanonicalization("VfB Stuttgart (П2)"), "VfB Stuttgart");
+});
+
+test("normalizeSelectionTextForCanonicalization: strips a leading shorthand token + separator, same as the full normalizer", () => {
+  assert.equal(normalizeSelectionTextForCanonicalization("П1 - Бавария"), "Бавария");
+  assert.equal(normalizeSelectionTextForCanonicalization("П1 Бавария"), "Бавария");
+});
+
+test("normalizeSelectionTextForCanonicalization: does NOT strip a trailing winner suffix — classifyOnce (shorthandClassifier.ts) already handles that on its own, and pre-stripping it would remove the exact signal that keeps a market hint from overriding a real selection-derived claim (a real regression found while building this fix)", () => {
+  assert.equal(normalizeSelectionTextForCanonicalization("Arsenal Win"), "Arsenal Win");
+  assert.equal(normalizeSelectionTextForCanonicalization("RB Leipzig to win"), "RB Leipzig to win");
+});
+
+test("normalizeSelectionTextForCanonicalization: does NOT strip a trailing bare shorthand token — legacySelectionToCanonicalRequest's own knownParticipantNames prefix loop already handles that case when it follows an exact participant-name prefix", () => {
+  assert.equal(normalizeSelectionTextForCanonicalization("Bayern Munich W1"), "Bayern Munich W1");
+  assert.equal(normalizeSelectionTextForCanonicalization("RB Leipzig W1"), "RB Leipzig W1");
+});
+
+test("normalizeSelectionTextForCanonicalization: 'Bayern Win (П1)' -> 'Bayern Win' still lets classifyOnce's own winner-suffix stripping finish the job, unlike the untouched raw text", () => {
+  // This is the exact real production defect (QA-4/rrrr.png): the trailing
+  // parenthetical alone is what breaks classifyOnce's own `$`-anchored
+  // WINNER_SUFFIX_REGEX (it requires the string to literally END in "win").
+  // Stripping only the parenthetical exposes "Bayern Win", which classifyOnce
+  // can now correctly self-classify as MONEYLINE_2WAY/PARTICIPANT "Bayern".
+  const cleaned = normalizeSelectionTextForCanonicalization("Bayern Win (П1)");
+  assert.equal(cleaned, "Bayern Win");
+});
+
+test("normalizeSelectionTextForCanonicalization: a clean participant name or market phrase is returned unchanged", () => {
+  assert.equal(normalizeSelectionTextForCanonicalization("Bayern Munich"), "Bayern Munich");
+  assert.equal(normalizeSelectionTextForCanonicalization("Over 2.5"), "Over 2.5");
+  assert.equal(normalizeSelectionTextForCanonicalization("Arsenal -1.5"), "Arsenal -1.5");
+});
+
+test("normalizeSelectionTextForCanonicalization: an empty string is returned as-is, never throws", () => {
+  assert.equal(normalizeSelectionTextForCanonicalization(""), "");
+  assert.equal(normalizeSelectionTextForCanonicalization("   "), "");
 });

@@ -130,12 +130,24 @@ test("buildBetSlipPreview: SINGLE token is still redeemable via the unchanged ve
 });
 
 test("buildBetSlipPreview: EXPRESS with 2 selections — matches the acceptance criteria (3.06 / 153.00), token now signed", async () => {
+  // SCREENSHOT ODDS QA-2 — leg 2's selection was originally "Over 2.5", a
+  // real TOTALS-shorthand phrase (classifyOnce/shorthandClassifier.ts
+  // recognizes it independent of any test wiring) — which always routes to
+  // TheOddsApiProvider's own verifyTotalsOddsFn, never to the verifyOddsFn
+  // this test injects. In this test environment that leg's odds check was
+  // therefore ALWAYS silently failing (PROVIDER_UNAVAILABLE, a real,
+  // un-mocked network call), a pre-existing gap this test never caught
+  // because potentialWin used to trust *submitted* odds regardless of
+  // verification outcome — exactly the bug this stage fixes. Changed to a
+  // bare participant name so BOTH legs genuinely verify through the same
+  // injected fixture, making this test honestly exercise the "both legs
+  // verified" acceptance criteria its own name promises.
   const slip: ParsedBetSlip = {
     type: "EXPRESS",
     stake: 50,
     selections: [
       { sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win", submittedOdds: 1.8 },
-      { sport: "Football", event: "Inter vs Juventus", market: null, selection: "Over 2.5", submittedOdds: 1.7 },
+      { sport: "Football", event: "Inter vs Juventus", market: null, selection: "Juventus", submittedOdds: 1.7 },
     ],
   };
 
@@ -201,7 +213,7 @@ test("buildBetSlipPreview: EXPRESS token is redeemable via verifyExpressPreviewT
   assert.equal(payload.selections[1].oddsStatus, "VERIFIED");
 });
 
-test("buildBetSlipPreview: EXPRESS token's currentOdds is null for a selection whose odds check never ran", async () => {
+test("buildBetSlipPreview: a selection whose odds check never resolved has currentOdds null in the PREVIEW, and — since SCREENSHOT ODDS QA-2 — an EXPRESS with any such leg no longer signs a token at all (fail-closed, not merely 'null inside a signed token')", async () => {
   const slip: ParsedBetSlip = {
     type: "EXPRESS",
     stake: 40,
@@ -218,17 +230,25 @@ test("buildBetSlipPreview: EXPRESS token's currentOdds is null for a selection w
     }),
   });
 
-  assert.ok(result.previewToken !== null);
-  const verified_ = verifyExpressPreviewToken(result.previewToken!, TEST_SECRET);
-  assert.equal(verified_.ok, true);
-  if (!verified_.ok) return;
-
-  assert.equal(verified_.payload.selections[0].currentOdds, "2");
-  assert.equal(verified_.payload.selections[0].oddsStatus, "VERIFIED");
   // The rejected odds check means no sourceOdds was ever obtained — null,
   // not a stale or fabricated value — and the status reflects that too.
-  assert.equal(verified_.payload.selections[1].currentOdds, null);
-  assert.equal(verified_.payload.selections[1].oddsStatus, "UNAVAILABLE");
+  // This is still visible in the PREVIEW response itself (built
+  // unconditionally, independent of whether a token ends up signed).
+  assert.equal(result.preview.selections[0].currentOdds, 2);
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[1].currentOdds, null);
+  assert.equal(result.preview.selections[1].oddsStatus, "UNAVAILABLE");
+
+  // SCREENSHOT ODDS QA-2 — totalOdds/potentialWin (and therefore the
+  // EXPRESS token, which is only ever signed when both are known) now
+  // require every leg's odds to be PROVIDER-VERIFIED, not merely
+  // player-submitted. One genuinely unresolved leg means the whole slip's
+  // potential win can never be honestly quoted, so no token is signed —
+  // preserving the existing EXPRESS fail-closed confirmation policy, just
+  // triggered by verification instead of submission.
+  assert.equal(result.preview.totalOdds, null);
+  assert.equal(result.preview.potentialWin, null);
+  assert.equal(result.previewToken, null);
 });
 
 test("buildBetSlipPreview: EXPRESS token signed with exactly 10 selections (the maximum)", async () => {
@@ -347,11 +367,15 @@ test("buildBetSlipPreview: one odds verification rejected -> Preview still succe
   assert.equal(result.preview.selections.length, 2);
   assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
   assert.equal(result.preview.selections[1].oddsStatus, "UNAVAILABLE");
-  // totalOdds/potentialWin are still computed from *submitted* odds
-  // regardless of verification outcome — a rejected odds check is not a
-  // missing submitted odds.
-  assert.equal(result.preview.totalOdds, 3.06);
-  assert.equal(result.preview.potentialWin, 153);
+  // SCREENSHOT ODDS QA-2 — totalOdds/potentialWin now require every leg's
+  // odds to be PROVIDER-VERIFIED, never merely submitted — a rejected odds
+  // check means this slip's real payout can never be honestly quoted, so
+  // both become null (and, per the EXPRESS-token gate, no token is signed
+  // either) even though the preview response itself still succeeds and
+  // still reports each leg's own status/currentOdds independently.
+  assert.equal(result.preview.totalOdds, null);
+  assert.equal(result.preview.potentialWin, null);
+  assert.equal(result.previewToken, null);
 });
 
 test("buildBetSlipPreview: statuses are mapped independently across a mixed EXPRESS", async () => {
@@ -381,18 +405,16 @@ test("buildBetSlipPreview: statuses are mapped independently across a mixed EXPR
   assert.equal(c.oddsStatus, "NOT_FOUND");
   assert.equal(d.oddsStatus, "UNAVAILABLE");
 
-  // The signed token must carry the same four statuses per selection, not
-  // just the preview response — the two are built from the same
-  // previewSelections array but assigned to independently.
-  assert.ok(result.previewToken !== null);
-  const verified_ = verifyExpressPreviewToken(result.previewToken!, TEST_SECRET);
-  assert.equal(verified_.ok, true);
-  if (!verified_.ok) return;
-  const [ta, tb, tc, td] = verified_.payload.selections;
-  assert.equal(ta.oddsStatus, "VERIFIED");
-  assert.equal(tb.oddsStatus, "ODDS_CHANGED");
-  assert.equal(tc.oddsStatus, "NOT_FOUND");
-  assert.equal(td.oddsStatus, "UNAVAILABLE");
+  // SCREENSHOT ODDS QA-2 — two of these four legs never matched a real
+  // provider price at all (NOT_FOUND/UNAVAILABLE), so totalOdds/potentialWin
+  // are null and — per the EXPRESS token gate — no token is signed for this
+  // mixed slip at all; there is no longer a token to carry the same four
+  // statuses into for this exact scenario. The "signed token carries the
+  // same per-leg oddsStatus/currentOdds as the preview" property is still
+  // covered, on an all-VERIFIED EXPRESS where a token genuinely gets
+  // signed, by the "EXPRESS token is redeemable via verifyExpressPreviewToken..."
+  // test above.
+  assert.equal(result.previewToken, null);
 });
 
 test("buildBetSlipPreview: a null-odds selection whose provider lookup throws maps to UNAVAILABLE (attempted, not skipped) and totals become null", async () => {
@@ -2822,4 +2844,348 @@ test("QA-2.1 diagnostic 8: no secret leakage — never Telegram initData, player
   } finally {
     restore();
   }
+});
+
+/* ============================================================================
+ * SCREENSHOT ODDS QA-2 — screenshot betting must use the CURRENT PROVIDER
+ * ODDS for potentialWin, exactly like typed text betting already does.
+ * Screenshot-submitted odds are reference-only, never authoritative.
+ *
+ * FIRST DIVERGENCE FOUND (Phase 1, code-traced not guessed): buildBetSlipPreview.ts
+ * built its odds-verification request from `selection.selection` VERBATIM —
+ * the same raw display text S1 already knew could carry 1X2-shorthand
+ * pollution ("Bayern Win (П1)") for reconciliation, but this is a SEPARATE
+ * consumer (legacySelectionToCanonicalRequest's own participant-fallback
+ * classification, which feeds the provider's own team-name search) that S1
+ * never touched. A typed "Bayern Munich" claim reaches the provider clean;
+ * a screenshot's "Bayern Win (П1)" claim did not — fixed below by
+ * normalizeSelectionTextForCanonicalization (see that function's own header
+ * for why it is deliberately narrower than S1's normalizeOcrParticipantClaim).
+ *
+ * SECOND, INDEPENDENT DEFECT FOUND: even once canonicalization succeeded,
+ * totalOdds/potentialWin were computed from previewSelections[i].submittedOdds
+ * (the EFFECTIVE submitted value — the player's/screenshot's own number)
+ * regardless of whether the provider ever verified it. Text betting never
+ * exposed this (players are told odds are optional, so submittedOdds is
+ * almost always null there, at which point the auto-lookup promotion
+ * already made submitted===current); a screenshot's OCR'd odds is almost
+ * always non-null, so this silently won every time. Fixed by keying
+ * totalOdds/potentialWin on each leg's oddsCheck.matched (VERIFIED or
+ * ODDS_CHANGED — both have a real current price) instead.
+ * ============================================================================ */
+
+test("SCREENSHOT ODDS QA-2 Bayern control — TEXT: no submitted odds (player never states one), provider verifies at 1.28, preview's current odds and potential win both come from 1.28", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 100,
+    selections: [
+      { sport: "Football", event: "Bayern Munich vs VfB Stuttgart", market: null, selection: "Bayern Munich", submittedOdds: null },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => verified(1.28, 1.28),
+  });
+
+  const selection = result.preview.selections[0];
+  // No 1X2-shorthand evidence exists in typed text, so there is nothing to
+  // reconcile — the bare participant claim reaches the provider directly,
+  // exactly as it always has (QA-1.6's own "genuine MONEYLINE_2WAY...
+  // unaffected" contract, untouched by this stage).
+  assert.equal(selection.marketType, "MONEYLINE_2WAY");
+  assert.equal(selection.oddsStatus, "VERIFIED");
+  assert.equal(selection.submittedOdds, 1.28); // auto-promoted from the provider — the player stated none
+  assert.equal(selection.currentOdds, 1.28);
+  assert.equal(result.preview.totalOdds, 1.28);
+  assert.equal(result.preview.potentialWin, 128);
+});
+
+// SCREENSHOT ODDS QA-2 — pendingSlip()'s own two-argument shape uses the
+// SAME string for both the displayed `selection` text and
+// pendingMarketReconciliation.claimedParticipant, which is exactly what a
+// PRE-S1 raw parse produced. Post-S1, these are two genuinely DIFFERENT
+// values (see betParser.ts's own OCR-mode normalization): the raw display
+// text stays polluted ("Bayern Win (П1)"), only claimedParticipant is
+// cleaned ("Bayern"). This builds that real, post-S1 shape directly, rather
+// than reusing pendingSlip() and accidentally testing the pre-S1 one.
+function postS1PendingSlip(
+  requiredSide: "HOME" | "AWAY",
+  rawSelectionText: string,
+  claimedParticipant: string,
+  overrides: Partial<{ event: string; submittedOdds: number | null; stake: number }> = {},
+): ParsedBetSlip {
+  return {
+    type: "SINGLE",
+    stake: overrides.stake ?? 100,
+    selections: [
+      {
+        sport: "Football",
+        event: overrides.event ?? "Bayern Munich vs VfB Stuttgart",
+        market: "1X2",
+        selection: rawSelectionText,
+        submittedOdds: overrides.submittedOdds ?? 1.42,
+        pendingMarketReconciliation: { requiredSide, claimedParticipant },
+      },
+    ],
+  };
+}
+
+test("SCREENSHOT ODDS QA-2 Bayern control — SCREENSHOT: OCR submitted odds 1.42 (stale), provider verifies at 1.28 — reaches the SAME canonical MONEYLINE_3WAY/HOME shape as text, preview keeps submittedOdds=1.42 for reference but computes potential win from 1.28, not 142.00", async () => {
+  const slip = postS1PendingSlip("HOME", "Bayern Win (П1)", "Bayern", {
+    event: "Bayern Munich vs VfB Stuttgart",
+    submittedOdds: 1.42,
+    stake: 100,
+  });
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => verifiedWithTeams(1.28, 1.42, "Bayern Munich", "VfB Stuttgart"),
+  });
+
+  const selection = result.preview.selections[0];
+  // The same canonical shape text reaches provider verification with —
+  // MONEYLINE_3WAY/HOME, via 1X2 reconciliation — proving Phase 1's
+  // divergence is closed, not just that verification happened to succeed.
+  assert.equal(selection.marketType, "MONEYLINE_3WAY");
+  assert.equal(selection.oddsStatus, "VERIFIED");
+  assert.equal(selection.submittedOdds, 1.42, "the screenshot's own odds stay visible for reference");
+  assert.equal(selection.currentOdds, 1.28, "the provider's current price, not the screenshot's");
+  assert.equal(result.preview.totalOdds, 1.28);
+  assert.equal(result.preview.potentialWin, 128, "100 * 1.28 (provider), NOT 100 * 1.42 (screenshot) — the exact bug this stage fixes");
+  assert.notEqual(result.preview.potentialWin, 142);
+
+  const verifiedToken = verifyPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verifiedToken.ok, true);
+  if (!verifiedToken.ok) return;
+  assert.equal(verifiedToken.payload.canonicalMarketType, "MONEYLINE_3WAY");
+  assert.equal(verifiedToken.payload.canonicalSelectionType, "HOME");
+});
+
+test("SCREENSHOT ODDS QA-2: ODDS_CHANGED (matched but outside tolerance) still uses the provider's current odds for potential win, not the screenshot's submitted odds", async () => {
+  const slip = postS1PendingSlip("HOME", "Bayern Win (П1)", "Bayern", {
+    event: "Bayern Munich vs VfB Stuttgart",
+    submittedOdds: 1.42,
+    stake: 100,
+  });
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => ({ ...verifiedWithTeams(1.28, 1.42, "Bayern Munich", "VfB Stuttgart"), withinTolerance: false }),
+  });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "ODDS_CHANGED");
+  assert.equal(result.preview.selections[0].currentOdds, 1.28);
+  assert.equal(result.preview.potentialWin, 128, "a moved-but-real provider price still prices the bet — ODDS_CHANGED only ever gates CONFIRM-time reconfirmation, never preview display");
+});
+
+test("SCREENSHOT ODDS QA-2: no submitted odds at all in the screenshot — provider verification still works, potential win comes from the provider", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 100,
+    selections: [{ sport: "Football", event: "Bayern Munich vs VfB Stuttgart", market: null, selection: "Bayern Munich", submittedOdds: null }],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => verified(1.28, 1.28),
+  });
+
+  assert.equal(result.preview.selections[0].submittedOdds, 1.28);
+  assert.equal(result.preview.selections[0].currentOdds, 1.28);
+  assert.equal(result.preview.potentialWin, 128);
+});
+
+test("SCREENSHOT ODDS QA-2: provider unavailable — screenshot odds are never promoted to authoritative; potential win stays null, oddsStatus is honest", async () => {
+  // A genuine MONEYLINE_2WAY claim (no pendingMarketReconciliation) — that
+  // is a separate, already-covered concern (QA-2.1's own tests); this test
+  // is purely about odds authority, so it isolates that from reconciliation
+  // entirely rather than combining two concerns in one fixture.
+  const plainSlip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 100,
+    selections: [{ sport: "Football", event: "Bayern Munich vs VfB Stuttgart", market: null, selection: "Bayern Munich", submittedOdds: 1.42 }],
+  };
+  const plainResult = await buildBetSlipPreview(plainSlip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => notFound(1.42),
+  });
+  assert.equal(plainResult.preview.selections[0].oddsStatus, "NOT_FOUND");
+  assert.equal(plainResult.preview.selections[0].submittedOdds, 1.42, "still shown, but never labeled current/verified");
+  assert.equal(plainResult.preview.selections[0].currentOdds, null, "never fabricated from the submitted value");
+  assert.equal(plainResult.preview.potentialWin, null, "never silently computed from an unverified screenshot price");
+  // Note: SINGLE (unlike EXPRESS) still signs a previewToken here — that is
+  // pre-existing, deliberately UNTOUCHED behavior (client-side
+  // canConfirmBetSlip already gates the Confirm button on oddsStatus; this
+  // stage's scope is odds authority, not the confirm-gating policy itself).
+  assert.equal(typeof plainResult.previewToken, "string");
+});
+
+/* ---------------------------------------------------------------------
+ * Section 9 — other markets: SPREAD, TOTALS, quarter SPREAD, quarter TOTALS.
+ * Provider odds are source of truth in every case; no market-specific
+ * special-casing anywhere in the fix itself.
+ * --------------------------------------------------------------------- */
+
+// SCREENSHOT ODDS QA-2 — a SPREAD/TOTALS selection always routes through
+// TheOddsApiProvider's own verifySpreadOddsFn/verifyTotalsOddsFn seams, NOT
+// the plain verifyOddsFn buildBetSlipPreview's options expose — injecting
+// options.oddsVerificationService directly (the same DI seam this file's
+// own "DI: an injected OddsVerificationService-shaped dependency..." tests
+// already use) bypasses that market-type routing entirely, so these tests
+// isolate the odds-authority behavior under test from routing mechanics.
+function fakeOddsService(results: readonly VerificationResult[]): Pick<OddsVerificationService, "verifyMany"> {
+  return {
+    verifyMany: async (requests: readonly VerifySelectionRequest[]): Promise<readonly VerificationResult[]> => {
+      assert.equal(requests.length, results.length, "test fixture mismatch: one result per request expected");
+      return results;
+    },
+  };
+}
+
+test("SCREENSHOT ODDS QA-2 SPREAD: RB Leipzig -1, screenshot odds != provider odds — potential win uses the provider's current price", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 100,
+    selections: [
+      { sport: "Football", event: "RB Leipzig vs Borussia Mönchengladbach", market: "Handicap", selection: "RB Leipzig -1", line: "-1", submittedOdds: 2.2 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: fakeOddsService([
+      createVerifiedResult({ submittedOdds: "2.2", currentOdds: "1.95", provider: "THE_ODDS_API", checkedAt: CHECKED_AT }),
+    ]),
+  });
+
+  const selection = result.preview.selections[0];
+  assert.equal(selection.marketType, "SPREAD");
+  assert.equal(selection.line, "-1");
+  assert.equal(selection.submittedOdds, 2.2);
+  assert.equal(selection.currentOdds, 1.95);
+  assert.equal(result.preview.potentialWin, 195); // 100 * 1.95, not 220
+});
+
+test("SCREENSHOT ODDS QA-2 TOTALS: Over 2.5, screenshot odds != provider odds — potential win uses the provider's current price", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 100,
+    selections: [{ sport: "Football", event: "Arsenal vs Chelsea", market: "Totals", selection: "Over 2.5", line: "2.5", submittedOdds: 2.05 }],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: fakeOddsService([
+      createVerifiedResult({ submittedOdds: "2.05", currentOdds: "1.9", provider: "THE_ODDS_API", checkedAt: CHECKED_AT }),
+    ]),
+  });
+
+  const selection = result.preview.selections[0];
+  assert.equal(selection.marketType, "TOTALS");
+  assert.equal(selection.line, "2.5");
+  assert.equal(selection.submittedOdds, 2.05);
+  assert.equal(selection.currentOdds, 1.9);
+  assert.equal(result.preview.potentialWin, 190); // 100 * 1.9, not 205
+});
+
+test("SCREENSHOT ODDS QA-2 quarter SPREAD (-1.25): screenshot odds != provider odds — potential win uses the provider's current price", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 100,
+    selections: [
+      { sport: "Football", event: "Real Madrid vs Barcelona", market: "Handicap", selection: "Real Madrid -1.25", line: "-1.25", submittedOdds: 2.15 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: fakeOddsService([
+      createVerifiedResult({ submittedOdds: "2.15", currentOdds: "1.98", provider: "THE_ODDS_API", checkedAt: CHECKED_AT }),
+    ]),
+  });
+
+  const selection = result.preview.selections[0];
+  assert.equal(selection.marketType, "SPREAD");
+  assert.equal(selection.line, "-1.25");
+  assert.equal(selection.submittedOdds, 2.15);
+  assert.equal(selection.currentOdds, 1.98);
+  assert.equal(result.preview.potentialWin, 198); // 100 * 1.98, not 215
+});
+
+test("SCREENSHOT ODDS QA-2 quarter TOTALS (2.25): screenshot odds != provider odds — potential win uses the provider's current price", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 100,
+    selections: [
+      { sport: "Football", event: "RB Leipzig vs Borussia Mönchengladbach", market: "Totals", selection: "Over 2.25", line: "2.25", submittedOdds: 2.3 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: fakeOddsService([
+      createVerifiedResult({ submittedOdds: "2.3", currentOdds: "2.05", provider: "THE_ODDS_API", checkedAt: CHECKED_AT }),
+    ]),
+  });
+
+  const selection = result.preview.selections[0];
+  assert.equal(selection.marketType, "TOTALS");
+  assert.equal(selection.line, "2.25");
+  assert.equal(selection.submittedOdds, 2.3);
+  assert.equal(selection.currentOdds, 2.05);
+  assert.equal(result.preview.potentialWin, 205); // 100 * 2.05, not 230
+});
+
+/* ---------------------------------------------------------------------
+ * Section 10 — EXPRESS. Each leg's current odds come from provider
+ * verification; the overall total is computed from provider-verified leg
+ * odds, never from a screenshot's own accumulator price. A screenshot's
+ * total is not even a field ParsedBetSlip carries — there is nothing to
+ * trust in the first place, only genuinely per-leg submittedOdds.
+ * --------------------------------------------------------------------- */
+
+test("SCREENSHOT ODDS QA-2 EXPRESS: every leg's current odds and the overall total come from provider verification, never from screenshot-submitted per-leg odds", async () => {
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 50,
+    selections: [
+      { sport: "Football", event: "Bayern Munich vs VfB Stuttgart", market: null, selection: "Bayern Munich", submittedOdds: 1.42 },
+      { sport: "Football", event: "Arsenal vs Chelsea", market: "Totals", selection: "Over 2.5", line: "2.5", submittedOdds: 2.05 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: fakeOddsService([
+      createVerifiedResult({ submittedOdds: "1.42", currentOdds: "1.28", provider: "THE_ODDS_API", checkedAt: CHECKED_AT }),
+      createVerifiedResult({ submittedOdds: "2.05", currentOdds: "1.9", provider: "THE_ODDS_API", checkedAt: CHECKED_AT }),
+    ]),
+  });
+
+  assert.equal(result.preview.selections[0].submittedOdds, 1.42);
+  assert.equal(result.preview.selections[0].currentOdds, 1.28);
+  assert.equal(result.preview.selections[1].submittedOdds, 2.05);
+  assert.equal(result.preview.selections[1].currentOdds, 1.9);
+
+  // 1.28 * 1.9 = 2.432, rounded to computeTotalOdds's own 2-decimal-place
+  // precision -> 2.43 (provider-verified), never 1.42 * 2.05 = 2.911/2.91
+  // (screenshot-submitted).
+  assert.equal(result.preview.totalOdds, 2.43);
+  assert.equal(result.preview.potentialWin, 121.5); // 50 * 2.43
+  assert.ok(result.previewToken !== null);
+});
+
+test("SCREENSHOT ODDS QA-2 EXPRESS: one leg unverified — fail-closed, no token, exactly the existing EXPRESS confirmation policy, unchanged in kind by this stage", async () => {
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 50,
+    selections: [
+      { sport: "Football", event: "Bayern Munich vs VfB Stuttgart", market: null, selection: "Bayern Munich", submittedOdds: 1.42 },
+      { sport: "Football", event: "Unknown Match", market: "Totals", selection: "Over 2.5", line: "2.5", submittedOdds: 2.05 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: fakeOddsService([
+      createVerifiedResult({ submittedOdds: "1.42", currentOdds: "1.28", provider: "THE_ODDS_API", checkedAt: CHECKED_AT }),
+      createFailedResult({ submittedOdds: "2.05", provider: "THE_ODDS_API", checkedAt: CHECKED_AT, reasonCode: "EVENT_NOT_FOUND" }),
+    ]),
+  });
+
+  assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
+  assert.equal(result.preview.selections[1].oddsStatus, "NOT_FOUND");
+  assert.equal(result.preview.totalOdds, null);
+  assert.equal(result.preview.potentialWin, null);
+  assert.equal(result.previewToken, null);
 });
