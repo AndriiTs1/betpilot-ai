@@ -690,3 +690,45 @@ test("M1 regression 7: LINE role remains protected — unaffected by the STAKE e
   const result = verifyNumericRoleClaim(claim("LINE", 2.5), evidence);
   assert.equal(result.verdict, "CORROBORATED");
 });
+
+/* ============================================================================
+ * SCREENSHOT QA-CORE M1.1 — real production fixture (fresh
+ * SCREENSHOT_QA1_DIAGNOSTIC numeric_evidence trace, captured this stage):
+ *   role=LINE, verdict=AMBIGUOUS, claimedValue="2.5"
+ *   supportingEvidence: [{value:"2.5", confidence:"LABEL_STRONG", marker:"больше"}]
+ *   conflictingEvidence: [
+ *     {value:"+10",  confidence:"LABEL_STRONG", marker:"ⓘ"},
+ *     {value:"+25",  confidence:"LABEL_STRONG", marker:"+10"},
+ *     {value:"+100", confidence:"LABEL_STRONG", marker:"+25"},
+ *   ]
+ * A row of quick-add stake buttons ("+10 +25 +100") preceded by an info
+ * icon — each falsely classified as its own SPREAD line by
+ * shorthandClassifier.ts's SPREAD_BARE_SIGNED_PATTERN, "attributed" to the
+ * PRECEDING token's own text. Reconstructed faithfully below (not the
+ * literal captured transcript, same convention as the existing Leipzig/
+ * Gladbach STAKE fixture).
+ * ============================================================================ */
+
+const CASE2_QUICK_ADD_LINE_OCR_TEXT = [
+  "RB Leipzig - Borussia Mönchengladbach",
+  "Тотал",
+  "больше 2.5",
+  "1.85",
+  "ⓘ +10 +25 +100",
+  "Ставка",
+  "100",
+].join("\n");
+
+test("M1.1 real Case 2 fixture (quick-add stake buttons misread as SPREAD lines): claim LINE=2.5 is CORROBORATED, no longer AMBIGUOUS", () => {
+  const evidence = extractNumericRoleEvidence(CASE2_QUICK_ADD_LINE_OCR_TEXT);
+  const result = verifyNumericRoleClaim(claim("LINE", 2.5), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+  assert.equal(result.conflictingEvidence.length, 0);
+});
+
+test("M1.1 real Case 2 fixture: the STAKE claim (100) is unaffected by the LINE fix", () => {
+  const evidence = extractNumericRoleEvidence(CASE2_QUICK_ADD_LINE_OCR_TEXT);
+  const result = verifyNumericRoleClaim(claim("STAKE", 100), evidence);
+  assert.notEqual(result.verdict, "CONTRADICTED");
+  assert.notEqual(result.verdict, "AMBIGUOUS");
+});

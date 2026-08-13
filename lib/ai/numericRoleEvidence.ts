@@ -435,6 +435,31 @@ interface LineEvidenceResult {
   readonly consumedSpans: ReadonlyArray<{ start: number; end: number }>;
 }
 
+// SCREENSHOT QA-CORE M1.1 — a genuine SPREAD/TEAM_TOTAL line is always
+// attributed to a real participant name; a "name" composed entirely of
+// digits/symbols (an icon glyph, or a neighboring quick-add stake button's
+// own "+10" text) is never a real participant in any language. This is
+// exactly what a real production screenshot proved: a row of quick-add
+// stake buttons ("+10  +25  +100") was misread by shorthandClassifier.ts's
+// deliberately permissive SPREAD_BARE_SIGNED_PATTERN (any
+// "<text> <signed number>" shape, designed to accept real team names of any
+// form) as a sequence of SPREAD lines, each "attributed" to the PRECEDING
+// button's own text as if it were a team name — producing false LABEL_STRONG
+// LINE evidence that conflicted with the genuine, correctly-labeled line
+// ("больше 2.5") and turned a clean CORROBORATED claim into AMBIGUOUS.
+// Fixed here, at this module's own trust boundary, not inside the shared
+// classifier: shorthandClassifier.ts is also relied on by canonical
+// selection-text classification and other callers never proven to share
+// this problem, so narrowing its own regex would risk an unreviewed,
+// out-of-scope behavior change there. This guard only decides whether THIS
+// module trusts a classification as real LINE evidence — it changes nothing
+// about what shorthandClassifier.ts itself returns to any caller.
+const PARTICIPANT_NAME_LETTER_PATTERN = /\p{L}/u;
+
+function hasPlausibleParticipantName(name: string | null): boolean {
+  return name === null || PARTICIPANT_NAME_LETTER_PATTERN.test(name);
+}
+
 function findLineEvidence(text: string, occurrences: readonly NumberOccurrence[], alreadyClaimed: readonly NumericRoleEvidence[]): LineEvidenceResult {
   const tokens = tokenize(text);
   const lineEvidence: NumericRoleEvidence[] = [];
@@ -452,7 +477,12 @@ function findLineEvidence(text: string, occurrences: readonly NumberOccurrence[]
 
       consumedSpans.push({ start: classified.windowStart, end: classified.windowEnd });
 
-      if (LINE_MARKET_TYPES.has(classified.marketType) && classified.embeddedLine !== null && sameNumericValue(classified.embeddedLine, occurrence.value)) {
+      if (
+        LINE_MARKET_TYPES.has(classified.marketType) &&
+        classified.embeddedLine !== null &&
+        sameNumericValue(classified.embeddedLine, occurrence.value) &&
+        hasPlausibleParticipantName(classified.participantName)
+      ) {
         lineEvidence.push({
           role: "LINE",
           value: occurrence.value,

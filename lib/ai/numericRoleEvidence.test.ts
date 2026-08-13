@@ -641,3 +641,37 @@ test("M1: the 'win' exclusion is narrowly scoped to 'potential win.../possible w
   const stakes = findByRole(extractNumericRoleEvidence("RB Leipzig to win\nStake\n100 USD"), "STAKE");
   assert.ok(stakes.some((s) => sameNumericValue(s.value, "100")), "the real stake must still be recognized despite the nearby 'to win' market phrase");
 });
+
+/* ============================================================================
+ * SCREENSHOT QA-CORE M1.1 — a real production screenshot proved a second,
+ * distinct false-LINE-evidence bug: a row of quick-add stake buttons
+ * ("+10 +25 +100") was misread by shorthandClassifier.ts's deliberately
+ * permissive SPREAD_BARE_SIGNED_PATTERN (any "<text> <signed number>" shape)
+ * as a sequence of SPREAD lines, each "attributed" to the PRECEDING button's
+ * own text (or an info icon) as if it were a real team name — producing
+ * false LABEL_STRONG LINE evidence that conflicted with the genuine,
+ * correctly-labeled line and turned CORROBORATED into AMBIGUOUS. Fixed by
+ * requiring a classified participant name to contain at least one letter
+ * before this module trusts it as real LINE evidence — a name made entirely
+ * of digits/symbols is never a real participant in any language.
+ * ============================================================================ */
+
+test("M1.1: a row of bare signed quick-add stake buttons never becomes LINE evidence, even when each is preceded by another number/icon that superficially parses as a 'participant name'", () => {
+  const text = "больше 2.5\nⓘ +10 +25 +100";
+  const lines = findByRole(extractNumericRoleEvidence(text), "LINE");
+  assert.equal(lines.length, 1, "only the genuine 'больше 2.5' line may be recognized");
+  assert.equal(lines[0].value, "2.5");
+});
+
+test("M1.1: a genuine SPREAD attributed to a real team name is unaffected by the letter guard", () => {
+  const lines = findByRole(extractNumericRoleEvidence("Arsenal +1.5\nставка 10"), "LINE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].value, "+1.5");
+  assert.equal(lines[0].marker, "arsenal");
+});
+
+test("M1.1: a genuine Cyrillic team name (letters outside a-z) still corroborates a SPREAD line", () => {
+  const lines = findByRole(extractNumericRoleEvidence("Реал +1.5\nставка 10"), "LINE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].value, "+1.5");
+});
