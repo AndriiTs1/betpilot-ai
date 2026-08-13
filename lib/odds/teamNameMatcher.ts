@@ -215,6 +215,32 @@ export function compareTeamNames(left: string, right: string): number {
 // that — not a hint that it should, today.
 const PARTICIPANT_MATCH_THRESHOLD = 0.4;
 
+// SCREENSHOT QA-CORE M2 — when a claim crosses the threshold against BOTH
+// sides, a decisive EXACT match on one side must outrank a merely-crossing
+// score on the other, rather than automatically reporting AMBIGUOUS. Only
+// ever applies when the winning side's score is a full/exact normalized
+// match (score === 1, per compareTeamNames/overlapScore) — "clearly higher
+// but still imperfect on both sides" remains AMBIGUOUS, deliberately
+// conservative: this function's output also drives settlement (see this
+// file's own header) — a wrong decisive guess there is a wrong WIN/LOSS, a
+// real money outcome, not just a wrongly rejected preview.
+//
+// 0.5 is the calibrated dividing line, proven against two real cases
+// already established in this file's own test suite, not picked in the
+// abstract: a proven production false AMBIGUOUS — claim "Real Madrid" vs
+// home "Real Madrid" (exact, 1.0) vs away "Real Sociedad" (0.5 — the two
+// share only the generic "Real" prefix) — must resolve HOME. An existing,
+// deliberately-protected ambiguity in this same suite — claim "Real Madrid"
+// vs home "Real Madrid" (exact, 1.0) vs away "Real Madrid Castilla" (0.667
+// — the two share "Real" AND "Madrid", a genuine majority overlap with the
+// parent club's own reserve side) — must remain AMBIGUOUS. 0.5 is exactly
+// the boundary between "the losing side's overlap is fully explained by a
+// single shared, non-distinguishing word" (at most half its words) and "the
+// losing side shares a majority of its words with the claim" (genuinely too
+// close to guess). The same reasoning applies symmetrically for an exact
+// AWAY match against a weaker HOME score.
+const DECISIVE_LOSING_SCORE_CEILING = 0.5;
+
 export type ParticipantSideResolution =
   | { readonly kind: "HOME" }
   | { readonly kind: "AWAY" }
@@ -222,12 +248,12 @@ export type ParticipantSideResolution =
   | { readonly kind: "AMBIGUOUS" };
 
 // Never guesses: a participant name matching neither side, or both sides
-// at once, is reported honestly rather than silently picking one — see
-// this stage's own audit for why (a wrong guess here is a wrong WIN/LOSS,
-// a real money outcome). Never uses selection order, odds, or any other
-// heuristic — name-vs-name comparison only, via the exact same
-// normalization/fuzzy-matching pipeline oddsVerifier.ts already relies on
-// in production.
+// at once with no decisive winner, is reported honestly rather than
+// silently picking one — see this stage's own audit for why (a wrong guess
+// here is a wrong WIN/LOSS, a real money outcome). Never uses selection
+// order, odds, or any other heuristic — name-vs-name comparison only, via
+// the exact same normalization/fuzzy-matching pipeline oddsVerifier.ts
+// already relies on in production.
 export function resolveParticipantSide(
   participantName: string,
   homeName: string,
@@ -238,7 +264,11 @@ export function resolveParticipantSide(
   const matchesHome = homeScore >= PARTICIPANT_MATCH_THRESHOLD;
   const matchesAway = awayScore >= PARTICIPANT_MATCH_THRESHOLD;
 
-  if (matchesHome && matchesAway) return { kind: "AMBIGUOUS" };
+  if (matchesHome && matchesAway) {
+    if (homeScore === 1 && awayScore <= DECISIVE_LOSING_SCORE_CEILING) return { kind: "HOME" };
+    if (awayScore === 1 && homeScore <= DECISIVE_LOSING_SCORE_CEILING) return { kind: "AWAY" };
+    return { kind: "AMBIGUOUS" };
+  }
   if (matchesHome) return { kind: "HOME" };
   if (matchesAway) return { kind: "AWAY" };
   return { kind: "NO_MATCH" };
