@@ -1,6 +1,66 @@
+import { createHash } from "node:crypto";
 import { Prisma, type PrismaClient } from "@/lib/generated/prisma/client";
 import type { ParsedBetSlip } from "./betSlip";
 import type { BetSlipPreview } from "./buildBetSlipPreview";
+
+/* -------------------------------------------------------------------------- */
+/* SCREENSHOT CACHE V2 — versioned recognition cache identity                 */
+/* -------------------------------------------------------------------------- */
+
+// ScreenshotRecognition rows are permanent and immutable (see that model's
+// own schema comment) — by design, never a bug on its own. The bug proven
+// TWICE is that a permanent cache keyed ONLY on (playerId, raw imageHash)
+// silently serves pre-fix `parsedBet` content forever, no matter how many
+// times the OCR/parser/normalization/reconciliation code that PRODUCED it
+// changes: QA-4's incident (a stale, unnormalized claimedParticipant) and
+// the M3.2/Alavés incident (a stale pendingMarketReconciliation missing the
+// conflictingParticipantName field entirely) were the SAME root cause,
+// fixed twice as two separate field-specific backfills. This constant and
+// the two functions below are the generic fix for that whole class: cache
+// IDENTITY now depends on the recognition/parser version, not just the raw
+// image, so a version bump makes every previously-cached row for a given
+// image permanently unreachable by lookup — without deleting or mutating
+// it (see findScreenshotRecognition's own comment) — forcing a fresh
+// OCR+parse that reflects current code, exactly once, the next time that
+// image is uploaded.
+//
+// BUMP this constant whenever a change affects the PERSISTED SEMANTICS of a
+// stored recognition — i.e. anything that changes what `parsedBet` means or
+// contains:
+//   - OCR extraction/normalized-text schema
+//   - AI parser interpretation (betParser.ts, betParserPrompt.ts)
+//   - shared UI-noise normalization (screenshotUiNoise.ts)
+//   - numeric-role semantics (numericRoleEvidence.ts/numericRoleVerifier.ts)
+//   - market-intent semantics (marketIntentEvidence.ts/marketIntentVerifier.ts)
+//   - the PendingMarketReconciliation shape or the reconciliation trust rule
+//     that consumes it (buildBetSlipPreview.ts's reconcile1X2ParticipantClaim)
+//   - the canonical BetIntent representation itself (betSlip.ts)
+//
+// Do NOT bump for changes that never touch what gets stored in `parsedBet`:
+//   - UI-only changes (client rendering, error copy)
+//   - provider odds/price changes (ScreenshotVerification is already its
+//     own separately-versioned, TTL-bound model — untouched by this stage)
+//   - settlement changes
+//   - unrelated dashboard/operator changes
+//
+// Starts at 2 (not 1): every row created before this stage existed was,
+// structurally, "version 1" — an implicit, never-invalidatable version this
+// constant now retroactively supersedes the instant it ships, without
+// requiring a matching "version 1" constant to ever have existed in code.
+export const SCREENSHOT_RECOGNITION_VERSION = 2;
+
+// Exported (not merely internal) specifically so tests can construct a
+// legacy-version cache key directly — e.g. to seed a fake DB with a row
+// that predates the current SCREENSHOT_RECOGNITION_VERSION, proving the new
+// version correctly treats it as a cache miss — without needing this
+// module's own current constant to ever change during a single test run.
+export function computeRecognitionCacheKeyForVersion(rawImageHash: string, version: number): string {
+  return createHash("sha256").update(`${version}:${rawImageHash}`).digest("hex");
+}
+
+function computeCurrentRecognitionCacheKey(rawImageHash: string): string {
+  return computeRecognitionCacheKeyForVersion(rawImageHash, SCREENSHOT_RECOGNITION_VERSION);
+}
 
 // Stage 4.2B3 — the service layer for prisma/schema.prisma's own
 // ScreenshotRecognition/ScreenshotVerification models; see those models'
@@ -58,20 +118,31 @@ function isRecognitionUniqueViolation(err: unknown): boolean {
 /* Recognition — immutable                                                    */
 /* -------------------------------------------------------------------------- */
 
-// Read-only lookup. Never creates, never mutates.
+// Read-only lookup. Never creates, never mutates. Public API still accepts
+// (and returns) the RAW image hash — SCREENSHOT CACHE V2's version-salting
+// is an internal DB-identity concern only (see computeCurrentRecognitionCacheKey's
+// own header): a row cached under a DIFFERENT SCREENSHOT_RECOGNITION_VERSION
+// for this exact same raw image is, by construction, never found here —
+// still physically present in the database (never deleted/mutated), simply
+// unreachable via this lookup, exactly as a genuine cache miss would be.
 export async function findScreenshotRecognition(
   db: PrismaClient,
   playerId: string,
   imageHash: string,
 ): Promise<ScreenshotRecognitionRecord | null> {
   const row = await db.screenshotRecognition.findUnique({
-    where: { playerId_imageHash: { playerId, imageHash } },
+    where: { playerId_imageHash: { playerId, imageHash: computeCurrentRecognitionCacheKey(imageHash) } },
   });
   if (!row) return null;
   return {
     id: row.id,
     playerId: row.playerId,
-    imageHash: row.imageHash,
+    // The RAW hash the caller passed in, never the salted value actually
+    // stored in row.imageHash — every existing/future caller of this
+    // service (route.ts's own diagnostics, tests) expects and depends on
+    // this being the true raw image identity, unaffected by cache
+    // versioning (see this file's own SCREENSHOT CACHE V2 header).
+    imageHash,
     parsedBet: row.parsedBet as unknown as ParsedBetSlip,
     ocrText: row.ocrText,
     createdAt: row.createdAt,
@@ -94,7 +165,7 @@ export async function createScreenshotRecognition(
     const row = await db.screenshotRecognition.create({
       data: {
         playerId: input.playerId,
-        imageHash: input.imageHash,
+        imageHash: computeCurrentRecognitionCacheKey(input.imageHash),
         parsedBet: input.parsedBet as unknown as Prisma.InputJsonValue,
         ocrText: input.ocrText,
       },
@@ -102,7 +173,8 @@ export async function createScreenshotRecognition(
     return {
       id: row.id,
       playerId: row.playerId,
-      imageHash: row.imageHash,
+      // Raw hash, same reasoning as findScreenshotRecognition above.
+      imageHash: input.imageHash,
       parsedBet: input.parsedBet,
       ocrText: row.ocrText,
       createdAt: row.createdAt,

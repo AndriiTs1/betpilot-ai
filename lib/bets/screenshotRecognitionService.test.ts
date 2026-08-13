@@ -8,6 +8,8 @@ import {
   findFreshScreenshotVerification,
   createScreenshotVerification,
   VERIFICATION_TTL_MS,
+  SCREENSHOT_RECOGNITION_VERSION,
+  computeRecognitionCacheKeyForVersion,
 } from "./screenshotRecognitionService";
 import type { ParsedBetSlip } from "./betSlip";
 import type { BetSlipPreview } from "./buildBetSlipPreview";
@@ -235,7 +237,12 @@ test("createScreenshotRecognition: concurrency — a unique-constraint conflict 
   const winningRow: FakeRecognitionRow = {
     id: "sr-winner",
     playerId: "player-1",
-    imageHash: "hash-a",
+    // SCREENSHOT CACHE V2 — a real row (created via the actual service
+    // function, as this one simulates) stores the VERSIONED cache key, not
+    // the bare raw hash — seeding the raw value directly here would make
+    // this fake DB's own conflict detection silently miss the row instead
+    // of exercising the race path this test is actually about.
+    imageHash: computeRecognitionCacheKeyForVersion("hash-a", SCREENSHOT_RECOGNITION_VERSION),
     parsedBet: { type: "SINGLE", stake: 99, selections: [] },
     ocrText: "winner's own text",
     createdAt: new Date(),
@@ -379,4 +386,132 @@ test("createScreenshotVerification: previewToken null is preserved as null (an u
 test("VERIFICATION_TTL_MS: is a sane, positive value, comfortably shorter than the previewToken's own 180s expiry", () => {
   assert.ok(VERIFICATION_TTL_MS > 0);
   assert.ok(VERIFICATION_TTL_MS < 180_000, "must stay under previewToken.ts's TTL_SECONDS so a reused token is never already expired");
+});
+
+/* ============================================================================
+ * SCREENSHOT CACHE V2 — versioned recognition cache identity. Proves the
+ * generic fix for the class of bug found twice (QA-4's stale
+ * claimedParticipant, M3.2's stale pendingMarketReconciliation missing
+ * conflictingParticipantName): cache identity now depends on
+ * SCREENSHOT_RECOGNITION_VERSION, not just (playerId, raw imageHash).
+ * ============================================================================ */
+
+test("SCREENSHOT CACHE V2 test 1: same image + same (current) version -> cache hit", async () => {
+  const { db } = fakeDb();
+  const created = await createScreenshotRecognition(db, { playerId: "player-1", imageHash: "hash-a", parsedBet: sampleParsedBet(), ocrText: "text" });
+
+  const found = await findScreenshotRecognition(db, "player-1", "hash-a");
+  assert.ok(found !== null);
+  assert.equal(found!.id, created.id);
+  assert.deepEqual(found!.parsedBet, created.parsedBet);
+  // Public API always returns the RAW hash, never the internally-salted
+  // value actually stored in the DB row.
+  assert.equal(found!.imageHash, "hash-a");
+});
+
+test("SCREENSHOT CACHE V2 test 2: same image + a DIFFERENT (legacy/old) recognition version -> cache miss, even though the row physically exists", async () => {
+  const { db, _debug } = fakeDb();
+
+  // Simulate a row created under an OLDER version (e.g. before this stage
+  // shipped) — seeded directly with the OLD version's cache key, exactly
+  // as a real pre-existing database row would have.
+  const legacyVersion = SCREENSHOT_RECOGNITION_VERSION - 1;
+  _debug.seedExistingRecognition({
+    id: "sr-legacy",
+    playerId: "player-1",
+    imageHash: computeRecognitionCacheKeyForVersion("hash-a", legacyVersion),
+    parsedBet: { type: "SINGLE", stake: 5, selections: [{ sport: "Football", event: "Alavés vs Getafe", market: "1X2", selection: "Alavés", submittedOdds: 2.34, pendingMarketReconciliation: { requiredSide: "AWAY", claimedParticipant: "Alavés" } }] },
+    ocrText: "legacy text",
+    createdAt: new Date(),
+  });
+
+  const found = await findScreenshotRecognition(db, "player-1", "hash-a");
+  assert.equal(found, null, "a row cached under a different version must be treated as a genuine cache miss");
+  // The legacy row is still physically present — never deleted or mutated.
+  assert.equal(_debug.recognitions.length, 1);
+  assert.equal(_debug.recognitions[0].id, "sr-legacy");
+});
+
+test("SCREENSHOT CACHE V2 test 3: different image + same version -> cache miss (unaffected by versioning, unchanged pre-existing behavior)", async () => {
+  const { db } = fakeDb();
+  await createScreenshotRecognition(db, { playerId: "player-1", imageHash: "hash-a", parsedBet: sampleParsedBet(), ocrText: "text" });
+
+  const found = await findScreenshotRecognition(db, "player-1", "hash-b");
+  assert.equal(found, null);
+});
+
+test("SCREENSHOT CACHE V2 test 4: a cache miss (old-version row exists) creates exactly ONE current-version recognition, with fresh parsedBet — never reuses the legacy row's content", async () => {
+  const { db, _debug } = fakeDb();
+  const legacyVersion = SCREENSHOT_RECOGNITION_VERSION - 1;
+  _debug.seedExistingRecognition({
+    id: "sr-legacy",
+    playerId: "player-1",
+    imageHash: computeRecognitionCacheKeyForVersion("hash-a", legacyVersion),
+    parsedBet: { type: "SINGLE", stake: 5, selections: [{ sport: "Football", event: "Alavés vs Getafe", market: "1X2", selection: "Alavés", submittedOdds: 2.34, pendingMarketReconciliation: { requiredSide: "AWAY", claimedParticipant: "Alavés" } }] },
+    ocrText: "legacy text",
+    createdAt: new Date(),
+  });
+
+  // The route.ts caller: findScreenshotRecognition misses (test 2 already
+  // proved this), so it re-runs OCR/parsing and calls create() with fresh,
+  // CURRENT-code output — simulated here directly with a fresh parsedBet
+  // that DOES carry the new conflictingParticipantName field.
+  const freshParsedBet: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 5,
+    selections: [
+      {
+        sport: "Football",
+        event: "Alavés vs Getafe",
+        market: "1X2",
+        selection: "Alavés",
+        submittedOdds: 2.34,
+        pendingMarketReconciliation: { requiredSide: "AWAY", claimedParticipant: "Alavés", conflictingParticipantName: null },
+      },
+    ],
+  };
+
+  const created = await createScreenshotRecognition(db, { playerId: "player-1", imageHash: "hash-a", parsedBet: freshParsedBet, ocrText: "fresh text" });
+
+  assert.notEqual(created.id, "sr-legacy");
+  assert.deepEqual(created.parsedBet, freshParsedBet);
+  assert.equal(created.imageHash, "hash-a");
+  // Exactly two rows now exist: the untouched legacy one, plus the new one.
+  assert.equal(_debug.recognitions.length, 2);
+  assert.ok(_debug.recognitions.some((r) => r.id === "sr-legacy" && r.ocrText === "legacy text"), "the legacy row must remain byte-for-byte unmutated");
+
+  // The fresh row is now findable under the CURRENT version.
+  const found = await findScreenshotRecognition(db, "player-1", "hash-a");
+  assert.equal(found!.id, created.id);
+  assert.deepEqual(
+    (found!.parsedBet.selections[0] as { pendingMarketReconciliation?: { conflictingParticipantName?: string | null } }).pendingMarketReconciliation
+      ?.conflictingParticipantName,
+    null,
+    "the M3.2 override can now actually operate on this field, since a fresh, current-version parse produced it",
+  );
+});
+
+// SCREENSHOT CACHE V2 test 5 (concurrency/idempotency preserved under a
+// versioned key) is the pre-existing "createScreenshotRecognition:
+// concurrency — a unique-constraint conflict recovers by re-reading the
+// winning row instead of throwing" test above — its seed row now uses
+// computeRecognitionCacheKeyForVersion (this stage's own fix), and it still
+// passes unchanged in outcome, proving the race/idempotency guarantee is
+// unaffected by versioning. No separate duplicate test needed.
+
+test("SCREENSHOT CACHE V2: diagnostics — the RAW imageHash a caller passes in is always what's returned, regardless of cache hit or miss, proving raw image identity stays stable for logging/diagnostics", async () => {
+  const { db } = fakeDb();
+  const created = await createScreenshotRecognition(db, { playerId: "player-1", imageHash: "raw-hash-xyz", parsedBet: sampleParsedBet(), ocrText: "text" });
+  assert.equal(created.imageHash, "raw-hash-xyz");
+
+  const found = await findScreenshotRecognition(db, "player-1", "raw-hash-xyz");
+  assert.equal(found!.imageHash, "raw-hash-xyz");
+});
+
+test("SCREENSHOT CACHE V2: computeRecognitionCacheKeyForVersion produces different keys for different versions of the same raw hash, and the same key for the same version", () => {
+  const v1 = computeRecognitionCacheKeyForVersion("hash-a", 1);
+  const v2 = computeRecognitionCacheKeyForVersion("hash-a", 2);
+  const v1Again = computeRecognitionCacheKeyForVersion("hash-a", 1);
+  assert.notEqual(v1, v2);
+  assert.equal(v1, v1Again);
 });
