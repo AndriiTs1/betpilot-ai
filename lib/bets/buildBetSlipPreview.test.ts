@@ -3156,6 +3156,32 @@ test("SCREENSHOT ODDS QA-2 Bayern control — SCREENSHOT: OCR submitted odds 1.4
   assert.equal(verifiedToken.payload.canonicalSelectionType, "HOME");
 });
 
+// M4.1 — CLEAN PLAYER ODDS UX. The exact real production reproduction from
+// this stage's task: a Real Madrid screenshot states odds 2.01, BetPilot's
+// current provider price is 1.39, stake 5. Confirms end-to-end (not just
+// re-asserting the general QA-2 rule above, with THIS stage's own numbers)
+// that the preview's currentOdds/potentialWin are driven exclusively by the
+// provider's current price — the values the simplified BetPreviewCard.tsx
+// "Odds"/"Potential win" rows now read directly, never selection.submittedOdds.
+test("M4.1: Real Madrid — screenshot odds 2.01, provider current odds 1.39, stake 5 — currentOdds and potentialWin come from 1.39, never 2.01", async () => {
+  const slip = postS1PendingSlip("HOME", "Real Madrid Win", "Real Madrid", {
+    event: "Real Madrid vs Real Sociedad",
+    submittedOdds: 2.01,
+    stake: 5,
+  });
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => verifiedWithTeams(1.39, 2.01, "Real Madrid", "Real Sociedad"),
+  });
+
+  const selection = result.preview.selections[0];
+  assert.equal(selection.submittedOdds, 2.01, "the screenshot's own odds stay visible for reference only");
+  assert.equal(selection.currentOdds, 1.39, "the provider's current price — this, not submittedOdds, is what BetPreviewCard.tsx's 'Odds' row reads");
+  assert.equal(result.preview.totalOdds, 1.39);
+  assert.equal(result.preview.potentialWin, 6.95, "5 * 1.39, NOT 5 * 2.01");
+  assert.notEqual(result.preview.potentialWin, 10.05);
+});
+
 test("SCREENSHOT ODDS QA-2: ODDS_CHANGED (matched but outside tolerance) still uses the provider's current odds for potential win, not the screenshot's submitted odds", async () => {
   const slip = postS1PendingSlip("HOME", "Bayern Win (П1)", "Bayern", {
     event: "Bayern Munich vs VfB Stuttgart",

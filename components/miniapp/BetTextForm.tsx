@@ -243,7 +243,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
       // explicitly tap again — this is the exact same control-flow shape
       // every other ready-state confirm already goes through.
       if (result.failure.kind === "odds_changed") {
-        const update = buildOddsChangedReconfirm(preview, result.failure);
+        const update = buildOddsChangedReconfirm(result.failure);
         setPreview(update.preview);
         setPhase("ready");
         setOddsChangedInfo(update);
@@ -361,19 +361,8 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
               style={{ background: "rgba(255,255,255,0.03)", border: "1px solid #E8B84A33" }}
             >
               <p className="text-sm font-semibold" style={{ color: "#E8B84A" }}>
-                {oddsChangedInfo.title}
+                {oddsChangedInfo.message}
               </p>
-              <p className="mt-1 text-xs leading-relaxed text-slate-400">{oddsChangedInfo.body}</p>
-              {oddsChangedInfo.changedSelections.length > 0 && (
-                <ul className="mt-2 space-y-1">
-                  {oddsChangedInfo.changedSelections.map((change, index) => (
-                    <li key={`${change.event}-${index}`} className="text-xs" style={{ color: "#E8B84A" }}>
-                      {change.event} / {change.from} → {change.to}
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <p className="mt-2 text-xs leading-relaxed text-slate-400">{oddsChangedInfo.footer}</p>
             </div>
           ) : (
             error && (

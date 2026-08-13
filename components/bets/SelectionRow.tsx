@@ -41,46 +41,59 @@ function toNumber(value: string | number | null | undefined): number | null {
   return Number.isFinite(num) ? num : null;
 }
 
+// M4.1 — CLEAN PLAYER ODDS UX. "plain" is now reached ONLY by the
+// showStatus=false review-context path below (Active Bets/History/
+// PlayerCard), which builds it directly, never via getOddsPresentation —
+// kept only so that path's pre-existing rendering stays byte-for-byte
+// unchanged. A decision-context row (showStatus=true) never has anything to
+// compare: the screenshot/typed odds a player submitted are not a real
+// offer (see BetPreviewCard.tsx's own header) and must never be shown or
+// compared against the current price — so getOddsPresentation below only
+// ever returns "prominent" (one clean current-odds value) or "unavailable".
 export type OddsPresentation =
   | { mode: "prominent"; value: number }
-  | { mode: "dual"; submitted: number; current: number }
+  | { mode: "unavailable" }
   | { mode: "plain"; odds: number | null; currentOdds: number | null };
 
 // UI Polish — the odds-presentation decision, extracted as a pure function
 // so it's unit-testable without this project's deliberately absent
 // DOM-rendering test infra (same pattern as BetPreviewCard.tsx's
 // isProviderUnavailable). Never returns "prominent" for anything other than
-// VERIFIED — an unavailable/unverified selection must never render a value
-// that looks like a confirmed price (see this file's own test suite).
+// VERIFIED/ODDS_CHANGED — an unmatched selection (NOT_FOUND/UNAVAILABLE/
+// PENDING) must never render a value that looks like a confirmed price (see
+// this file's own test suite). VERIFIED and ODDS_CHANGED render IDENTICALLY
+// — both are real, provider-confirmed, current prices; ODDS_CHANGED only
+// additionally gates CONFIRM-time reconfirmation (a separate, untouched
+// mechanism — see betConfirmApi.ts), which this preview-time presentation
+// has no part in. Takes only currentOdds, never the submitted value — a
+// player must only ever see BetPilot's current offer, never what they
+// typed or what a screenshot said.
 export function getOddsPresentation(
   oddsStatus: string | null | undefined,
-  odds: number | null,
   currentOdds: number | null,
 ): OddsPresentation {
-  const isVerified = oddsStatus === "VERIFIED";
-  const isChanged = oddsStatus === "ODDS_CHANGED";
-  const prominentOdds = currentOdds ?? odds;
-
-  if (isVerified && prominentOdds !== null) {
-    return { mode: "prominent", value: prominentOdds };
+  const isConfirmable = oddsStatus === "VERIFIED" || oddsStatus === "ODDS_CHANGED";
+  if (isConfirmable && currentOdds !== null) {
+    return { mode: "prominent", value: currentOdds };
   }
-  if (isChanged && odds !== null && currentOdds !== null) {
-    return { mode: "dual", submitted: odds, current: currentOdds };
-  }
-  return { mode: "plain", odds, currentOdds };
+  return { mode: "unavailable" };
 }
 
 export default function SelectionRow({ selection, legLabel, showStatus = true }: SelectionRowProps) {
   const odds = toNumber(selection.odds);
   const currentOdds = showStatus ? toNumber(selection.currentOdds) : null;
-  const statusBadge = showStatus ? getOddsStatusBadge(selection.oddsStatus) : null;
+  // M4.1 — VERIFIED/ODDS_CHANGED are both the normal "ready to confirm"
+  // state now that they render identically (see getOddsPresentation above);
+  // a badge would only ever announce the exact screenshot-vs-provider
+  // distinction the product rule hides. Only a genuinely blocking status
+  // (NOT_FOUND/UNAVAILABLE/PENDING) still shows a badge, explaining why
+  // Confirm is disabled.
+  const isConfirmableStatus = selection.oddsStatus === "VERIFIED" || selection.oddsStatus === "ODDS_CHANGED";
+  const statusBadge = showStatus && !isConfirmableStatus ? getOddsStatusBadge(selection.oddsStatus) : null;
   const eventDateTime = formatEventDateTime(selection.eventStartTime);
 
   // Reuses statusBadge.color computed above (one source of truth for status
   // color, same as the badge pill) rather than inventing a new palette.
-  // Text labels ("Submitted"/"Current"/"Odds") are the accessible signal in
-  // every branch — color is only ever a secondary cue, never the sole
-  // indicator.
   const statusColor = statusBadge?.color ?? "#ffffff";
   // Scoped to decision contexts only (showStatus=true — Preview/
   // Confirmation Ticket/Pending Queue): a review-context row (Active Bets/
@@ -89,7 +102,7 @@ export default function SelectionRow({ selection, legLabel, showStatus = true }:
   // call getOddsPresentation there, since oddsStatus alone (without the
   // showStatus gate) can't distinguish the two contexts.
   const presentation: OddsPresentation = showStatus
-    ? getOddsPresentation(selection.oddsStatus, odds, currentOdds)
+    ? getOddsPresentation(selection.oddsStatus, currentOdds)
     : { mode: "plain", odds, currentOdds: null };
 
   return (
@@ -133,31 +146,22 @@ export default function SelectionRow({ selection, legLabel, showStatus = true }:
           </p>
 
           {presentation.mode === "prominent" ? (
-            // Submitted odds equal (or were promoted from) the verified
-            // current price — showing both fields would just repeat the
-            // same number twice, so this collapses to one prominent value.
+            // The one and only value a player sees: BetPilot's current
+            // offer for this leg. No comparison, no second number.
             <div className="mt-1.5 flex items-baseline gap-1.5">
               <span className="text-xs text-slate-500">Odds</span>
               <span className="text-base font-bold" style={{ color: statusColor }}>
                 {formatAmount(presentation.value)}
               </span>
             </div>
-          ) : presentation.mode === "dual" ? (
-            // Genuinely different values — both stay visible, clearly
-            // labeled; the current price is the prominent one since that's
-            // what re-confirming would accept.
-            <div className="mt-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-              <span className="text-xs text-slate-500">Submitted {formatAmount(presentation.submitted)}</span>
-              <span className="text-base font-bold" style={{ color: statusColor }}>
-                Current {formatAmount(presentation.current)}
-              </span>
-            </div>
+          ) : presentation.mode === "unavailable" ? (
+            <div className="mt-1.5 text-xs text-slate-500">Odds: —</div>
           ) : (
-            <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
-              <span>Odds: {presentation.odds !== null ? formatAmount(presentation.odds) : "—"}</span>
-              {showStatus && presentation.currentOdds !== null && (
-                <span>Current: {formatAmount(presentation.currentOdds)}</span>
-              )}
+            // Review-context only (showStatus=false) — the bet's own final,
+            // already-accepted odds; unrelated to the preview/confirm-time
+            // concerns above.
+            <div className="mt-1.5 text-xs text-slate-500">
+              Odds: {presentation.odds !== null ? formatAmount(presentation.odds) : "—"}
             </div>
           )}
         </div>

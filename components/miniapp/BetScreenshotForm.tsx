@@ -261,7 +261,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
       // the odds data updates) so the existing "Confirm bet" button is what
       // the player must explicitly tap again.
       if (result.failure.kind === "odds_changed") {
-        const update = buildOddsChangedReconfirm(preview, result.failure);
+        const update = buildOddsChangedReconfirm(result.failure);
         setPreview(update.preview);
         setPhase("ready");
         setOddsChangedInfo(update);
@@ -446,19 +446,8 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
                 style={{ background: "rgba(255,255,255,0.03)", border: "1px solid #E8B84A33" }}
               >
                 <p className="text-sm font-semibold" style={{ color: "#E8B84A" }}>
-                  {oddsChangedInfo.title}
+                  {oddsChangedInfo.message}
                 </p>
-                <p className="mt-1 text-xs leading-relaxed text-slate-400">{oddsChangedInfo.body}</p>
-                {oddsChangedInfo.changedSelections.length > 0 && (
-                  <ul className="mt-2 space-y-1">
-                    {oddsChangedInfo.changedSelections.map((change, index) => (
-                      <li key={`${change.event}-${index}`} className="text-xs" style={{ color: "#E8B84A" }}>
-                        {change.event} / {change.from} → {change.to}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <p className="mt-2 text-xs leading-relaxed text-slate-400">{oddsChangedInfo.footer}</p>
               </div>
             ) : (
               error && (

@@ -1339,6 +1339,77 @@ test("Step 15I (G): the provider price moves between preview and confirm — 409
   assert.equal(db._debug.betCount(), 1);
 });
 
+// M4.1 — CLEAN PLAYER ODDS UX, TEST 5: repeated market movement (the exact
+// scenario given: preview 1.39, first confirm sees 1.35, second confirm
+// sees 1.32) must require an explicit reconfirmation at EVERY step — never
+// silently accept a moved price, no matter how many times it moves before
+// the player catches up. Uses this file's own unmodified
+// ODDS_CHANGED_RECONFIRM_REQUIRED mechanism twice in a row, then a third,
+// final confirmation once the market genuinely returns to the originally
+// quoted 1.39 — proving the existing, untouched confirm-time safety layer
+// (verifyPreviewFreshness.ts) already has exactly this property.
+test("M4.1 test 5: repeated odds movement (1.39 -> 1.35 -> 1.32) requires reconfirmation at every step, never silently accepted, stake 5", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 5,
+    selections: [
+      { sport: "Football", event: "Real Madrid vs Real Sociedad", market: null, selection: "Real Madrid Win", submittedOdds: 1.39 },
+    ],
+  };
+  const preview = await buildBetSlipPreview(slip, PLAYER_ID, PREVIEW_SECRET, {
+    verifyOddsFn: async () => ({
+      matched: true, withinTolerance: true, sourceOdds: 1.39, submittedOdds: 1.39, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null,
+    }),
+  });
+  assert.ok(preview.previewToken);
+
+  const db = createFakeDb();
+
+  // Step 1: preview quoted 1.39, market has moved to 1.35 — must 409, no Bet.
+  const firstRes = await handleBetConfirm(
+    confirmRequest(preview.previewToken),
+    fakeOptions(db, {
+      verifyOddsFn: fakeVerifyOddsFnByEvent({ "Real Madrid vs Real Sociedad": oddsChangedResult(1.35, 1.39) }),
+    }),
+  );
+  assert.equal(firstRes.status, 409);
+  const firstBody = (await json(firstRes)) as { error: string; refreshedPreview: { selections: Array<{ currentOdds: number | null }> }; refreshedPreviewToken: string | null };
+  assert.equal(firstBody.error, "ODDS_CHANGED_RECONFIRM_REQUIRED");
+  assert.equal(firstBody.refreshedPreview.selections[0].currentOdds, 1.35, "the player's new offer reflects the just-observed 1.35");
+  assert.equal(db._debug.betCount(), 0, "no Bet after the first moved price");
+
+  // Step 2: the market has ALREADY moved again to 1.32 by the time the
+  // player reconfirms — the second confirmation must ALSO 409, never treat
+  // "the player already saw one odds-changed warning" as license to accept
+  // whatever price comes next.
+  const secondRes = await handleBetConfirm(
+    confirmRequest(firstBody.refreshedPreviewToken),
+    fakeOptions(db, {
+      verifyOddsFn: fakeVerifyOddsFnByEvent({ "Real Madrid vs Real Sociedad": oddsChangedResult(1.32, 1.39) }),
+    }),
+  );
+  assert.equal(secondRes.status, 409);
+  const secondBody = (await json(secondRes)) as { error: string; refreshedPreview: { selections: Array<{ currentOdds: number | null }> }; refreshedPreviewToken: string | null };
+  assert.equal(secondBody.error, "ODDS_CHANGED_RECONFIRM_REQUIRED");
+  assert.equal(secondBody.refreshedPreview.selections[0].currentOdds, 1.32, "the player's new offer reflects the further-moved 1.32");
+  assert.equal(db._debug.betCount(), 0, "still no Bet after a second consecutive moved price");
+
+  // Step 3: the market is finally back at the originally-quoted 1.39 — only
+  // now may the explicit confirmation succeed.
+  const thirdRes = await handleBetConfirm(
+    confirmRequest(secondBody.refreshedPreviewToken),
+    fakeOptions(db, {
+      verifyOddsFn: fakeVerifyOddsFnByEvent({
+        "Real Madrid vs Real Sociedad": { matched: true, withinTolerance: true, sourceOdds: 1.39, submittedOdds: 1.39, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null },
+      }),
+    }),
+  );
+  assert.equal(thirdRes.status, 200);
+  const thirdBody = (await json(thirdRes)) as { bet: Record<string, unknown> };
+  assert.equal(thirdBody.bet.odds, 1.39);
+  assert.equal(db._debug.betCount(), 1, "exactly one Bet, created only once the player explicitly confirmed a price that matched what they were shown");
+});
+
 // ---------------------------------------------------------------------
 // Step 15J — a SINGLE token whose odds never resolved (submittedOdds was
 // null and the Step 15I auto-lookup either failed or never ran) must never

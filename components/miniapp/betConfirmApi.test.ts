@@ -208,38 +208,6 @@ function refreshedSinglePreviewBody() {
   };
 }
 
-function stalePreviewSuccess(): import("./betPreviewApi").BetPreviewSuccess {
-  return {
-    preview: {
-      type: "SINGLE",
-      stake: 100,
-      totalOdds: 2.1,
-      potentialWin: 210,
-      selections: [
-        {
-          sport: "Football",
-          event: "Real Madrid vs Barcelona",
-          market: null,
-          selection: "Real Madrid Win",
-          marketType: null,
-          participant: null,
-          line: null,
-          submittedOdds: 2.1,
-          currentOdds: 2.1,
-          oddsStatus: "VERIFIED",
-          bookmaker: "Bet365",
-          discrepancyPercent: 0,
-          homeTeamName: null,
-          awayTeamName: null,
-          competitionName: null,
-          eventStartTime: null,
-        },
-      ],
-    },
-    previewToken: "stale-token-abc",
-  };
-}
-
 test("fetchBetConfirm: a valid ODDS_CHANGED_RECONFIRM_REQUIRED 409 is parsed into the dedicated odds_changed failure", async () => {
   const restore = stubFetch({
     status: 409,
@@ -374,118 +342,42 @@ test("fetchBetConfirm: a non-object refreshedPreview on a 409 falls back to inva
 // Step 15B — buildOddsChangedReconfirm (shared pure helper)
 // ---------------------------------------------------------------------
 
-test("buildOddsChangedReconfirm: the returned preview carries the fresh token, never the stale one", () => {
-  const stale = stalePreviewSuccess();
+test("buildOddsChangedReconfirm: the returned preview carries the fresh token", () => {
   const failure: import("./betConfirmApi").BetConfirmOddsChangedFailure = {
     kind: "odds_changed",
     refreshedPreview: refreshedSinglePreviewBody() as import("./betPreviewApi").BetPreview,
     refreshedPreviewToken: "fresh-token-xyz",
   };
 
-  const result = buildOddsChangedReconfirm(stale, failure);
+  const result = buildOddsChangedReconfirm(failure);
 
   assert.equal(result.preview.previewToken, "fresh-token-xyz");
-  assert.notEqual(result.preview.previewToken, stale.previewToken);
   assert.deepEqual(result.preview.preview, failure.refreshedPreview);
 });
 
-test("buildOddsChangedReconfirm: UI-E2 presentation — fixed title/body/footer, and the changed selection carries the old and new odds", () => {
-  const stale = stalePreviewSuccess(); // submittedOdds 2.1
+// M4.1 — CLEAN PLAYER ODDS UX: the reconfirm message must never leak the
+// screenshot-vs-provider comparison this stage removes — no old/new
+// figures, no "→", no percentage, no "Odds changed"/"Odds updated" labels
+// (both explicitly banned by the product rule), no per-selection detail at
+// all. The player's new offer is already fully expressed by the staged
+// `preview` (Odds/Potential win) — this message only prompts the required
+// second tap.
+test("buildOddsChangedReconfirm: fixed, non-comparison message — no odds figures, no arrows, no banned labels", () => {
   const failure: import("./betConfirmApi").BetConfirmOddsChangedFailure = {
     kind: "odds_changed",
     refreshedPreview: refreshedSinglePreviewBody() as import("./betPreviewApi").BetPreview, // currentOdds 1.95
     refreshedPreviewToken: "fresh-token-xyz",
   };
 
-  const result = buildOddsChangedReconfirm(stale, failure);
+  const result = buildOddsChangedReconfirm(failure);
 
-  assert.equal(result.title, "Odds updated");
-  assert.equal(
-    result.body,
-    "One or more selections have new odds. Your total odds and potential win have been recalculated.",
-  );
-  assert.equal(result.footer, "Please review the updated odds before confirming.");
-
-  assert.equal(result.changedSelections.length, 1);
-  assert.equal(result.changedSelections[0].event, "Real Madrid vs Barcelona");
-  assert.equal(result.changedSelections[0].from, "2.10");
-  assert.equal(result.changedSelections[0].to, "1.95");
-});
-
-test("buildOddsChangedReconfirm: a null stale preview (no prior preview in state) still produces a safe changed-selection entry, old odds shown as unknown", () => {
-  const failure: import("./betConfirmApi").BetConfirmOddsChangedFailure = {
-    kind: "odds_changed",
-    refreshedPreview: refreshedSinglePreviewBody() as import("./betPreviewApi").BetPreview,
-    refreshedPreviewToken: "fresh-token-xyz",
-  };
-
-  const result = buildOddsChangedReconfirm(null, failure);
-
-  assert.equal(result.preview.previewToken, "fresh-token-xyz");
-  assert.equal(result.changedSelections.length, 1);
-  assert.equal(result.changedSelections[0].from, "—"); // unknown old odds rendered as em dash, not a crash
-  assert.equal(result.changedSelections[0].to, "1.95");
-});
-
-// ---------------------------------------------------------------------
-// UI-E2 — only genuinely changed selections are included; an unchanged
-// selection (e.g. RB Leipzig 1.53 -> 1.53) must never appear as noise.
-// Uses the exact submittedOdds === currentOdds numeric comparison already
-// serialized by the server (no tolerance, no Number()/parseFloat()).
-// ---------------------------------------------------------------------
-
-function twoLegStalePreview(): import("./betPreviewApi").BetPreviewSuccess {
-  const base = stalePreviewSuccess();
-  return {
-    preview: {
-      ...base.preview,
-      selections: [
-        base.preview.selections[0],
-        {
-          ...base.preview.selections[0],
-          event: "RB Leipzig vs Gladbach",
-          selection: "RB Leipzig Win",
-          submittedOdds: 1.53,
-          currentOdds: 1.53,
-          oddsStatus: "VERIFIED",
-        },
-      ],
-    },
-    previewToken: base.previewToken,
-  };
-}
-
-function twoLegRefreshedPreviewBody() {
-  const base = refreshedSinglePreviewBody();
-  return {
-    ...base,
-    selections: [
-      base.selections[0],
-      {
-        ...base.selections[0],
-        event: "RB Leipzig vs Gladbach",
-        selection: "RB Leipzig Win",
-        submittedOdds: 1.53,
-        currentOdds: 1.53,
-        oddsStatus: "VERIFIED",
-      },
-    ],
-  };
-}
-
-test("buildOddsChangedReconfirm: an unchanged selection (RB Leipzig 1.53 -> 1.53) is filtered out, only the genuinely changed selection is listed", () => {
-  const stale = twoLegStalePreview();
-  const failure: import("./betConfirmApi").BetConfirmOddsChangedFailure = {
-    kind: "odds_changed",
-    refreshedPreview: twoLegRefreshedPreviewBody() as import("./betPreviewApi").BetPreview,
-    refreshedPreviewToken: "fresh-token-xyz",
-  };
-
-  const result = buildOddsChangedReconfirm(stale, failure);
-
-  assert.equal(result.changedSelections.length, 1);
-  assert.equal(result.changedSelections[0].event, "Real Madrid vs Barcelona");
-  assert.ok(!result.changedSelections.some((change) => change.event === "RB Leipzig vs Gladbach"));
+  assert.equal(result.message, "Your offer has been refreshed. Please review and confirm again.");
+  assert.ok(!result.message.includes("→"));
+  assert.ok(!result.message.includes("2.1"));
+  assert.ok(!result.message.includes("1.95"));
+  assert.ok(!result.message.includes("%"));
+  assert.ok(!/odds (changed|updated|verified)/i.test(result.message));
+  assert.ok(!("changedSelections" in result));
 });
 
 test("getBetConfirmErrorMessage: odds_changed has a defensive fallback message even though forms intercept it first", () => {

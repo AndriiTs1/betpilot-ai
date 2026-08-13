@@ -55,6 +55,22 @@ export function formatPotentialWin(potentialWin: number | null): string {
   return potentialWin !== null ? `${formatAmount(potentialWin)} USDC` : "Not available";
 }
 
+// M4.1 — CLEAN PLAYER ODDS UX. The single "Odds" value a SINGLE preview
+// shows the player: BetPilot's CURRENT provider price, never the
+// screenshot/typed submittedOdds a player's input merely claimed (see this
+// file's own header — a screenshot is an INPUT, never an offer). currentOdds
+// is null only when the provider never matched this selection at all
+// (NOT_FOUND/UNAVAILABLE/PENDING) — confirmation is already blocked in that
+// case (canConfirmBetSlip.ts's hasUnverifiedOddsStatus), and the
+// OddsStatus box below explains why; there is deliberately no fallback to
+// submittedOdds here; showing it would misrepresent an unconfirmed
+// screenshot/typed number as a real offer. Exported so this is
+// unit-testable without this project's absent DOM-rendering test infra
+// (same pattern as formatPotentialWin above).
+export function formatSingleOdds(currentOdds: number | null): string {
+  return currentOdds !== null ? formatAmount(currentOdds) : "Not available";
+}
+
 // Shared preview display — used by both BetTextForm (text flow) and
 // BetScreenshotForm (screenshot flow, Stage 4.5D). Extracted out of
 // BetTextForm.tsx rather than duplicated: the two flows return the exact
@@ -103,11 +119,7 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
           wrap
         />
         <PreviewRow label="Stake" value={formatAmount(preview.stake)} />
-        <PreviewRow
-          label="Submitted odds"
-          value={selection.submittedOdds !== null ? formatAmount(selection.submittedOdds) : "Not provided"}
-          emphasis="prominent"
-        />
+        <PreviewRow label="Odds" value={formatSingleOdds(selection.currentOdds)} emphasis="prominent" />
         <PreviewRow
           label="Potential win"
           value={formatPotentialWin(preview.potentialWin)}
@@ -260,49 +272,15 @@ export function OddsStatus({ preview }: { preview: BetPreview }) {
     );
   }
 
-  if (selection.oddsStatus === "VERIFIED") {
-    const discrepancy =
-      selection.discrepancyPercent !== null ? Math.abs(selection.discrepancyPercent).toFixed(2) : "—";
-    return (
-      <StatusBox
-        tone="success"
-        label="✓ Odds verified"
-        centered
-        description={
-          <>
-            Verified odds: {selection.currentOdds !== null ? formatAmount(selection.currentOdds) : "—"}
-            <br />
-            Difference: {discrepancy}%
-          </>
-        }
-      />
-    );
-  }
-
-  if (selection.oddsStatus === "ODDS_CHANGED") {
-    const discrepancy =
-      selection.discrepancyPercent !== null ? Math.abs(selection.discrepancyPercent).toFixed(2) : "—";
-    return (
-      <StatusBox
-        tone="warning"
-        label="Odds changed"
-        description={
-          <>
-            Submitted: {formatAmount(selection.submittedOdds)}
-            <br />
-            Current: {selection.currentOdds !== null ? formatAmount(selection.currentOdds) : "—"}
-            <br />
-            Difference: {discrepancy}%
-            {selection.bookmaker ? (
-              <>
-                <br />
-                {selection.bookmaker}
-              </>
-            ) : null}
-          </>
-        }
-      />
-    );
+  // M4.1 — CLEAN PLAYER ODDS UX. VERIFIED and ODDS_CHANGED are both a
+  // normal, ready-to-confirm selection (the provider positively matched it
+  // and has a real current price) — the "Odds" row above already shows
+  // that price. Neither status renders a box here: there is nothing to
+  // explain, and the old boxes existed only to show the exact
+  // screenshot-vs-provider comparison (submitted/current/difference/
+  // bookmaker) the product rule forbids surfacing to the player.
+  if (selection.oddsStatus === "VERIFIED" || selection.oddsStatus === "ODDS_CHANGED") {
+    return null;
   }
 
   // NOT_FOUND and the reserved-but-unreachable PENDING share this fixed,
@@ -332,17 +310,10 @@ function ExpressOddsSummary({ preview }: { preview: BetPreview }) {
     return <StatusBox tone="warning" label="Odds could not be verified" description={ODDS_UNVERIFIED_MESSAGE} />;
   }
 
-  const verifiedCount = preview.selections.filter((s) => s.oddsStatus === "VERIFIED").length;
-  const total = preview.selections.length;
-  const allVerified = verifiedCount === total;
-
-  return (
-    <StatusBox
-      tone={allVerified ? "success" : "warning"}
-      label={`${verifiedCount} of ${total} selections verified`}
-      description="Each selection's status is shown above."
-    />
-  );
+  // M4.1 — every leg is VERIFIED/ODDS_CHANGED (both real, confirmable,
+  // provider-matched prices) — same reasoning as the SINGLE branch above:
+  // each leg's own current odds is already shown, nothing left to explain.
+  return null;
 }
 
 function StatusBox({

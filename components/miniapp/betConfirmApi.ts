@@ -298,81 +298,40 @@ export function getBetConfirmErrorMessage(failure: BetConfirmFailure): string {
   }
 }
 
-function formatOdds(value: number | null): string {
-  return value !== null ? value.toFixed(2) : "—";
-}
-
-// UI-E2 — one selection whose odds genuinely changed between the stale
-// preview and the server's fresh refreshedPreview. from/to are already
-// formatted (formatOdds) — never re-parsed by a renderer.
-export interface OddsChangedSelectionChange {
-  event: string;
-  from: string;
-  to: string;
-}
-
 export interface OddsChangedReconfirmUpdate {
   // Always a real, non-null previewToken (validated by fetchBetConfirm
   // before this is ever called) — a form can hand this straight to
   // canConfirmBetSlip/fetchBetConfirm exactly like any other preview.
   preview: BetPreviewSuccess;
-  // UI-E2 — fixed copy (never interpolated), presented as an
-  // informational/warning card, not an error — this is the existing,
-  // already-correct reconfirmation security contract behaving normally,
-  // not a failure. See BetTextForm.tsx/BetScreenshotForm.tsx for the
-  // actual rendering (amber, same tokens as the existing AI-timeout card).
-  title: string;
-  body: string;
-  // UI-E2 — ONLY selections whose odds actually changed (exact equality
-  // on the already-numeric submittedOdds/currentOdds fields — never
-  // Number()/parseFloat(), never a tolerance window; both values are
-  // already Decimal-precise numbers from the server's own serialization,
-  // so a genuine non-change always compares exactly equal). A leg the
-  // server didn't touch is simply excluded, never rendered as
-  // "Team: 1.53 → 1.53" noise.
-  changedSelections: OddsChangedSelectionChange[];
-  footer: string;
+  // M4.1 — CLEAN PLAYER ODDS UX. Fixed copy (never interpolated),
+  // presented as an informational/warning card, not an error — this is the
+  // existing, already-correct reconfirmation security contract behaving
+  // normally, not a failure. Deliberately just ONE neutral line: this is
+  // BETPILOT PREVIEW ODDS vs BETPILOT CONFIRM-TIME ODDS, never screenshot
+  // odds vs BetPilot odds — the player is simply shown their new offer
+  // (already staged into `preview` above, via the "Odds"/"Potential win"
+  // fields) and asked to confirm it again. No per-selection old→new
+  // figures, no difference percentage, no provider name — see
+  // BetTextForm.tsx/BetScreenshotForm.tsx for the actual rendering.
+  message: string;
 }
 
-const ODDS_CHANGED_TITLE = "Odds updated";
-const ODDS_CHANGED_BODY =
-  "One or more selections have new odds. Your total odds and potential win have been recalculated.";
-const ODDS_CHANGED_FOOTER = "Please review the updated odds before confirming.";
+const ODDS_CHANGED_MESSAGE = "Your offer has been refreshed. Please review and confirm again.";
 
 // Step 15B — the one piece of logic both BetTextForm and BetScreenshotForm
 // need identically when a confirm attempt comes back as
 // ODDS_CHANGED_RECONFIRM_REQUIRED: build the new preview/token pair to
 // stage (never auto-submitted — the caller still requires an explicit
-// Confirm tap) and the presentation data for old vs. new odds per changed
-// selection. `stalePreview` is the preview the player was just looking at
-// (still in the form's own state at the moment the confirm response comes
-// back) — used only to read the odds they last saw, never resubmitted
-// anywhere; the returned `preview` is built entirely from the server's
+// Confirm tap). The returned `preview` is built entirely from the server's
 // fresh refreshedPreview/refreshedPreviewToken, never mixed with anything
-// stale.
-export function buildOddsChangedReconfirm(
-  stalePreview: BetPreviewSuccess | null,
-  failure: BetConfirmOddsChangedFailure,
-): OddsChangedReconfirmUpdate {
-  const staleSelections = stalePreview?.preview.selections ?? [];
-
-  const changedSelections: OddsChangedSelectionChange[] = [];
-  failure.refreshedPreview.selections.forEach((selection, index) => {
-    const staleOdds = staleSelections[index]?.submittedOdds ?? null;
-    if (staleOdds === selection.currentOdds) return;
-    changedSelections.push({
-      event: selection.event,
-      from: formatOdds(staleOdds),
-      to: formatOdds(selection.currentOdds),
-    });
-  });
-
+// stale — repeated odds movement (a second, third, ... refresh before the
+// player taps Confirm) simply calls this again with the latest failure,
+// producing the same safe re-stage-and-wait-for-explicit-tap behavior each
+// time; there is no code path that ever auto-accepts a refreshed price.
+export function buildOddsChangedReconfirm(failure: BetConfirmOddsChangedFailure): OddsChangedReconfirmUpdate {
   return {
     preview: { preview: failure.refreshedPreview, previewToken: failure.refreshedPreviewToken },
-    title: ODDS_CHANGED_TITLE,
-    body: ODDS_CHANGED_BODY,
-    changedSelections,
-    footer: ODDS_CHANGED_FOOTER,
+    message: ODDS_CHANGED_MESSAGE,
   };
 }
 
