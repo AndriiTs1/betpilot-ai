@@ -675,3 +675,88 @@ test("M1.1: a genuine Cyrillic team name (letters outside a-z) still corroborate
   assert.equal(lines.length, 1);
   assert.equal(lines[0].value, "+1.5");
 });
+
+/* ============================================================================
+ * SCREENSHOT QA-CORE M1.3 — structural control-row detection. A real
+ * production case (Case D, laliga4.jpg) proved M1.1's guard insufficient:
+ * U+2139 "ℹ" INFORMATION SOURCE passes a bare \p{L} test despite being an
+ * icon glyph, not a name. Rather than exclude that one codepoint (the same
+ * whack-a-mole pattern already fixed twice), this detects the STRUCTURE of
+ * a quick-add/quick-stake preset row directly: two or more consecutive
+ * bare-number-or-icon tokens on the same source line, excluded from every
+ * role before any marker/window classification runs at all.
+ * ============================================================================ */
+
+test("M1.3 A: 'ℹ +10 +25 +100' — none of the preset values become any evidence", () => {
+  const evidence = extractNumericRoleEvidence("ℹ +10 +25 +100");
+  assert.deepEqual(evidence, []);
+});
+
+test("M1.3 B: 'ⓘ +10 +25 +100' — none of the preset values become any evidence", () => {
+  const evidence = extractNumericRoleEvidence("ⓘ +10 +25 +100");
+  assert.deepEqual(evidence, []);
+});
+
+test("M1.3 C: '+10 +25 +100' (no leading icon) — none of the preset values become any evidence", () => {
+  const evidence = extractNumericRoleEvidence("+10 +25 +100");
+  assert.deepEqual(evidence, []);
+});
+
+test("M1.3 D: '+10 +25 +100 All in' — the preset row is still excluded even with trailing real words", () => {
+  const evidence = extractNumericRoleEvidence("+10 +25 +100 All in");
+  assert.deepEqual(evidence, []);
+});
+
+test("M1.3 E: 'Arsenal +1.5' — a single signed number after a real word is NOT a control row", () => {
+  const lines = findByRole(extractNumericRoleEvidence("Arsenal +1.5\nставка 10"), "LINE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].value, "+1.5");
+});
+
+test("M1.3 F: 'Реал -1.5' — a single signed number after a real Cyrillic word is NOT a control row", () => {
+  const lines = findByRole(extractNumericRoleEvidence("Реал -1.5\nставка 10"), "LINE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].value, "-1.5");
+});
+
+test("M1.3 G: 'Over 2.5' — TOTALS line evidence is unaffected by the control-row rule", () => {
+  const lines = findByRole(extractNumericRoleEvidence("Over 2.5\nставка 10"), "LINE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].value, "2.5");
+});
+
+test("M1.3 H: 'ТБ 2.5' — TOTALS shorthand line evidence is unaffected by the control-row rule", () => {
+  const lines = findByRole(extractNumericRoleEvidence("ТБ 2.5\nставка 10"), "LINE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].value, "2.5");
+});
+
+test("M1.3: a real stake on its OWN line directly after a SIGNED preset row is never swept into the row's exclusion (the newline boundary is the whole point)", () => {
+  // Signed row (matches the actual control-row membership rule — see
+  // isSignedBareNumberToken's own header for why membership is signed-only).
+  const text = ["+10 +25 +50 +100 +200", "100", "Ставка"].join("\n");
+  // The preset row (+10/+25/+50/+100/+200) is excluded; the real stake
+  // "100" on its own following line is a completely separate token run and
+  // must remain eligible for evidence (here: SOLE_CANDIDATE, since it is
+  // the only number left unclaimed once the row is excluded).
+  const evidence = extractNumericRoleEvidence(text);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].value, "100");
+  assert.equal(evidence[0].confidence, "SOLE_CANDIDATE");
+});
+
+test("M1.3: an UNSIGNED bare preset row (M1's original Leipzig shape) is not matched by control-row membership itself, but still never produces STAKE evidence — protected by the pre-existing 'too many unclaimed numbers' rule, unchanged by this stage", () => {
+  const text = ["10 25 50 100 200", "100", "Ставка"].join("\n");
+  const evidence = extractNumericRoleEvidence(text);
+  // 6 unclaimed numbers total (5 preset + 1 real stake, "100" appearing
+  // twice as distinct occurrences) — SOLE_CANDIDATE requires exactly one,
+  // so none of them qualify. Genuinely nothing to report, same as before
+  // this stage.
+  assert.deepEqual(evidence, []);
+});
+
+test("M1.3: control-row exclusion never mutates originalText", () => {
+  const text = "ℹ +10 +25 +100";
+  extractNumericRoleEvidence(text);
+  assert.equal(text, "ℹ +10 +25 +100");
+});

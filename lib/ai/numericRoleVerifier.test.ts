@@ -732,3 +732,40 @@ test("M1.1 real Case 2 fixture: the STAKE claim (100) is unaffected by the LINE 
   assert.notEqual(result.verdict, "CONTRADICTED");
   assert.notEqual(result.verdict, "AMBIGUOUS");
 });
+
+/* ============================================================================
+ * SCREENSHOT QA-CORE M1.3 — real Case D fixture (laliga4.jpg). Fresh
+ * production SCREENSHOT_QA1_DIAGNOSTIC numeric_evidence trace, captured
+ * during the M1.2 audit:
+ *   role=LINE, verdict=CONTRADICTED, claimedValue="-1.5"
+ *   supportingEvidence: []
+ *   conflictingEvidence: [{value:"+10", confidence:"LABEL_STRONG", marker:"ℹ"}]
+ * The real U+2139 "ℹ" glyph — not U+24D8 "ⓘ" already covered by the M1.1
+ * fixture above — preceding a single quick-add "+10" control. Reconstructed
+ * faithfully below (not the literal captured transcript, same convention as
+ * every other real-incident fixture in this file).
+ * ============================================================================ */
+
+const CASE_D_QUICK_ADD_ICON_OCR_TEXT = ["Barcelona - Real Madrid", "-1.5", "1.90", "ℹ +10", "Ставка", "50"].join("\n");
+
+test("M1.3 real Case D fixture (real 'ℹ' U+2139 glyph): claim LINE=-1.5 is not CONTRADICTED or AMBIGUOUS because of the '+10' quick-add control", () => {
+  const evidence = extractNumericRoleEvidence(CASE_D_QUICK_ADD_ICON_OCR_TEXT);
+  const result = verifyNumericRoleClaim(claim("LINE", -1.5), evidence);
+  assert.notEqual(result.verdict, "CONTRADICTED");
+  assert.notEqual(result.verdict, "AMBIGUOUS");
+  assert.equal(result.conflictingEvidence.length, 0, "the 'ℹ +10' control must produce ZERO competing LINE evidence");
+});
+
+test("M1.3 real Case D fixture: the 'ℹ +10' control never becomes STAKE evidence either", () => {
+  const evidence = extractNumericRoleEvidence(CASE_D_QUICK_ADD_ICON_OCR_TEXT);
+  const result = verifyNumericRoleClaim(claim("STAKE", 50), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+  assert.equal(result.conflictingEvidence.length, 0);
+});
+
+test("M1.3 real Case D fixture: the 'ℹ +10' control never becomes ODDS evidence either", () => {
+  const evidence = extractNumericRoleEvidence(CASE_D_QUICK_ADD_ICON_OCR_TEXT);
+  const result = verifyNumericRoleClaim(claim("ODDS", 1.9), evidence);
+  assert.notEqual(result.verdict, "CONTRADICTED");
+  assert.notEqual(result.verdict, "AMBIGUOUS");
+});

@@ -118,6 +118,117 @@ function tokenize(text: string): Token[] {
 }
 
 /* -------------------------------------------------------------------------- */
+/* SCREENSHOT QA-CORE M1.3 — control-row detection: quick-add/quick-stake    */
+/* preset rows and similar bare UI controls, excluded from every role BEFORE */
+/* any marker/window classification runs, so no future icon glyph or button  */
+/* shape needs its own one-off exclusion here again.                         */
+/* -------------------------------------------------------------------------- */
+
+// A token is "word-like" only if it contains a genuine run of 2+ letters —
+// deliberately stronger than "contains any single Unicode Letter codepoint"
+// (M1.1's original guard): a lone stray icon glyph can still be
+// Unicode-categorized as a Letter (a real, proven production gap — U+2139
+// "ℹ" INFORMATION SOURCE is category Lo, unlike the visually similar U+24D8
+// "ⓘ" circled-i, category So/Symbol, which the bare check already caught),
+// but can never satisfy a 2-letter run. Every genuine participant/market
+// word, in any language, always can — even a short shorthand token like
+// "ТБ"/"PS".
+const WORD_LIKE_PATTERN = /\p{L}{2,}/u;
+
+function isWordLikeToken(text: string): boolean {
+  return WORD_LIKE_PATTERN.test(text);
+}
+
+// A bare number, signed or unsigned, with nothing else glued to it — no
+// currency suffix, no attached letters. Exactly the shape a quick-stake/
+// quick-add preset button's own OCR'd text takes ("+10", "25", "100"), and
+// also the shape a genuine market LINE value takes when it carries its own
+// sign ("+1.5", "-1.5").
+const BARE_NUMBER_TOKEN_PATTERN = /^[+-]?\d+(?:[.,]\d+)?$/;
+
+function isBareNumberToken(text: string): boolean {
+  return BARE_NUMBER_TOKEN_PATTERN.test(text);
+}
+
+// SIGNED specifically — control-row *membership* deliberately requires the
+// sign, matching the actual bug mechanism exactly: shorthandClassifier.ts's
+// SPREAD_BARE_SIGNED_PATTERN (the pattern this whole stage exists to guard
+// against) only ever matches a SIGNED number in the first place. A bare
+// UNSIGNED number ("2.5", "10") is completely ordinary elsewhere in this
+// file's own established shorthand — "Арсенал ТБ 2.5 10" (a line value
+// immediately followed by a stake, both unsigned, both legitimately
+// adjacent) is a real, already-tested pattern this file must never treat as
+// a control row. Restricting to signed numbers is what keeps that pattern
+// safe without weakening the actual fix at all — every real production
+// control-row example (quick-ADD buttons) is signed by its very nature (a
+// "+10"/"+25" button, never a bare unsigned preset in practice).
+const SIGNED_BARE_NUMBER_TOKEN_PATTERN = /^[+-]\d+(?:[.,]\d+)?$/;
+
+function isSignedBareNumberToken(text: string): boolean {
+  return SIGNED_BARE_NUMBER_TOKEN_PATTERN.test(text);
+}
+
+// An icon/symbol token: no real word AND no digit at all — never a number
+// written in any form (signed, unsigned, or otherwise), so this can never
+// overlap with — and accidentally sweep in — an ordinary bare numeric token.
+function isIconLikeToken(text: string): boolean {
+  return !isWordLikeToken(text) && !/\d/.test(text);
+}
+
+// A token can anchor or extend a control-row run if it is either a signed
+// bare number itself, or a genuine icon/symbol with no digit and no real
+// word at all. Never a bare unsigned number, and never a genuine
+// participant/market word.
+function isControlRowToken(text: string): boolean {
+  return isSignedBareNumberToken(text) || isIconLikeToken(text);
+}
+
+// Two or more is the whole signal: a single bare signed number next to a
+// real word ("Arsenal +1.5") is completely ordinary market-line shorthand,
+// not a control — see this function's own tests for the full negative-case
+// list. Two or more bare/iconic tokens in an unbroken run ("+10 +25 +100",
+// "ℹ +10 +25 +100") has no other plausible reading on a real sportsbook
+// screen.
+const MIN_CONTROL_ROW_LENGTH = 2;
+
+// Structural, not lexical: a quick-add/quick-stake preset row (or similar
+// bare control cluster) is two or more consecutive tokens on the SAME
+// source line — never bridging a newline. This is what keeps a genuinely
+// separate field directly below a preset row (e.g. the real stake input,
+// almost always its own OCR line) from ever being swept into the row purely
+// because it happens to be numeric too. Every BARE NUMBER token inside a
+// qualifying run is reported for exclusion from every role (STAKE/LINE/
+// ODDS) and the SOLE_CANDIDATE fallback — a non-numeric control token (an
+// icon) has nothing to exclude for itself, it only ever anchors/extends the run.
+function findControlRowExclusions(text: string, tokens: readonly Token[]): ReadonlyArray<{ start: number; end: number }> {
+  const exclusions: Array<{ start: number; end: number }> = [];
+  let i = 0;
+
+  while (i < tokens.length) {
+    let j = i;
+    while (
+      j < tokens.length &&
+      isControlRowToken(tokens[j].text) &&
+      (j === i || !text.slice(tokens[j - 1].end, tokens[j].start).includes("\n"))
+    ) {
+      j += 1;
+    }
+
+    if (j - i >= MIN_CONTROL_ROW_LENGTH) {
+      for (let k = i; k < j; k += 1) {
+        if (isBareNumberToken(tokens[k].text)) {
+          exclusions.push({ start: tokens[k].start, end: tokens[k].end });
+        }
+      }
+    }
+
+    i = j > i ? j : i + 1;
+  }
+
+  return exclusions;
+}
+
+/* -------------------------------------------------------------------------- */
 /* STAKE / ODDS marker vocabulary — genuinely new, nothing to reuse          */
 /* -------------------------------------------------------------------------- */
 
@@ -454,10 +565,18 @@ interface LineEvidenceResult {
 // out-of-scope behavior change there. This guard only decides whether THIS
 // module trusts a classification as real LINE evidence — it changes nothing
 // about what shorthandClassifier.ts itself returns to any caller.
-const PARTICIPANT_NAME_LETTER_PATTERN = /\p{L}/u;
-
+//
+// SCREENSHOT QA-CORE M1.3 — strengthened to reuse isWordLikeToken (a 2+
+// letter run) instead of the original bare "contains any Letter codepoint"
+// test: a real production case proved the bare test insufficient (U+2139
+// "ℹ" passes it despite being an icon glyph, not a name). The control-row
+// pre-pass below now catches the common same-line case before this
+// function is even reached; this keeps the same, now-consistent word test
+// as a second layer for the residual case a classification window can
+// still combine (e.g. tokens separated by a newline, which the pre-pass
+// deliberately never bridges).
 function hasPlausibleParticipantName(name: string | null): boolean {
-  return name === null || PARTICIPANT_NAME_LETTER_PATTERN.test(name);
+  return name === null || isWordLikeToken(name);
 }
 
 function findLineEvidence(text: string, occurrences: readonly NumberOccurrence[], alreadyClaimed: readonly NumericRoleEvidence[]): LineEvidenceResult {
@@ -541,9 +660,19 @@ function findSoleCandidateEvidence(
 export function extractNumericRoleEvidence(originalText: string): readonly NumericRoleEvidence[] {
   const occurrences = findAllNumberOccurrences(originalText);
 
+  // SCREENSHOT QA-CORE M1.3 — computed once, up front, independent of and
+  // prior to every other pass below: a number inside a detected control row
+  // is excluded from STAKE/LINE/ODDS marker evidence AND the SOLE_CANDIDATE
+  // fallback, never just one of them.
+  const controlRowExclusions = findControlRowExclusions(originalText, tokenize(originalText));
+
   const numberBeforeMarkerResult = findNumberBeforeMarkerEvidence(originalText);
-  const markerEvidence = [...findMarkerBeforeNumberEvidence(originalText), ...numberBeforeMarkerResult.evidence];
-  const { lineEvidence, consumedSpans } = findLineEvidence(originalText, occurrences, markerEvidence);
+  const rawMarkerEvidence = [...findMarkerBeforeNumberEvidence(originalText), ...numberBeforeMarkerResult.evidence];
+  const markerEvidence = rawMarkerEvidence.filter((entry) => !controlRowExclusions.some((span) => spansOverlap(span, entry)));
+
+  const { lineEvidence: rawLineEvidence, consumedSpans } = findLineEvidence(originalText, occurrences, markerEvidence);
+  const lineEvidence = rawLineEvidence.filter((entry) => !controlRowExclusions.some((span) => spansOverlap(span, entry)));
+
   const claimedSoFar = [...markerEvidence, ...lineEvidence];
   // SCREENSHOT QA-1.3 — excludedSpans (a currency-suffixed potential-win/
   // payout/balance figure) are folded in here alongside consumedSpans, so
@@ -552,6 +681,7 @@ export function extractNumericRoleEvidence(originalText: string): readonly Numer
   const soleCandidateEvidence = findSoleCandidateEvidence(occurrences, claimedSoFar, [
     ...consumedSpans,
     ...numberBeforeMarkerResult.excludedSpans,
+    ...controlRowExclusions,
   ]);
 
   return [...markerEvidence, ...lineEvidence, ...soleCandidateEvidence].sort((a, b) => a.start - b.start);
