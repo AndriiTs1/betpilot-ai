@@ -2474,6 +2474,39 @@ test("QA-1.6 B (AWAY positive): claimed participant matches the real away team �
   assert.equal(verifiedToken.payload.canonicalSelectionType, "AWAY");
 });
 
+/* ============================================================================
+ * MASTER STAGE M2 / M3 Phase 9 — the real production case that motivated
+ * M2's decisive-margin fix, proven end-to-end (parse defer -> provider
+ * event match -> resolveParticipantSide reconciliation -> accept), not just
+ * at the isolated matcher-function level (already covered directly in
+ * teamNameMatcher.test.ts). Before M2, this exact shape — claim "Real
+ * Madrid" against a real event whose HOME team is literally "Real Madrid"
+ * and AWAY team is "Real Sociedad" — reached this reconciliation stage with
+ * a real, already-matched provider event and STILL got rejected
+ * (MARKET_INTENT_UNRECONCILED) purely because resolveParticipantSide
+ * returned AMBIGUOUS. M2 fixed the matcher; this test proves the fix reaches
+ * all the way through to a real accepted preview.
+ * ============================================================================ */
+
+test("M2 real production case, end-to-end: claim 'Real Madrid' against HOME 'Real Madrid' / AWAY 'Real Sociedad' — provider event already matched, reconciliation now resolves HOME instead of AMBIGUOUS", async () => {
+  const slip = pendingSlip("HOME", "Real Madrid", { event: "Real Madrid vs Real Sociedad", submittedOdds: 1.85 });
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    verifyOddsFn: async () => verifiedWithTeams(1.85, 1.85, "Real Madrid", "Real Sociedad"),
+  });
+
+  const previewSelection = result.preview.selections[0];
+  assert.equal(previewSelection.oddsStatus, "VERIFIED");
+  assert.equal(previewSelection.marketType, "MONEYLINE_3WAY");
+
+  assert.ok(result.previewToken !== null, "the bet must now reach a signed preview token instead of being rejected as MARKET_INTENT_UNRECONCILED");
+  const verifiedToken = verifyPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verifiedToken.ok, true);
+  if (!verifiedToken.ok) return;
+  assert.equal(verifiedToken.payload.canonicalMarketType, "MONEYLINE_3WAY");
+  assert.equal(verifiedToken.payload.canonicalSelectionType, "HOME");
+});
+
 test("QA-1.6 C: 'Home win' normalized to the home participant, provider confirms HOME — accepted", async () => {
   const slip = pendingSlip("HOME", "Arsenal", { event: "Arsenal vs Chelsea", submittedOdds: 1.5 });
 
@@ -3164,6 +3197,60 @@ test("SCREENSHOT ODDS QA-2 EXPRESS: every leg's current odds and the overall tot
   assert.equal(result.preview.totalOdds, 2.43);
   assert.equal(result.preview.potentialWin, 121.5); // 50 * 2.43
   assert.ok(result.previewToken !== null);
+});
+
+/* ============================================================================
+ * MASTER STAGE M3.1, Phase F — explicit CURRENT-ODDS-INVARIANT proofs using
+ * the task's own exact example numbers, for direct traceability. The
+ * invariant itself was already proven (with different numbers) by the
+ * SCREENSHOT ODDS QA-2 tests above and below — these two tests exist purely
+ * so "screenshot 2.34 -> provider 2.10" and "screenshot 2.00x1.80 -> provider
+ * 1.90x1.70" are each a literal, findable regression, not just implied by
+ * other fixtures' own numbers.
+ * ============================================================================ */
+
+test("MASTER STAGE M3.1 Phase F — SINGLE: screenshot odds 2.34 != offered odds 2.10; potential win uses 2.10 only", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 100,
+    selections: [{ sport: "Football", event: "Arsenal vs Chelsea", market: null, selection: "Arsenal", submittedOdds: 2.34 }],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: fakeOddsService([createVerifiedResult({ submittedOdds: "2.34", currentOdds: "2.10", provider: "THE_ODDS_API", checkedAt: CHECKED_AT })]),
+  });
+
+  const selection = result.preview.selections[0];
+  assert.equal(selection.submittedOdds, 2.34, "screenshot/submitted odds preserved as reference only");
+  assert.equal(selection.currentOdds, 2.1, "offered odds is the provider's current price");
+  assert.equal(result.preview.potentialWin, 210, "100 * 2.10, never 100 * 2.34");
+});
+
+test("MASTER STAGE M3.1 Phase F — EXPRESS: screenshot leg odds 2.00x1.80 != offered odds 1.90x1.70; total/potential win derive from 1.90x1.70 only", async () => {
+  const slip: ParsedBetSlip = {
+    type: "EXPRESS",
+    stake: 100,
+    selections: [
+      { sport: "Football", event: "Arsenal vs Chelsea", market: null, selection: "Arsenal", submittedOdds: 2.0 },
+      { sport: "Football", event: "Bayern Munich vs VfB Stuttgart", market: null, selection: "Bayern Munich", submittedOdds: 1.8 },
+    ],
+  };
+
+  const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, {
+    oddsVerificationService: fakeOddsService([
+      createVerifiedResult({ submittedOdds: "2.0", currentOdds: "1.9", provider: "THE_ODDS_API", checkedAt: CHECKED_AT }),
+      createVerifiedResult({ submittedOdds: "1.8", currentOdds: "1.7", provider: "THE_ODDS_API", checkedAt: CHECKED_AT }),
+    ]),
+  });
+
+  assert.equal(result.preview.selections[0].submittedOdds, 2.0);
+  assert.equal(result.preview.selections[0].currentOdds, 1.9);
+  assert.equal(result.preview.selections[1].submittedOdds, 1.8);
+  assert.equal(result.preview.selections[1].currentOdds, 1.7);
+
+  // 1.90 * 1.70 = 3.23 exactly — never 2.00 * 1.80 = 3.60 (screenshot).
+  assert.equal(result.preview.totalOdds, 3.23);
+  assert.equal(result.preview.potentialWin, 323); // 100 * 3.23
 });
 
 test("SCREENSHOT ODDS QA-2 EXPRESS: one leg unverified — fail-closed, no token, exactly the existing EXPRESS confirmation policy, unchanged in kind by this stage", async () => {

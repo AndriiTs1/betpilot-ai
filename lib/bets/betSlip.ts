@@ -98,6 +98,25 @@ export interface ParsedBetSlip {
   selections: BetSlipSelectionInput[];
 }
 
+// MASTER STAGE M3, Phase 3 — formalizing, not renaming: this IS the
+// project's canonical BetIntent/BetLegIntent boundary the target
+// architecture calls for (screenshot/typed extraction -> canonical intent ->
+// deterministic validation -> provider verification -> current odds). The
+// underlying shape was already correct and stable; what was missing was an
+// explicit name for the boundary itself, so provider-facing code can state
+// "this consumes canonical intent, not raw OCR/AI wording" precisely.
+//
+// Deliberately NOT split further (no separate homeTeam/awayTeam fields):
+// betParser.ts is a pure, offline text parser with no provider/event
+// access — it genuinely does not know which side is home/away, only a
+// free-text `event` string. homeTeam/awayTeam only exist once the odds
+// provider resolves the real event (see buildBetSlipPreview.ts's oddsCheck)
+// — inventing placeholder fields for data that doesn't exist yet at this
+// boundary would be exactly the "renaming for aesthetics" this stage's own
+// brief warns against, not real staging.
+export type BetIntent = ParsedBetSlip;
+export type BetLegIntent = BetSlipSelectionInput;
+
 // Normalizes the existing, unchanged single-selection parser shape
 // (ParsedBet — what parseBetMessage()/the image parser's SINGLE branch
 // already return) into the new unified ParsedBetSlip. This *is* the

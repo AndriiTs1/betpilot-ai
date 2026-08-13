@@ -17,6 +17,7 @@
 // rather than done here.
 
 import { classifyBettingSelectionText, type ShorthandClassification } from "@/lib/odds/shorthandClassifier";
+import { tokenize, findControlRowTokenIndices, type Token } from "./screenshotUiNoise";
 
 export type MarketIntentConfidence = "TOKEN_MATCH";
 
@@ -43,26 +44,9 @@ export interface MarketIntentEvidence {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Word tokens — reimplemented locally (not imported); see this file's own   */
-/* header re: why numericRoleEvidence.ts's private tokenize() isn't reused.  */
-/* -------------------------------------------------------------------------- */
-
-interface Token {
-  readonly text: string;
-  readonly start: number;
-  readonly end: number;
-}
-
-function tokenize(text: string): Token[] {
-  const tokens: Token[] = [];
-  const pattern = /\S+/g;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(text)) !== null) {
-    tokens.push({ text: match[0], start: match.index, end: match.index + match[0].length });
-  }
-  return tokens;
-}
-
+/* Word tokens — MASTER STAGE M3, Phase 2: Token/tokenize now come from the  */
+/* shared ./screenshotUiNoise boundary this file's own header long ago       */
+/* flagged as a deferred duplication concern with numericRoleEvidence.ts.    */
 /* -------------------------------------------------------------------------- */
 /* Generic-fallback exclusion                                                 */
 /* -------------------------------------------------------------------------- */
@@ -200,7 +184,19 @@ function findBackwardMatch(tokens: readonly Token[], endIndex: number, consumed:
 // contradiction/ambiguity decision of its own; that is Step 3's job.
 export function extractMarketIntentEvidence(originalText: string): readonly MarketIntentEvidence[] {
   const tokens = tokenize(originalText);
-  const consumed = new Set<number>();
+  // MASTER STAGE M3, Phase 2 — pre-seed `consumed` with every token that is
+  // part of a detected UI-control row (quick-add/quick-stake presets, info
+  // icons), BEFORE either pass below ever runs a window classification.
+  // This is the exact same structural signal numericRoleEvidence.ts now
+  // excludes numeric evidence with (M1.3), applied here at this file's own
+  // token-consumption boundary: a control-row token can never anchor OR
+  // extend a match in either pass, so a quick-add row can never masquerade
+  // as a SPREAD/TOTALS market signal here either — closing the exact gap
+  // the MASTER STAGE M3 Phase 1 proof test demonstrated (the same "ℹ +10"
+  // shape that used to falsely become LINE evidence in numericRoleEvidence.ts
+  // was, until this change, ALSO producing a false SPREAD market-intent
+  // signature here, completely unguarded).
+  const consumed = new Set<number>(findControlRowTokenIndices(originalText, tokens));
   const evidence: MarketIntentEvidence[] = [];
 
   // Pass 1 — number-anchored. A market token that precedes its own line as

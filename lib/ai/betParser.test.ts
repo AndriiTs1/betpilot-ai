@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { extractBetTool, rejectBetTool, extractExpressBetTool, parseBetSlipMessage, parseBetMessage, MAX_DECIMAL_ODDS } from "./betParser";
 import { chatPrompt, ocrPrompt } from "./betParserPrompt";
 import { SCREENSHOT_QA1_DIAGNOSTIC_MARKER } from "@/lib/logging/screenshotQa1Diagnostic";
+import { extractMarketIntentEvidence } from "./marketIntentEvidence";
 
 // Regression test for a real production incident (Stage 12, Phase 3
 // hotfix): Anthropic's strict-mode tool schema only supports `minItems`
@@ -1498,7 +1499,7 @@ test("QA-1.6 negative L: a TEAM_TOTAL-evidence contradiction (claim=DRAW) is sti
   assert.equal(result.code, "market_mismatch");
 });
 
-test("QA-1.6 negative: AMBIGUOUS market-intent source text is still rejected immediately, never deferred (only a clean single-signature CONTRADICTED can defer)", async () => {
+test("QA-1.6 negative (updated by MASTER STAGE M3.1, Phase B): AMBIGUOUS market-intent source text with a DRAW signature is still rejected immediately, never deferred — DRAW has no HOME/AWAY equivalent to defer to, regardless of the Phase B AMBIGUOUS widening", async () => {
   currentHandler = async () =>
     anthropicToolUseResponse(
       "extract_bet",
@@ -1506,8 +1507,13 @@ test("QA-1.6 negative: AMBIGUOUS market-intent source text is still rejected imm
     );
 
   // "ничья Арсенал победа" carries two distinct MONEYLINE-family signatures
-  // in the source text itself (DRAW and PARTICIPANT-winner-suffix) — this
-  // must stay AMBIGUOUS, never re-classified as the narrow deferrable case.
+  // in the source text itself (DRAW and PARTICIPANT-winner-suffix) — since
+  // MASTER STAGE M3.1 Phase B, AMBIGUOUS itself is no longer an automatic
+  // rejection for MONEYLINE_2WAY/PARTICIPANT claims (see
+  // classifyReconcilable1X2Mismatch's own updated header), but a DRAW
+  // conflicting signature still never qualifies: PendingMarketReconciliation
+  // only ever carries requiredSide HOME|AWAY, so this correctly falls
+  // through to the unchanged hard rejection below.
   const result = await parseBetSlipMessage("ничья Арсенал победа", "CHAT");
 
   assert.equal(result.valid, false);
@@ -2069,6 +2075,322 @@ test("QA-4 numeric_evidence diagnostic: never leaks raw OCR text, only closed en
         );
       }
     }
+  } finally {
+    restore();
+  }
+});
+
+/* ============================================================================
+ * MASTER STAGE M3, Phase 1 — market_intent_evidence diagnostic. The M2.1
+ * production audit found a market_mismatch/AMBIGUOUS rejection with no way
+ * to see WHICH (marketType, selectionType) signatures actually competed.
+ * These tests prove the new diagnostic surfaces exactly that, OCR-mode only,
+ * mirroring the numeric_evidence tests above.
+ * ============================================================================ */
+
+function marketIntentEvidenceDiagnostics(loggedCalls: unknown[][]): Array<Record<string, unknown>> {
+  const results: Array<Record<string, unknown>> = [];
+  for (const call of loggedCalls) {
+    if (call[0] === SCREENSHOT_QA1_DIAGNOSTIC_MARKER && typeof call[1] === "string") {
+      const parsed = JSON.parse(call[1]) as Record<string, unknown>;
+      if (parsed.stage === "market_intent_evidence") results.push(parsed);
+    }
+  }
+  return results;
+}
+
+test("M3 market_intent_evidence diagnostic: OCR-mode AMBIGUOUS (DRAW vs MONEYLINE signatures) logs claimed type and both competing entries", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal", selection: "Win", stake: 10 }));
+
+    const result = await parseBetSlipMessage("ничья Арсенал победа ставка 10", "OCR");
+
+    assert.equal(result.valid, false);
+    if (result.valid) return;
+    assert.equal(result.code, "market_mismatch");
+
+    const diagnostics = marketIntentEvidenceDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].claimedMarketType, "MONEYLINE_2WAY");
+    assert.equal(diagnostics[0].claimedSelectionType, "PARTICIPANT");
+    assert.equal(diagnostics[0].verdict, "AMBIGUOUS");
+    assert.equal((diagnostics[0].supportingEvidence as unknown[]).length, 1);
+    assert.equal((diagnostics[0].conflictingEvidence as unknown[]).length, 1);
+    const conflicting = (diagnostics[0].conflictingEvidence as Array<Record<string, unknown>>)[0];
+    assert.equal(conflicting.marketType, "MONEYLINE_3WAY");
+    assert.equal(conflicting.selectionType, "DRAW");
+  } finally {
+    restore();
+  }
+});
+
+test("M3 market_intent_evidence diagnostic: OCR-mode CONTRADICTED (dropped SPREAD shape) logs the conflicting SPREAD entry with its line/participant", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ stake: 10 }));
+
+    const result = await parseBetSlipMessage("Арсенал Ф1(-1.5) ставка 10", "OCR");
+
+    assert.equal(result.valid, false);
+    if (result.valid) return;
+    assert.equal(result.code, "market_mismatch");
+
+    const diagnostics = marketIntentEvidenceDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].claimedMarketType, "MONEYLINE_2WAY");
+    assert.equal(diagnostics[0].claimedSelectionType, "PARTICIPANT");
+    assert.equal(diagnostics[0].verdict, "CONTRADICTED");
+    assert.deepEqual(diagnostics[0].supportingEvidence, []);
+    assert.equal((diagnostics[0].conflictingEvidence as unknown[]).length, 1);
+    const conflicting = (diagnostics[0].conflictingEvidence as Array<Record<string, unknown>>)[0];
+    assert.equal(conflicting.marketType, "SPREAD");
+    assert.equal(conflicting.embeddedLine, "-1.5");
+  } finally {
+    restore();
+  }
+});
+
+test("M3 market_intent_evidence diagnostic: never fires for CHAT mode, even for the identical rejection", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal", selection: "Win", stake: 10 }));
+
+    const result = await parseBetSlipMessage("ничья Арсенал победа ставка 10", "CHAT");
+
+    assert.equal(result.valid, false);
+    if (result.valid) return;
+    assert.equal(result.code, "market_mismatch");
+    assert.equal(marketIntentEvidenceDiagnostics(loggedCalls).length, 0);
+  } finally {
+    restore();
+  }
+});
+
+test("M3 market_intent_evidence diagnostic: never fires when the market claim is fine (no rejection) — only an actual market_mismatch rejection needs explaining", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal", selection: "Win", stake: 10 }));
+
+    const result = await parseBetSlipMessage("Арсенал победа, ставка 10", "OCR");
+
+    assert.equal(result.valid, true);
+    assert.equal(marketIntentEvidenceDiagnostics(loggedCalls).length, 0);
+  } finally {
+    restore();
+  }
+});
+
+test("M3 market_intent_evidence diagnostic: never leaks raw OCR text, only closed enum/string fields", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    const secretMarker = "SECRET_MARKER_" + Math.random().toString(36).slice(2);
+    currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal", selection: "Win", stake: 10 }));
+
+    await parseBetSlipMessage(`ничья Арсенал победа ставка 10 ${secretMarker}`, "OCR");
+
+    const rawLoggedText = JSON.stringify(loggedCalls);
+    assert.equal(rawLoggedText.includes(secretMarker), false);
+
+    const diagnostics = marketIntentEvidenceDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 1);
+    for (const entry of [...(diagnostics[0].supportingEvidence as Record<string, unknown>[]), ...(diagnostics[0].conflictingEvidence as Record<string, unknown>[])]) {
+      for (const [key, value] of Object.entries(entry)) {
+        assert.ok(
+          value === null || typeof value === "string",
+          `market intent evidence field "${key}" must be a string or null, got ${typeof value}`,
+        );
+      }
+    }
+  } finally {
+    restore();
+  }
+});
+
+/* ============================================================================
+ * MASTER STAGE M3 — Phase 1 PROVED the M2.1 hypothesis (before Phase 2's
+ * fix, this exact real-derived text — reused from Case D/laliga4.jpg's
+ * already-proven numericRoleVerifier.test.ts fixture, not invented — made
+ * marketIntentEvidence.ts's unguarded window scan misclassify the "ℹ +10"
+ * quick-add control as a spurious SPREAD signature, participantName "ℹ",
+ * competing against the genuine MONEYLINE_2WAY/PARTICIPANT selection and
+ * producing the real production AMBIGUOUS verdict). Phase 2 then applied
+ * the shared control-row detector (./screenshotUiNoise, already proven for
+ * numericRoleEvidence.ts by M1.1/M1.3) to this file's own token-consumption
+ * boundary. This test now proves the FIX: the same real text no longer
+ * produces that false signature at all.
+ * ============================================================================ */
+
+test("M3: the real Case D (laliga4) text shape no longer produces a spurious SPREAD signature from the 'ℹ +10' quick-add control", () => {
+  const text = ["Barcelona - Real Madrid", "-1.5", "1.90", "ℹ +10", "Ставка", "50"].join("\n");
+  const evidence = extractMarketIntentEvidence(text);
+  const falseSpreadFromControl = evidence.filter(
+    (e) => e.classification.marketType === "SPREAD" && e.classification.participantName !== null && !/[a-zа-яё]{2}/i.test(e.classification.participantName),
+  );
+  assert.deepEqual(falseSpreadFromControl, [], "the 'ℹ +10' control must never produce a SPREAD signature attributed to the icon itself");
+});
+
+test("M3 end-to-end: the real Case D (laliga4) text shape now parses successfully through the full pipeline — a SPREAD claim on 'Real Madrid -1.5' is no longer rejected as market_mismatch", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({ event: "Barcelona vs Real Madrid", market: "Handicap", selection: "Real Madrid", line: "-1.5", stake: 50, odds: 1.9 }),
+    );
+
+  const text = ["Barcelona - Real Madrid", "Real Madrid -1.5", "1.90", "ℹ +10", "Ставка", "50"].join("\n");
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `unexpected rejection: ${result.code} — ${result.error}`);
+});
+
+/* ============================================================================
+ * MASTER STAGE M3.1, Phase B — generalized provider-informed deferral for
+ * TOTALS/OVER, TOTALS/UNDER, and SPREAD/PARTICIPANT claims (previously only
+ * MONEYLINE_2WAY/PARTICIPANT could ever defer, and only when CONTRADICTED).
+ * Positive cases below use a genuine CROSS-market-type conflicting signal
+ * (never invented noise — a real classifyBettingSelectionText match for a
+ * DIFFERENT market entirely, the exact shape a quick-add control row used to
+ * produce before MASTER STAGE M3 Phase 2 fixed the root cause). Negative
+ * cases prove the SAME-market-type safety boundary isDeferrableLineMarketClaim
+ * enforces, and that unsupported/incomplete claims are unaffected.
+ * ============================================================================ */
+
+test("M3.1 Phase B positive 1: TOTALS/OVER claim with a genuine cross-market MONEYLINE signal present -> deferred, valid (not rejected)", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Barcelona vs Real Madrid", market: "Totals", selection: "Over 2.5", line: "2.5", stake: 10 }));
+
+  // "ничья" -> MONEYLINE_3WAY/DRAW (a genuine, different market shape, and
+  // — crucially — one with NO embedded line, so this stays isolated to the
+  // market-intent gate: a cross-market signal that ALSO carried its own
+  // line would trip the numeric-role LINE gate first, checked before
+  // market-intent, exactly as the critical safety tests below demonstrate
+  // deliberately); "ТБ 2.5" -> TOTALS/OVER (matches the claim).
+  const result = await parseBetSlipMessage("ничья\nТБ 2.5\nставка 10", "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `unexpected rejection: ${result.code} — ${result.error}`);
+  if (!result.valid) return;
+  assert.equal(result.selections[0].line, "2.5");
+});
+
+test("M3.1 Phase B positive 2: TOTALS/UNDER claim with a genuine cross-market MONEYLINE signal present -> deferred, valid", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal vs Chelsea", market: "Totals", selection: "Under 3", line: "3", stake: 10 }));
+
+  // "ничья" -> MONEYLINE_3WAY/DRAW (a genuine, different market shape);
+  // "ТМ 3" -> TOTALS/UNDER (matches the claim).
+  const result = await parseBetSlipMessage("ничья\nТМ 3\nставка 10", "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `unexpected rejection: ${result.code} — ${result.error}`);
+  if (!result.valid) return;
+  assert.equal(result.selections[0].line, "3");
+});
+
+test("M3.1 Phase B positive 3: SPREAD/PARTICIPANT claim with a genuine cross-market MONEYLINE signal present -> deferred, valid", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Barcelona vs Real Madrid", market: "Handicap", selection: "Real Madrid -1.5", line: "-1.5", stake: 10 }));
+
+  // "ничья" -> MONEYLINE_3WAY/DRAW (a genuine, different market shape, no
+  // embedded line — see positive 1's own comment for why this specific
+  // noise shape is what isolates the market-intent gate cleanly);
+  // "Реал Мадрид Ф1(-1.5)" -> SPREAD/PARTICIPANT (matches the claim).
+  const result = await parseBetSlipMessage("ничья\nРеал Мадрид Ф1(-1.5)\nставка 10", "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `unexpected rejection: ${result.code} — ${result.error}`);
+  if (!result.valid) return;
+  assert.equal(result.selections[0].line, "-1.5");
+});
+
+test("M3.1 Phase B CRITICAL SAFETY: SPREAD claim with a genuine SAME-market conflicting line/side -> still rejected, never deferred (a real direction/line disagreement, not noise)", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Barcelona vs Real Madrid", market: "Handicap", selection: "Real Madrid -1.5", line: "-1.5", stake: 10 }));
+
+  // Both "Барселона Ф1(-1.5)" and "Реал Мадрид Ф1(-2.5)" are SPREAD/PARTICIPANT
+  // — the SAME marketType as the claim, but a genuinely different
+  // participant/line. This must never be silently trusted to the provider.
+  // Verified (not assumed): this specific fixture actually trips the
+  // NUMERIC-role LINE gate first (two distinct LINE values, -1.5 and -2.5 —
+  // numeric safety is checked before market-intent safety, unchanged order),
+  // so the observable code here is numeric_mismatch, not market_mismatch —
+  // both are acceptable, since the real property under test is "never
+  // silently deferred/accepted", proven by isDeferrableLineMarketClaim's own
+  // hasSameMarketTypeConflict check regardless of which gate fires first.
+  const result = await parseBetSlipMessage("Барселона Ф1(-1.5)\nРеал Мадрид Ф1(-2.5)\nставка 10", "OCR");
+
+  assert.equal(result.valid, false, "a same-market SPREAD disagreement must still hard-reject");
+  if (result.valid) return;
+  assert.ok(result.code === "numeric_mismatch" || result.code === "market_mismatch", `expected a hard rejection, got code=${result.code}`);
+});
+
+test("M3.1 Phase B CRITICAL SAFETY: unsupported market (TEAM_TOTAL) is never deferred, regardless of verdict", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal vs Chelsea", market: "Team Total", selection: "Arsenal Over 1.5", line: "1.5", stake: 10 }));
+
+  // "ИТБ Арсенал 1.5" classifies as TEAM_TOTAL/OVER — not one of the four
+  // supported deferral shapes (MONEYLINE_2WAY/PARTICIPANT, TOTALS/OVER,
+  // TOTALS/UNDER, SPREAD/PARTICIPANT) — isDeferrableLineMarketClaim must
+  // never defer it even if AI's own claim happens to disagree. Verified:
+  // this fixture also trips the numeric LINE gate first (1.5 vs -1.5) —
+  // same acceptable-either-code reasoning as the test above.
+  const result = await parseBetSlipMessage("Арсенал Ф1(-1.5)\nИТБ Арсенал 1.5\nставка 10", "OCR");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.ok(result.code === "numeric_mismatch" || result.code === "market_mismatch", `expected a hard rejection, got code=${result.code}`);
+});
+
+test("M3.1 Phase B CRITICAL SAFETY: an incomplete TOTALS claim (no line at all) is never deferred — incompleteness can never be resolved by the provider", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Barcelona vs Real Madrid", market: "Totals", selection: "Over", line: null, stake: 10 }));
+
+  const result = await parseBetSlipMessage("Барселона Ф1(-1.5)\nБольше\nставка 10", "OCR");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.ok(result.code === "numeric_mismatch" || result.code === "market_mismatch", `expected a hard rejection, got code=${result.code}`);
+});
+
+test("M3.1 Phase B CRITICAL SAFETY: an incomplete SPREAD claim (whitespace-only participant text) is never deferred", async () => {
+  // A genuinely EMPTY selection string is rejected by Claude's own tool
+  // schema before this code ever runs at all (zod's minLength(1) on
+  // `selection` — confirmed directly: the AI extraction call itself cannot
+  // return one) — proving that specific incompleteness shape is already
+  // structurally impossible upstream, not merely untested. This test proves
+  // the next-weakest real shape instead: a WHITESPACE-ONLY selection, which
+  // clears the schema's length check but must still fail
+  // isDeferrableLineMarketClaim's own `.trim()` completeness guard.
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Barcelona vs Real Madrid", market: "Handicap", selection: "   ", line: "-1.5", stake: 10 }));
+
+  const result = await parseBetSlipMessage("ничья\nФ1(-1.5)\nставка 10", "OCR");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+test("M3.1 Phase B: the market_intent_evidence diagnostic's new `deferred` field is true for a deferred claim and false for a hard rejection", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    // Deferred case (positive 1's exact shape — cross-market DRAW noise,
+    // isolated from the numeric-role gate since DRAW carries no line).
+    currentHandler = async () =>
+      anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Barcelona vs Real Madrid", market: "Totals", selection: "Over 2.5", line: "2.5", stake: 10 }));
+    await parseBetSlipMessage("ничья\nТБ 2.5\nставка 10", "OCR");
+
+    // Hard-rejected case: DRAW conflicting with a MONEYLINE_2WAY/PARTICIPANT
+    // claim — DRAW never qualifies for 1X2 deferral (no HOME/AWAY
+    // equivalent), same fixture already proven as a genuine hard rejection
+    // above (see the updated QA-1.6 negative test) — and, like positive 1,
+    // carries no embedded line, so it reaches the market-intent gate
+    // directly rather than being intercepted by numeric-role first.
+    currentHandler = async () =>
+      anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal vs Chelsea", selection: "Arsenal", stake: 10 }));
+    await parseBetSlipMessage("ничья Арсенал победа", "OCR");
+
+    const diagnostics = marketIntentEvidenceDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 2);
+    assert.equal(diagnostics[0].deferred, true);
+    assert.equal(diagnostics[1].deferred, false);
   } finally {
     restore();
   }

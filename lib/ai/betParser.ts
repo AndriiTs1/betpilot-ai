@@ -8,8 +8,9 @@ import { normalizeParsedBet, type ParsedBetSlip, type PendingMarketReconciliatio
 import { chatPrompt, ocrPrompt } from "./betParserPrompt";
 import { mapRawBetSlipToParsedBetSlip, type RawBetSelectionFields, type NumericRoleObservation, type MarketIntentObservation } from "./betDraftMapper";
 import { normalizeOcrParticipantClaim } from "./ocrParticipantClaimNormalizer";
-import { logScreenshotQa1Diagnostic, type Qa1NumericEvidenceEntry } from "@/lib/logging/screenshotQa1Diagnostic";
+import { logScreenshotQa1Diagnostic, type Qa1NumericEvidenceEntry, type Qa1MarketIntentEvidenceEntry } from "@/lib/logging/screenshotQa1Diagnostic";
 import type { NumericRoleEvidence } from "./numericRoleEvidence";
+import type { MarketIntentEvidence } from "./marketIntentEvidence";
 
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "llama3.2";
@@ -550,29 +551,96 @@ function isUnreliableMarketClaim(observation: MarketIntentObservation): boolean 
 // deferring to a later stage that does have real data — see
 // buildBetSlipPreview.ts's reconcile1X2ParticipantClaim, the only place
 // that ever turns this into an accept/reject decision.
+// MASTER STAGE M3.1, Phase B — widened to also accept AMBIGUOUS (previously
+// CONTRADICTED only). The original CONTRADICTED-only restriction predates
+// MASTER STAGE M3 Phase 2's shared UI-noise normalization: at the time it
+// was written, an AMBIGUOUS verdict was disproportionately likely to be a
+// quick-add-control/icon artifact rather than genuine dual intent (the exact
+// bug class M1.1/M1.3/M3-Phase-2 fixed). Now that marketIntentEvidence.ts no
+// longer produces evidence from UI-control rows at all, AMBIGUOUS is a more
+// trustworthy signal — but this function still does NOT weaken what counts
+// as "safe to defer": every conflicting entry must share the exact same
+// MONEYLINE_3WAY/one-consistent-side signature (checked explicitly below,
+// not merely assumed from the first entry as the old CONTRADICTED-only
+// guarantee allowed) — a source that genuinely disagrees about WHICH side
+// (MONEYLINE_3WAY/HOME vs MONEYLINE_3WAY/AWAY both present), or that mixes
+// in a genuinely different market shape (TOTALS/SPREAD), still returns null
+// here and is rejected immediately, exactly as before this stage.
 function classifyReconcilable1X2Mismatch(
   observation: MarketIntentObservation,
   claimedSelectionText: string | undefined,
 ): PendingMarketReconciliation | null {
-  if (observation.verification.verdict !== "CONTRADICTED") return null;
+  const verdict = observation.verification.verdict;
+  if (verdict !== "CONTRADICTED" && verdict !== "AMBIGUOUS") return null;
   if (observation.claim.marketType !== "MONEYLINE_2WAY" || observation.claim.selectionType !== "PARTICIPANT") return null;
 
   const conflicting = observation.verification.conflictingEvidence;
   if (conflicting.length === 0) return null;
 
-  const evidenceSide = conflicting[0].classification.selectionType;
+  const allMoneyline3Way = conflicting.every((entry) => entry.classification.marketType === "MONEYLINE_3WAY");
+  if (!allMoneyline3Way) return null;
+
+  const sides = new Set(conflicting.map((entry) => entry.classification.selectionType));
+  if (sides.size !== 1) return null;
+  const [evidenceSide] = sides;
   if (evidenceSide !== "HOME" && evidenceSide !== "AWAY") return null;
-  if (conflicting[0].classification.marketType !== "MONEYLINE_3WAY") return null;
-  // A CONTRADICTED verdict (as opposed to AMBIGUOUS) already guarantees
-  // every conflicting entry shares this exact signature — see
-  // marketIntentVerifier.ts's own verifyMarketIntentClaim (signatures.size
-  // === 1 is required to ever reach CONTRADICTED at all) — so checking
-  // only the first entry here is not a shortcut, it is the full set.
 
   const claimedParticipant = claimedSelectionText?.trim();
   if (!claimedParticipant) return null;
 
   return { requiredSide: evidenceSide, claimedParticipant };
+}
+
+// MASTER STAGE M3.1, Phase B — the generalized deferral for TOTALS/SPREAD
+// claims. Unlike the 1X2 case above, these need NO pre-processing/relabeling
+// step at all: SPREAD's own selectionType is "PARTICIPANT" already (a real,
+// valid CanonicalSelection shape — verifySpreadOdds resolves the participant
+// name against the provider's own team names via the exact same fuzzy
+// matcher every other participant claim already relies on, confirmed by
+// reading lib/odds/domain.ts's SelectionType/CanonicalSelection and
+// lib/odds/theOddsApiProvider.ts's supportedMarketTypes), and TOTALS/OVER
+// and TOTALS/UNDER are already the claim's own final shape. Deferring here
+// means exactly one thing: do not hard-reject locally — let
+// buildBetSlipPreview.ts's existing, UNCHANGED, already-exact-match odds
+// verification be the real arbiter (the identical safety net that already
+// protects every ordinary, non-deferred TOTALS/SPREAD claim today — this is
+// not a weaker path, it is the SAME path, reached one gate earlier). Scoped
+// to exactly the four claim shapes this stage's own brief names as
+// supported — every other market/selection combination is untouched and
+// still rejected immediately, exactly as before.
+function isDeferrableLineMarketClaim(observation: MarketIntentObservation, rawSelection: RawBetSelectionFields | undefined): boolean {
+  const verdict = observation.verification.verdict;
+  if (verdict !== "CONTRADICTED" && verdict !== "AMBIGUOUS") return false;
+
+  const { marketType, selectionType } = observation.claim;
+  const isSupportedShape =
+    (marketType === "TOTALS" && (selectionType === "OVER" || selectionType === "UNDER")) ||
+    (marketType === "SPREAD" && selectionType === "PARTICIPANT");
+  if (!isSupportedShape) return false;
+
+  // Structurally complete: a claim with no line, or (for SPREAD) no
+  // participant text, is not a "one concrete canonical claim" — it is
+  // incomplete, and incompleteness is never something provider verification
+  // can resolve on its own. Still rejected immediately, unchanged.
+  const claimedLine = rawSelection?.line?.trim();
+  if (!claimedLine) return false;
+  if (marketType === "SPREAD" && !rawSelection?.selection?.trim()) return false;
+
+  // Only CROSS-market-type ambiguity is safe to defer — proven real by a
+  // production incident (M1.2/M3 Phase 1/2: a quick-add control row
+  // misclassified as an unrelated SPREAD signature next to a genuine TOTALS
+  // claim). A SAME-market-type conflict (TOTALS/OVER claimed but
+  // TOTALS/UNDER also strongly present in the text, or a different SPREAD
+  // line/side) is a genuine, meaningful semantic disagreement about THIS
+  // bet — the AI may simply have gotten the direction backwards — and must
+  // still be rejected immediately, never silently trusted to the provider.
+  // A real regression test (BA-2D Step 5 (6): "original says UNDER, AI
+  // claims OVER") proved this exact gap when first built without this check.
+  const conflicting = observation.verification.conflictingEvidence;
+  const hasSameMarketTypeConflict = conflicting.some((entry) => entry.classification.marketType === marketType);
+  if (hasSameMarketTypeConflict) return false;
+
+  return true;
 }
 
 // Wraps mapRawBetSlipToParsedBetSlip() so a programmer-error throw (the
@@ -665,6 +733,44 @@ function buildParsedBetSlipResult(
         mode === "OCR" ? normalizeOcrParticipantClaim(raw.selections[0]?.selection ?? "") : raw.selections[0]?.selection;
 
       const pendingMarketReconciliation = classifyReconcilable1X2Mismatch(unreliableMarketClaim, claimedSelectionText);
+      // MASTER STAGE M3.1, Phase B — the generalized TOTALS/SPREAD deferral.
+      // Checked independently of pendingMarketReconciliation above (mutually
+      // exclusive by construction: isDeferrableLineMarketClaim's own market/
+      // selectionType check can never overlap classifyReconcilable1X2Mismatch's
+      // MONEYLINE_2WAY/PARTICIPANT requirement). No shape conversion is
+      // needed here — see isDeferrableLineMarketClaim's own header for why
+      // the claim already IS its final, correct canonical form.
+      const isDeferredLineMarket = !pendingMarketReconciliation && isDeferrableLineMarketClaim(unreliableMarketClaim, raw.selections[0]);
+      const deferred = pendingMarketReconciliation !== null || isDeferredLineMarket;
+
+      // MASTER STAGE M3, Phase 1 (extended by M3.1, Phase B) — OCR-mode only
+      // (mirrors the numeric_evidence diagnostic immediately above and the S1
+      // claim-normalizer's own mode gate): logs exactly which (marketType,
+      // selectionType) signatures competed AND whether this claim was
+      // deferred instead of rejected, so a future reproduction never again
+      // has to guess at this from a bare marketType/selectionType/verdict
+      // string alone — the exact diagnostic gap the M2.1 audit identified.
+      // Fires for BOTH outcomes (deferred and rejected) — unlike the
+      // numeric_evidence diagnostic above, this is no longer only-on-
+      // rejection, since "deferred, not rejected" is itself the interesting
+      // fact production QA needs to see now that this stage exists.
+      if (mode === "OCR") {
+        const toDiagnosticEntry = (entry: MarketIntentEvidence): Qa1MarketIntentEvidenceEntry => ({
+          marketType: entry.classification.marketType,
+          selectionType: entry.classification.selectionType,
+          participantName: entry.classification.participantName,
+          embeddedLine: entry.classification.embeddedLine,
+        });
+        logScreenshotQa1Diagnostic({
+          stage: "market_intent_evidence",
+          claimedMarketType: unreliableMarketClaim.claim.marketType,
+          claimedSelectionType: unreliableMarketClaim.claim.selectionType,
+          verdict: unreliableMarketClaim.verification.verdict,
+          supportingEvidence: unreliableMarketClaim.verification.supportingEvidence.map(toDiagnosticEntry),
+          conflictingEvidence: unreliableMarketClaim.verification.conflictingEvidence.map(toDiagnosticEntry),
+          deferred,
+        });
+      }
 
       if (pendingMarketReconciliation) {
         const [firstSelection, ...restSelections] = parsedSlip.selections;
@@ -673,6 +779,10 @@ function buildParsedBetSlipResult(
           ...parsedSlip,
           selections: [{ ...firstSelection, pendingMarketReconciliation }, ...restSelections],
         };
+      }
+
+      if (isDeferredLineMarket) {
+        return { valid: true, ...parsedSlip };
       }
 
       // Same internal-diagnostic-only discipline as numeric_mismatch above

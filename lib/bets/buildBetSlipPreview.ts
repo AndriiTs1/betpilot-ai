@@ -297,6 +297,13 @@ export interface BuildBetSlipPreviewOptions {
   logQa1ReconciliationDiagnostic?: boolean;
 }
 
+// MASTER STAGE M3, Phase 3 — `slip` is the project's canonical BetIntent
+// (see lib/bets/betSlip.ts's BetIntent alias): everything below this point
+// consumes already-extracted, already-validated intent fields
+// (event/market/selection/line/stake), never raw OCR/bookmaker wording or
+// button text directly. Any future UI-noise/wording concern belongs
+// upstream of this boundary (betParser.ts + lib/ai/screenshotUiNoise.ts),
+// not here.
 export async function buildBetSlipPreview(
   slip: ParsedBetSlip,
   playerId: string,

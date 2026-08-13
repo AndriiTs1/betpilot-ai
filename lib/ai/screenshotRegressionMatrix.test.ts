@@ -465,3 +465,44 @@ test("Matrix 14 — EXPRESS with a quarter-line TOTALS leg (2.25)", async () => 
   assert.equal(result.selections[1].submittedOdds, 2.0);
   assert.equal(result.stake, 45);
 });
+
+/* ============================================================================
+ * MASTER STAGE M3, Phase 9 — real screenshot regression corpus additions.
+ * Both fixtures below are derived from FRESH PRODUCTION requests captured
+ * and traced during this work (M1.2/M2.1 audits), not invented OCR strings:
+ * EXTRACTION correctness only (parseBetSlipMessage) — provider CURRENT-ODDS
+ * correctness is a structurally separate concern, already covered
+ * independently by buildBetSlipPreview.test.ts's own fixtures, so a
+ * provider price changing tomorrow can never make this file nondeterministic.
+ * ============================================================================ */
+
+test("Matrix 15 — real Case D (laliga4.jpg): SPREAD 'Real Madrid -1.5' with a genuine 'ℹ +10' quick-add control present — the exact real production bug fixed in MASTER STAGE M3 Phase 2", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({
+        sport: "Football",
+        event: "Barcelona vs Real Madrid",
+        market: "Handicap",
+        selection: "Real Madrid",
+        line: "-1.5",
+        stake: 50,
+        odds: 1.9,
+      }),
+    );
+
+  // Reconstructed from the real fresh production numeric_evidence trace
+  // captured in M1.2 (conflictingEvidence: [{value:"+10", marker:"ℹ"}]) and
+  // proven, via MASTER STAGE M3 Phase 1's diagnostic, to also produce a
+  // spurious SPREAD market-intent signature before Phase 2's fix.
+  const text = ["Barcelona - Real Madrid", "Real Madrid -1.5", "1.90", "ℹ +10", "Ставка", "50"].join("\n");
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `${result.error} (${result.code})`);
+  if (!result.valid) return;
+  assert.equal(result.selections[0].event, "Barcelona vs Real Madrid");
+  assert.equal(result.selections[0].selection, "Real Madrid");
+  assert.equal(result.selections[0].line, "-1.5");
+  assert.equal(result.selections[0].submittedOdds, 1.9);
+  assert.equal(result.stake, 50);
+});

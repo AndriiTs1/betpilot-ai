@@ -176,13 +176,55 @@ export interface Qa1ReconciliationDiagnostic {
   reconciled: boolean;
 }
 
+// MASTER STAGE M3, Phase 1 — the diagnostic gap M2.1's audit identified: a
+// market_mismatch rejection's own errorCode says nothing about WHICH
+// competing (marketType, selectionType) signatures actually produced an
+// AMBIGUOUS/CONTRADICTED verdict, unlike numeric_mismatch's own
+// numeric_evidence stage above. Mirrors that stage's shape exactly, one
+// level up: marketType/selectionType are always present (MarketIntentClaim
+// carries no participant/line at all, by this verifier's own deliberate
+// design — see marketIntentVerifier.ts's own header for why); participantName/
+// embeddedLine appear per EVIDENCE entry (from each entry's own
+// ShorthandClassification), not on the claim, since that is the real shape
+// the underlying data has — never fabricated to match a hoped-for shape.
+// Fires only for the exact observation that caused a market_mismatch
+// rejection (lib/ai/betParser.ts's own unreliableMarketClaim) — never for a
+// CORROBORATED/UNVERIFIED claim, same discipline as numeric_evidence above.
+// Team/participant names and market shorthand are public sports/UI data, the
+// same category already logged in Qa1ParserDiagnostic/Qa1ReconciliationDiagnostic
+// — never player id, auth, tokens, or raw image bytes/full OCR transcript.
+export interface Qa1MarketIntentEvidenceEntry {
+  marketType: string;
+  selectionType: string;
+  participantName: string | null;
+  embeddedLine: string | null;
+}
+
+export interface Qa1MarketIntentEvidenceDiagnostic {
+  stage: "market_intent_evidence";
+  claimedMarketType: string;
+  claimedSelectionType: string;
+  verdict: "CORROBORATED" | "CONTRADICTED" | "UNVERIFIED" | "AMBIGUOUS";
+  supportingEvidence: Qa1MarketIntentEvidenceEntry[];
+  conflictingEvidence: Qa1MarketIntentEvidenceEntry[];
+  // MASTER STAGE M3.1, Phase B — true when this claim was DEFERRED to
+  // provider-informed reconciliation (lib/ai/betParser.ts's generalized
+  // deferral, or the pre-existing narrow 1X2 case) rather than hard-rejected
+  // — so production QA can distinguish "accepted despite local ambiguity,
+  // because a supported market shape let the provider decide" from "hard
+  // rejected, provider never consulted" without guessing from the parser
+  // stage's own valid/errorCode fields alone.
+  deferred: boolean;
+}
+
 export type Qa1Diagnostic =
   | Qa1PreprocessingDiagnostic
   | Qa1RegionDetectionDiagnostic
   | Qa1OcrDiagnostic
   | Qa1ParserDiagnostic
   | Qa1ReconciliationDiagnostic
-  | Qa1NumericEvidenceDiagnostic;
+  | Qa1NumericEvidenceDiagnostic
+  | Qa1MarketIntentEvidenceDiagnostic;
 
 export function logScreenshotQa1Diagnostic(diagnostic: Qa1Diagnostic): void {
   console.log(SCREENSHOT_QA1_DIAGNOSTIC_MARKER, JSON.stringify(diagnostic));

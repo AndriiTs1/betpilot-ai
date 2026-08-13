@@ -161,3 +161,23 @@ test("M2: if BOTH sides happen to be an exact score-1 match (a degenerate data s
   const result = resolveParticipantSide("Real Madrid", "Real Madrid", "Real Madrid");
   assert.deepEqual(result, { kind: "AMBIGUOUS" });
 });
+
+/* ============================================================================
+ * MASTER STAGE M3, Phase 5 — generic event/participant matching verification
+ * for real bookmaker naming differences (punctuation, abbreviations).
+ * ============================================================================ */
+
+test("M3 Phase 5: trailing club-suffix punctuation ('Real Madrid C.F.') does not prevent decisive resolution — normalizeTeamName strips it", () => {
+  assert.equal(normalizeTeamName("Real Madrid C.F."), "real madrid c f");
+  assert.deepEqual(resolveParticipantSide("Real Madrid C.F.", "Real Madrid", "Real Sociedad"), { kind: "HOME" });
+});
+
+test("M3 Phase 5: an HONEST, documented limitation — informal abbreviations ('Man Utd' for 'Manchester United') are NOT resolved by the fuzzy word matcher, and must not be silently guessed", () => {
+  // "Utd" (3 chars) is far below FUZZY_WORD_MIN_LENGTH (6), so it can never
+  // fuzzy-match "united" — this is a genuine vocabulary/alias gap (the same
+  // class TEAM_ALIASES already exists for a small set of Cyrillic names),
+  // not a decisive-margin gap M2 was scoped to fix. Recording this here so
+  // it is a known, deliberate limitation rather than an unnoticed one.
+  assert.equal(compareTeamNames("Man Utd", "Manchester United"), 0);
+  assert.deepEqual(resolveParticipantSide("Man Utd", "Manchester United", "Manchester City"), { kind: "NO_MATCH" });
+});
