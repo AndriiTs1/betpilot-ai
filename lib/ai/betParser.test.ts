@@ -2213,6 +2213,143 @@ test("M3 market_intent_evidence diagnostic: never leaks raw OCR text, only close
 });
 
 /* ============================================================================
+ * PRODUCTION MARKET-INTENT DIAGNOSTICS — the laliga3 production incident
+ * (AMBIGUOUS verdict, MONEYLINE_3WAY/AWAY x2, TOTALS/OVER, SPREAD/PARTICIPANT
+ * all conflicting at once) proved marketType/selectionType/participantName/
+ * embeddedLine alone cannot explain WHICH local OCR fragment produced each
+ * entry. These tests prove the new matchedText/confidence fields close that
+ * gap for the next real reproduction, without changing what gets rejected,
+ * deferred, or accepted.
+ * ============================================================================ */
+
+test("PRODUCTION MARKET-INTENT DIAGNOSTICS 1: the diagnostic exposes the exact marker responsible for a 1X2 (MONEYLINE_3WAY/DRAW) classification", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal", selection: "Win", stake: 10 }));
+
+    const result = await parseBetSlipMessage("ничья Арсенал победа ставка 10", "OCR");
+
+    assert.equal(result.valid, false);
+    if (result.valid) return;
+    assert.equal(result.code, "market_mismatch");
+
+    const diagnostics = marketIntentEvidenceDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 1);
+    const conflicting = (diagnostics[0].conflictingEvidence as Array<Record<string, unknown>>)[0];
+    assert.equal(conflicting.marketType, "MONEYLINE_3WAY");
+    assert.equal(conflicting.selectionType, "DRAW");
+    assert.equal(conflicting.matchedText, "ничья");
+    assert.equal(conflicting.confidence, "TOKEN_MATCH");
+    const supporting = (diagnostics[0].supportingEvidence as Array<Record<string, unknown>>)[0];
+    assert.equal(supporting.matchedText, "Арсенал победа");
+  } finally {
+    restore();
+  }
+});
+
+test("PRODUCTION MARKET-INTENT DIAGNOSTICS 2: the diagnostic exposes the exact marker responsible for a TOTALS classification", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    // M3.1 Phase B positive 1's exact fixture — the market_intent_evidence
+    // diagnostic fires for a DEFERRED claim too (not only a hard rejection),
+    // so this reproduces the diagnostic without needing a fresh, unproven
+    // fixture: "ничья" -> MONEYLINE_3WAY/DRAW (conflicting), "ТБ 2.5" ->
+    // TOTALS/OVER (supporting, matches the claim).
+    currentHandler = async () =>
+      anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Barcelona vs Real Madrid", market: "Totals", selection: "Over 2.5", line: "2.5", stake: 10 }));
+
+    const result = await parseBetSlipMessage("ничья\nТБ 2.5\nставка 10", "OCR");
+
+    assert.equal(result.valid, true, result.valid ? "" : `unexpected rejection: ${result.code} — ${result.error}`);
+
+    const diagnostics = marketIntentEvidenceDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].deferred, true);
+    const supporting = (diagnostics[0].supportingEvidence as Array<Record<string, unknown>>)[0];
+    assert.equal(supporting.marketType, "TOTALS");
+    assert.equal(supporting.selectionType, "OVER");
+    assert.equal(supporting.matchedText, "ТБ 2.5");
+    assert.equal(supporting.confidence, "TOKEN_MATCH");
+  } finally {
+    restore();
+  }
+});
+
+test("PRODUCTION MARKET-INTENT DIAGNOSTICS 3: the diagnostic exposes the exact marker responsible for a SPREAD classification", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ stake: 10 }));
+
+    const result = await parseBetSlipMessage("Арсенал Ф1(-1.5) ставка 10", "OCR");
+
+    assert.equal(result.valid, false);
+    if (result.valid) return;
+    assert.equal(result.code, "market_mismatch");
+
+    const diagnostics = marketIntentEvidenceDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 1);
+    const conflicting = (diagnostics[0].conflictingEvidence as Array<Record<string, unknown>>)[0];
+    assert.equal(conflicting.marketType, "SPREAD");
+    assert.equal(conflicting.embeddedLine, "-1.5");
+    assert.equal(conflicting.matchedText, "Арсенал Ф1(-1.5)");
+    assert.equal(conflicting.confidence, "TOKEN_MATCH");
+  } finally {
+    restore();
+  }
+});
+
+test("PRODUCTION MARKET-INTENT DIAGNOSTICS 4: matchedText never emits the full raw OCR text, only the small bounded window that produced each entry", async () => {
+  const { loggedCalls, restore } = captureConsoleLog();
+  try {
+    const padding = "лишний текст вокруг него много слов которые не относятся к рынку совсем никогда точно ";
+    const text = padding + "ничья Арсенал победа" + " " + padding + "ставка 10";
+    currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal", selection: "Win", stake: 10 }));
+
+    await parseBetSlipMessage(text, "OCR");
+
+    const rawLoggedText = JSON.stringify(loggedCalls);
+    assert.equal(rawLoggedText.includes(padding.trim()), false, "the diagnostic must never contain the surrounding padding text");
+    assert.equal(rawLoggedText.includes(text), false, "the diagnostic must never contain the full original OCR text verbatim");
+
+    const diagnostics = marketIntentEvidenceDiagnostics(loggedCalls);
+    assert.equal(diagnostics.length, 1);
+    for (const entry of [...(diagnostics[0].supportingEvidence as Array<Record<string, unknown>>), ...(diagnostics[0].conflictingEvidence as Array<Record<string, unknown>>)]) {
+      const matchedText = entry.matchedText as string;
+      assert.ok(matchedText.length <= "Арсенал победа".length, `matchedText "${matchedText}" must stay bounded to its own small window`);
+    }
+  } finally {
+    restore();
+  }
+});
+
+test("PRODUCTION MARKET-INTENT DIAGNOSTICS 5: existing parsing behavior (valid/code/deferred/selections) is completely unchanged by the new diagnostic fields", async () => {
+  // Re-asserts the exact same outcomes the pre-existing M3/M3.1 tests above
+  // already proved, for the identical fixtures — matchedText/confidence are
+  // purely additive diagnostic fields on evidence entries; nothing about
+  // classification, verification, deferral, or the final ParsedBetSlip
+  // result reads or depends on them.
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal", selection: "Win", stake: 10 }));
+  const ambiguous = await parseBetSlipMessage("ничья Арсенал победа ставка 10", "OCR");
+  assert.equal(ambiguous.valid, false);
+  if (!ambiguous.valid) assert.equal(ambiguous.code, "market_mismatch");
+
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ stake: 10 }));
+  const contradicted = await parseBetSlipMessage("Арсенал Ф1(-1.5) ставка 10", "OCR");
+  assert.equal(contradicted.valid, false);
+  if (!contradicted.valid) assert.equal(contradicted.code, "market_mismatch");
+
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Barcelona vs Real Madrid", market: "Totals", selection: "Over 2.5", line: "2.5", stake: 10 }));
+  const deferred = await parseBetSlipMessage("ничья\nТБ 2.5\nставка 10", "OCR");
+  assert.equal(deferred.valid, true);
+  if (deferred.valid) assert.equal(deferred.selections[0].line, "2.5");
+
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal", selection: "Win", stake: 10 }));
+  const accepted = await parseBetSlipMessage("Арсенал победа, ставка 10", "OCR");
+  assert.equal(accepted.valid, true);
+});
+
+/* ============================================================================
  * MASTER STAGE M3 — Phase 1 PROVED the M2.1 hypothesis (before Phase 2's
  * fix, this exact real-derived text — reused from Case D/laliga4.jpg's
  * already-proven numericRoleVerifier.test.ts fixture, not invented — made

@@ -174,7 +174,7 @@ test("duplicate but semantically identical evidence (two mentions of the same ma
 
 test("MONEYLINE_3WAY AWAY evidence vs AWAY claim -> CORROBORATED; vs HOME claim -> CONTRADICTED", () => {
   const awayEvidence: MarketIntentEvidence[] = [
-    { classification: { marketType: "MONEYLINE_3WAY", selectionType: "AWAY", participantName: null, embeddedLine: null }, confidence: "TOKEN_MATCH", start: 0, end: 1 },
+    { classification: { marketType: "MONEYLINE_3WAY", selectionType: "AWAY", participantName: null, embeddedLine: null }, confidence: "TOKEN_MATCH", start: 0, end: 1, matchedText: "2" },
   ];
   assert.equal(verifyMarketIntentClaim({ marketType: "MONEYLINE_3WAY", selectionType: "AWAY" }, awayEvidence).verdict, "CORROBORATED");
   assert.equal(verifyMarketIntentClaim({ marketType: "MONEYLINE_3WAY", selectionType: "HOME" }, awayEvidence).verdict, "CONTRADICTED");

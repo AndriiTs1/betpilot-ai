@@ -41,6 +41,19 @@ export interface MarketIntentEvidence {
   // this file.
   readonly start: number;
   readonly end: number;
+  // PRODUCTION MARKET-INTENT DIAGNOSTICS — the exact window text
+  // (originalText.slice(start, end), joined-with-single-spaces form of the
+  // 1-3 tokens findBackwardMatch actually matched) that produced
+  // `classification`. Always bounded by MAX_WINDOW_TOKENS below — never a
+  // larger substring, never surrounding context, never the rest of
+  // originalText — the same safety class already used by
+  // numericRoleEvidence.ts's own `marker` field. A caller that needs to
+  // explain WHY a given evidence entry classified the way it did (e.g. a
+  // diagnostic log) can read this directly instead of re-slicing
+  // originalText itself, which a diagnostic is never handed at all (see
+  // lib/logging/screenshotQa1Diagnostic.ts's own "never a full raw OCR
+  // transcript" constraint).
+  readonly matchedText: string;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -109,6 +122,7 @@ interface WindowMatch {
   readonly start: number;
   readonly end: number;
   readonly consumedIndices: readonly number[];
+  readonly windowText: string;
 }
 
 // Tries window sizes MAX_WINDOW_TOKENS..1 ENDING at `endIndex` — i.e.
@@ -167,6 +181,7 @@ function findBackwardMatch(tokens: readonly Token[], endIndex: number, consumed:
       start: windowTokens[0].start,
       end: windowTokens[windowTokens.length - 1].end,
       consumedIndices,
+      windowText,
     };
   }
 
@@ -216,7 +231,13 @@ export function extractMarketIntentEvidence(originalText: string): readonly Mark
     if (!isPureNumberToken(tokens[i].text)) continue;
     const match = findBackwardMatch(tokens, i, consumed);
     if (!match) continue;
-    evidence.push({ classification: match.classification, confidence: "TOKEN_MATCH", start: match.start, end: match.end });
+    evidence.push({
+      classification: match.classification,
+      confidence: "TOKEN_MATCH",
+      start: match.start,
+      end: match.end,
+      matchedText: match.windowText,
+    });
     for (const idx of match.consumedIndices) consumed.add(idx);
   }
 
@@ -241,7 +262,13 @@ export function extractMarketIntentEvidence(originalText: string): readonly Mark
     if (consumed.has(i)) continue;
     const match = findBackwardMatch(tokens, i, consumed);
     if (!match) continue;
-    evidence.push({ classification: match.classification, confidence: "TOKEN_MATCH", start: match.start, end: match.end });
+    evidence.push({
+      classification: match.classification,
+      confidence: "TOKEN_MATCH",
+      start: match.start,
+      end: match.end,
+      matchedText: match.windowText,
+    });
     for (const idx of match.consumedIndices) consumed.add(idx);
   }
 

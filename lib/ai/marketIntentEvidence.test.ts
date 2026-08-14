@@ -440,3 +440,50 @@ test("H3: existing MONEYLINE/TOTALS/Ф1 evidence is unaffected by the new handic
   assert.equal(shortForm[0].classification.marketType, "SPREAD");
   assert.equal(shortForm[0].classification.participantName, "Арсенал");
 });
+
+/* ============================================================================
+ * PRODUCTION MARKET-INTENT DIAGNOSTICS — `matchedText` proves, for every
+ * evidence entry, exactly which bounded local window produced it. It must
+ * always equal the exact slice of originalText at [start, end) (never a
+ * larger/different substring, never a normalized form), and must always stay
+ * bounded (never the whole message), regardless of marketType.
+ * ============================================================================ */
+
+test("matchedText equals text.slice(start, end) exactly, for a DRAW (1X2) entry", () => {
+  const text = "ничья ставка 10";
+  const evidence = extractMarketIntentEvidence(text);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].classification.marketType, "MONEYLINE_3WAY");
+  assert.equal(evidence[0].classification.selectionType, "DRAW");
+  assert.equal(evidence[0].matchedText, "ничья");
+  assert.equal(evidence[0].matchedText, spanText(text, evidence[0]));
+});
+
+test("matchedText equals text.slice(start, end) exactly, for a TOTALS entry", () => {
+  const text = "Арсенал ТБ 2.5 ставка 10";
+  const evidence = extractMarketIntentEvidence(text);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].classification.marketType, "TOTALS");
+  assert.equal(evidence[0].matchedText, "ТБ 2.5");
+  assert.equal(evidence[0].matchedText, spanText(text, evidence[0]));
+});
+
+test("matchedText equals text.slice(start, end) exactly, for a SPREAD entry", () => {
+  const text = "Арсенал Ф1(-1.5) ставка 10";
+  const evidence = extractMarketIntentEvidence(text);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].classification.marketType, "SPREAD");
+  assert.equal(evidence[0].matchedText, "Арсенал Ф1(-1.5)");
+  assert.equal(evidence[0].matchedText, spanText(text, evidence[0]));
+});
+
+test("matchedText stays bounded to the matched window (<= MAX_WINDOW_TOKENS = 3 tokens) even inside a long surrounding message — never the full original text", () => {
+  const padding = "лишний текст вокруг которого много слов и он не должен попасть в matchedText совсем никогда ";
+  const text = padding + "ничья" + " " + padding + "ставка 10";
+  const evidence = extractMarketIntentEvidence(text);
+  const draw = evidence.find((e) => e.classification.marketType === "MONEYLINE_3WAY" && e.classification.selectionType === "DRAW");
+  assert.ok(draw, "expected a DRAW entry");
+  assert.equal(draw!.matchedText, "ничья");
+  assert.ok(draw!.matchedText.length < text.length / 4, "matchedText must be a small bounded fragment, never a large chunk of the original text");
+  assert.equal(draw!.matchedText.includes(padding.trim()), false);
+});

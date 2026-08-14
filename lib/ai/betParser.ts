@@ -773,6 +773,8 @@ function buildParsedBetSlipResult(
           selectionType: entry.classification.selectionType,
           participantName: entry.classification.participantName,
           embeddedLine: entry.classification.embeddedLine,
+          matchedText: entry.matchedText,
+          confidence: entry.confidence,
         });
         logScreenshotQa1Diagnostic({
           stage: "market_intent_evidence",

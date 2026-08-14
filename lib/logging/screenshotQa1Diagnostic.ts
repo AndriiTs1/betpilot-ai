@@ -193,11 +193,28 @@ export interface Qa1ReconciliationDiagnostic {
 // Team/participant names and market shorthand are public sports/UI data, the
 // same category already logged in Qa1ParserDiagnostic/Qa1ReconciliationDiagnostic
 // — never player id, auth, tokens, or raw image bytes/full OCR transcript.
+//
+// PRODUCTION MARKET-INTENT DIAGNOSTICS — before this, marketType/
+// selectionType/participantName/embeddedLine told you WHAT each evidence
+// entry classified to, but not WHICH local text produced it — a production
+// AMBIGUOUS/CONTRADICTED verdict with several conflicting entries (the
+// laliga3 incident: MONEYLINE_3WAY/AWAY x2, TOTALS/OVER, SPREAD/PARTICIPANT)
+// could not be explained without guessing which OCR fragment triggered
+// each one. `matchedText` closes that gap: the exact matched window
+// (lib/ai/marketIntentEvidence.ts's own `matchedText`), bounded to at most
+// MAX_WINDOW_TOKENS (3) tokens by construction — never a larger substring,
+// never the rest of the OCR text — the same safety class already used by
+// Qa1NumericEvidenceEntry's own `marker` field above. `confidence` mirrors
+// MarketIntentEvidence's own single-tier model today (only "TOKEN_MATCH"
+// exists); inlined as a literal type here rather than imported, matching
+// this file's own existing convention for Qa1NumericEvidenceEntry.confidence.
 export interface Qa1MarketIntentEvidenceEntry {
   marketType: string;
   selectionType: string;
   participantName: string | null;
   embeddedLine: string | null;
+  matchedText: string;
+  confidence: "TOKEN_MATCH";
 }
 
 export interface Qa1MarketIntentEvidenceDiagnostic {
