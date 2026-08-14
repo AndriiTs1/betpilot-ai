@@ -5,6 +5,8 @@ import {
   PROVIDER_UNAVAILABLE_TITLE,
   PROVIDER_UNAVAILABLE_MESSAGE,
   formatPotentialWin,
+  formatSingleOdds,
+  ODDS_UNAVAILABLE_NOTICE,
 } from "./BetPreviewCard";
 import type { BetSelectionOddsStatus } from "./betPreviewApi";
 
@@ -66,4 +68,51 @@ test("formatPotentialWin: null (nothing available yet) stays the existing 'Not a
 
 test("formatPotentialWin: zero is a real value, not treated as absent", () => {
   assert.equal(formatPotentialWin(0), "0.00 USDC");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Stage M4.5 — CLEAN UNAVAILABLE-ODDS UX                                    */
+/*                                                                             */
+/* No DOM-rendering infra exists in this project (see this file's own header */
+/* comment above), so PreviewCard's/OddsStatus's JSX itself is exercised     */
+/* manually — what IS covered here, without rendering, is the exact single  */
+/* condition (isConfirmableSingleOdds, tested in canConfirmBetSlip.test.ts)  */
+/* those components now branch their "Odds"/"Potential win"/notice output   */
+/* on, plus the exact copy that replaces every previous SINGLE warning box. */
+/* -------------------------------------------------------------------------- */
+
+// Requirement 2: SINGLE + odds unavailable shows "Odds" / "Not available".
+// formatSingleOdds is the exact function PreviewCard's "Odds" row calls —
+// currentOdds is null in every unavailable case (see this function's own
+// doc comment in BetPreviewCard.tsx).
+test("formatSingleOdds: null currentOdds (the unavailable-odds case) renders 'Not available'", () => {
+  assert.equal(formatSingleOdds(null), "Not available");
+});
+
+test("formatSingleOdds: a real current price is formatted, never 'Not available'", () => {
+  assert.equal(formatSingleOdds(1.91), "1.91");
+});
+
+// Requirement 3: exactly one concise message, the new required copy.
+test("ODDS_UNAVAILABLE_NOTICE: matches the required concise copy exactly", () => {
+  assert.equal(ODDS_UNAVAILABLE_NOTICE, "Exact odds for this selection aren't available right now.");
+});
+
+// Requirement 5: none of the old verbose warning copy this notice replaces
+// (the "could not be verified" / "check the bet details" / "try again
+// later" / "odds unavailable... edit your bet" boxes) may reappear inside
+// the new single message.
+test("ODDS_UNAVAILABLE_NOTICE: never contains any of the old verbose warning copy it replaces", () => {
+  const lower = ODDS_UNAVAILABLE_NOTICE.toLowerCase();
+  for (const forbidden of [
+    "could not be verified",
+    "couldn't verify",
+    "check the bet details",
+    "try again later",
+    "edit your bet",
+    "operator",
+    "provider",
+  ]) {
+    assert.equal(lower.includes(forbidden), false, `ODDS_UNAVAILABLE_NOTICE must not contain: "${forbidden}"`);
+  }
 });

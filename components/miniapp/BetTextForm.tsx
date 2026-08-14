@@ -11,7 +11,7 @@ import {
   type OddsChangedReconfirmUpdate,
 } from "./betConfirmApi";
 import { OddsStatus, PreviewCard } from "./BetPreviewCard";
-import { canConfirmBetSlip, getConfirmButtonLabel } from "./canConfirmBetSlip";
+import { canConfirmBetSlip, getConfirmButtonLabel, isOddsUnavailableForConfirm } from "./canConfirmBetSlip";
 
 interface BetTextFormProps {
   onBack: () => void;
@@ -112,6 +112,12 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
   // it's null exactly when there's nothing valid to submit (e.g. an
   // EXPRESS slip missing some selection's odds), regardless of type.
   const canConfirm = canConfirmBetSlip(phase === "ready", preview);
+  // Stage M4.5 — CLEAN UNAVAILABLE-ODDS UX. When the odds themselves are
+  // unavailable, there is no genuine confirmation action to offer, so the
+  // button is omitted entirely rather than rendered disabled (see
+  // isOddsUnavailableForConfirm's own comment for why this is independent
+  // of phase/isReady).
+  const oddsUnavailable = isOddsUnavailableForConfirm(preview);
 
   function handleMessageChange(value: string) {
     setMessage(value);
@@ -372,19 +378,21 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
             )
           )}
 
-          <button
-            type="button"
-            onClick={handleConfirm}
-            disabled={!canConfirm}
-            aria-label="Confirm bet"
-            className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
-            style={{
-              background: "#60E84A",
-              color: "#04170C",
-            }}
-          >
-            {getConfirmButtonLabel(phase === "confirming", preview)}
-          </button>
+          {!oddsUnavailable && (
+            <button
+              type="button"
+              onClick={handleConfirm}
+              disabled={!canConfirm}
+              aria-label="Confirm bet"
+              className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
+              style={{
+                background: "#60E84A",
+                color: "#04170C",
+              }}
+            >
+              {getConfirmButtonLabel(phase === "confirming", preview)}
+            </button>
+          )}
 
           <button
             type="button"

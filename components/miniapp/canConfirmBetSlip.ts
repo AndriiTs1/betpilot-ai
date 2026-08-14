@@ -24,7 +24,11 @@ import type { BetPreviewSelection, BetPreviewSuccess } from "./betPreviewApi";
 // explicitly out of scope for this invariant (see this file's own
 // hasUnresolvedSingleOdds/getConfirmButtonLabel below, which read this
 // exact same field and nothing else).
-function isConfirmableSingleOdds(selection: BetPreviewSelection | undefined): boolean {
+// Stage M4.5 — exported (was module-private) so BetPreviewCard.tsx can
+// drive its "Potential win" row and its single unavailable-odds notice off
+// this exact same condition, instead of re-deriving an equivalent check
+// from selection.submittedOdds independently.
+export function isConfirmableSingleOdds(selection: BetPreviewSelection | undefined): boolean {
   if (!selection) return false;
   const { submittedOdds } = selection;
   // Number.isFinite rejects both NaN and +/-Infinity; the `> 0` guard
@@ -73,6 +77,22 @@ export function hasUnverifiedOddsStatus(selections: readonly BetPreviewSelection
   return selections.some((selection) => UNVERIFIED_ODDS_STATUSES.has(selection.oddsStatus));
 }
 
+// Stage M4.5 semantic review — the single correct "is this SINGLE
+// selection's odds unavailable" signal, for presentation code (the
+// "Potential win" row and the unavailable-odds notice). isConfirmableSingleOdds
+// ALONE is not sufficient here: it only reads submittedOdds, which
+// buildBetSlipPreview.ts's effectiveSubmittedOdds (see that file's own
+// comment) can be non-null even when the provider lookup failed — a
+// screenshot almost always carries a real OCR'd price regardless of
+// whether the provider ever matched it. oddsStatus (server truth) must be
+// checked first, exactly as canConfirmBetSlip's own gate and
+// isOddsUnavailableForConfirm below already do; isConfirmableSingleOdds
+// only adds the narrower, defensive "somehow still no submittedOdds
+// despite a VERIFIED/ODDS_CHANGED status" case on top of that.
+export function isSingleSelectionOddsUnavailable(selection: BetPreviewSelection): boolean {
+  return hasUnverifiedOddsStatus([selection]) || !isConfirmableSingleOdds(selection);
+}
+
 export function canConfirmBetSlip(isReady: boolean, preview: BetPreviewSuccess | null): boolean {
   if (!isReady || preview === null || preview.previewToken === null) return false;
 
@@ -87,6 +107,23 @@ export function canConfirmBetSlip(isReady: boolean, preview: BetPreviewSuccess |
   }
 
   return true;
+}
+
+// Stage M4.5 — CLEAN UNAVAILABLE-ODDS UX. True exactly when this preview
+// cannot be confirmed because verified/current odds do not exist for at
+// least one selection — the same structural signal canConfirmBetSlip
+// already blocks Confirm for (hasUnverifiedOddsStatus, and for SINGLE also
+// isConfirmableSingleOdds), factored out so BetTextForm/BetScreenshotForm
+// can hide (not merely disable) the Confirm button. Deliberately does NOT
+// read isReady/phase/previewToken the way canConfirmBetSlip does — those
+// describe whether the app is ready to submit *right now* (e.g. mid
+// "confirming" request), not whether the odds themselves are unavailable,
+// so this must stay false once a confirm attempt is legitimately underway.
+export function isOddsUnavailableForConfirm(preview: BetPreviewSuccess | null): boolean {
+  if (preview === null) return false;
+  if (hasUnverifiedOddsStatus(preview.preview.selections)) return true;
+  if (preview.preview.type === "SINGLE") return !isConfirmableSingleOdds(preview.preview.selections[0]);
+  return false;
 }
 
 // Step 15J.1 — the one place BetTextForm/BetScreenshotForm derive their

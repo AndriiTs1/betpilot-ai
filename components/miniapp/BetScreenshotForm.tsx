@@ -17,7 +17,7 @@ import {
 } from "./betConfirmApi";
 import { OddsStatus, PreviewCard } from "./BetPreviewCard";
 import type { BetPreviewSuccess } from "./betPreviewApi";
-import { canConfirmBetSlip, getConfirmButtonLabel } from "./canConfirmBetSlip";
+import { canConfirmBetSlip, getConfirmButtonLabel, isOddsUnavailableForConfirm } from "./canConfirmBetSlip";
 
 interface BetScreenshotFormProps {
   onBack: () => void;
@@ -170,6 +170,12 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
   // it's null exactly when there's nothing valid to submit, regardless of
   // type.
   const canConfirm = canConfirmBetSlip(phase === "ready", preview);
+  // Stage M4.5 — CLEAN UNAVAILABLE-ODDS UX. When the odds themselves are
+  // unavailable, there is no genuine confirmation action to offer, so the
+  // button is omitted entirely rather than rendered disabled (see
+  // isOddsUnavailableForConfirm's own comment for why this is independent
+  // of phase/isReady).
+  const oddsUnavailable = isOddsUnavailableForConfirm(preview);
 
   async function handleRecognize() {
     if (!canRecognize || !file || inFlightRef.current) return;
@@ -457,19 +463,21 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
               )
             )}
 
-            <button
-              type="button"
-              onClick={handleConfirm}
-              disabled={!canConfirm}
-              aria-label="Confirm bet"
-              className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
-              style={{
-                background: "#60E84A",
-                color: "#04170C",
-              }}
-            >
-              {getConfirmButtonLabel(phase === "confirming", preview)}
-            </button>
+            {!oddsUnavailable && (
+              <button
+                type="button"
+                onClick={handleConfirm}
+                disabled={!canConfirm}
+                aria-label="Confirm bet"
+                className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
+                style={{
+                  background: "#60E84A",
+                  color: "#04170C",
+                }}
+              >
+                {getConfirmButtonLabel(phase === "confirming", preview)}
+              </button>
+            )}
 
             <button
               type="button"

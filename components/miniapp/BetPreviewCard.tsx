@@ -6,7 +6,7 @@ import { formatAmount } from "@/lib/bets/formatAmount";
 import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
 import { formatFullEventName } from "@/lib/bets/formatFullEventName";
 import { formatEventDateTime } from "@/lib/bets/formatEventDateTime";
-import { hasUnverifiedOddsStatus } from "./canConfirmBetSlip";
+import { hasUnverifiedOddsStatus, isSingleSelectionOddsUnavailable } from "./canConfirmBetSlip";
 
 // Shown whenever the odds provider could not positively confirm a
 // selection's exact event/market (NOT_FOUND) or couldn't verify anything
@@ -22,6 +22,14 @@ import { hasUnverifiedOddsStatus } from "./canConfirmBetSlip";
 // couldn't find this," which is not what happened.
 const ODDS_UNVERIFIED_MESSAGE =
   "We couldn't verify this event or market with the odds provider. Please check the bet details or try again later.";
+
+// Stage M4.5 — CLEAN UNAVAILABLE-ODDS UX. Replaces every previous SINGLE
+// "could not be verified" / "provider unavailable" / "odds unavailable"
+// warning box with one compact, visually secondary line — the player
+// never needs to know *why* odds aren't available (that distinction stays
+// server/log-side only, see Stage M4.4's diagnosticCode), only that they
+// aren't. See OddsStatus below for the one condition that triggers it.
+export const ODDS_UNAVAILABLE_NOTICE = "Exact odds for this selection aren't available right now.";
 
 // Provider-level technical failure (timeout, rate limit, quota exhausted,
 // auth failure, generic outage — see lib/odds/verification.ts's
@@ -95,6 +103,20 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
     const selection = preview.selections[0];
     const fullEventName = formatFullEventName(selection.event, selection.homeTeamName, selection.awayTeamName);
     const eventDateTime = formatEventDateTime(selection.eventStartTime);
+    // Stage M4.5 — CLEAN UNAVAILABLE-ODDS UX. Same single source of truth
+    // as OddsStatus below and the Confirm button's own visibility
+    // (canConfirmBetSlip.ts's isOddsUnavailableForConfirm): when this is
+    // false, "Potential win" is a real number derived from real odds; when
+    // true, it would only ever read "Not available", which the unavailable
+    // state's own compact notice already communicates, so the row is
+    // omitted entirely rather than repeating the same fact twice.
+    // Semantic review fix — this must key off oddsStatus (server truth),
+    // not merely submittedOdds: a screenshot bet's raw submitted price
+    // survives into effectiveSubmittedOdds even when the provider lookup
+    // failed (see buildBetSlipPreview.ts's own comment), so
+    // isConfirmableSingleOdds alone would wrongly call a genuine NOT_FOUND
+    // "available." isSingleSelectionOddsUnavailable checks oddsStatus first.
+    const oddsAvailable = !isSingleSelectionOddsUnavailable(selection);
     return (
       <div
         className="rounded-2xl p-4"
@@ -119,13 +141,20 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
           wrap
         />
         <PreviewRow label="Stake" value={formatAmount(preview.stake)} />
-        <PreviewRow label="Odds" value={formatSingleOdds(selection.currentOdds)} emphasis="prominent" />
         <PreviewRow
-          label="Potential win"
-          value={formatPotentialWin(preview.potentialWin)}
-          emphasis="hero"
-          last
+          label="Odds"
+          value={formatSingleOdds(selection.currentOdds)}
+          emphasis="prominent"
+          last={!oddsAvailable}
         />
+        {oddsAvailable && (
+          <PreviewRow
+            label="Potential win"
+            value={formatPotentialWin(preview.potentialWin)}
+            emphasis="hero"
+            last
+          />
+        )}
       </div>
     );
   }
@@ -226,15 +255,24 @@ function PreviewRow({
   );
 }
 
-// Stage 12, Phase 3 — driven by each selection's oddsStatus instead of the
-// old flat matched/withinTolerance booleans. For SINGLE, renders the exact
-// same 4 states as before (not provided / verified / changed / couldn't
-// verify) with identical wording — "not provided" is still checked first,
-// off submittedOdds directly, so it's never conflated with a real
-// verification failure (oddsStatus alone can't distinguish those two,
-// since both currently produce UNAVAILABLE — see mapOddsStatus.ts). For
-// EXPRESS, shows a compact summary across all selections instead of one
-// box per leg (each leg's own badge is already shown in PreviewCard above).
+// Stage M4.5 — CLEAN UNAVAILABLE-ODDS UX. For SINGLE, every reason this
+// selection ends up with no confirmable current odds (provider outage,
+// NOT_FOUND, the reserved-but-unreachable PENDING, or the defensive
+// submittedOdds===null case) now collapses into ONE compact, visually
+// secondary notice — isSingleSelectionOddsUnavailable checks oddsStatus
+// (server truth) first, exactly like canConfirmBetSlip.ts's own gate and
+// the Confirm button's own visibility (isOddsUnavailableForConfirm), never
+// a second, independently-maintained condition. Deliberately NOT just
+// isConfirmableSingleOdds/submittedOdds alone: a screenshot's raw OCR'd
+// price survives into submittedOdds even when the provider never matched
+// anything (see buildBetSlipPreview.ts's effectiveSubmittedOdds), so
+// oddsStatus must be checked first or a genuine NOT_FOUND selection with a
+// visible screenshot price would wrongly read as "available." The player
+// never needs to know *why* odds aren't available (that distinction stays
+// server/log-side only — see Stage M4.4's diagnosticCode), only that they
+// aren't. For EXPRESS, unchanged: a compact summary across all selections
+// instead of one box per leg (each leg's own badge is already shown in
+// PreviewCard above).
 export function OddsStatus({ preview }: { preview: BetPreview }) {
   if (preview.type === "EXPRESS") {
     return <ExpressOddsSummary preview={preview} />;
@@ -242,54 +280,14 @@ export function OddsStatus({ preview }: { preview: BetPreview }) {
 
   const selection = preview.selections[0];
 
-  // Checked BEFORE the submittedOdds===null branch below: a provider
-  // outage/timeout/rate-limit/quota-exhaustion also always leaves
-  // submittedOdds null (no price was ever found to promote), so this must
-  // be distinguished first, or every provider-technical failure would fall
-  // into the generic "Odds unavailable... edit your bet" copy below, which
-  // wrongly implies something about the player's own input.
-  if (isProviderUnavailable(selection.oddsStatus)) {
-    return <StatusBox tone="warning" label={PROVIDER_UNAVAILABLE_TITLE} description={PROVIDER_UNAVAILABLE_MESSAGE} />;
+  if (isSingleSelectionOddsUnavailable(selection)) {
+    return <p className="mt-2 text-xs leading-relaxed text-slate-400">{ODDS_UNAVAILABLE_NOTICE}</p>;
   }
 
-  // Step 15J.1 — the backend now blocks confirmation outright whenever this
-  // is null (app/api/miniapp/bets/text/confirm/route.ts's
-  // ODDS_REQUIRED_BEFORE_CONFIRMATION), so this can no longer say "add odds
-  // to verify" (odds are optional; the provider is expected to supply and
-  // verify them automatically) or otherwise imply the bet is still
-  // submittable — see components/miniapp/canConfirmBetSlip.ts's
-  // hasUnresolvedSingleOdds, which gates the Confirm button off this exact
-  // same condition. Deliberately not more specific about *why* the lookup
-  // didn't resolve (event not found vs. mapping failure, etc.) — that
-  // distinction is server-side only.
-  if (selection.submittedOdds === null) {
-    return (
-      <StatusBox
-        tone="warning"
-        label="Odds unavailable"
-        description="This bet cannot be confirmed because current odds are unavailable. Try again later or edit your bet."
-      />
-    );
-  }
-
-  // M4.1 — CLEAN PLAYER ODDS UX. VERIFIED and ODDS_CHANGED are both a
-  // normal, ready-to-confirm selection (the provider positively matched it
-  // and has a real current price) — the "Odds" row above already shows
-  // that price. Neither status renders a box here: there is nothing to
-  // explain, and the old boxes existed only to show the exact
-  // screenshot-vs-provider comparison (submitted/current/difference/
-  // bookmaker) the product rule forbids surfacing to the player.
-  if (selection.oddsStatus === "VERIFIED" || selection.oddsStatus === "ODDS_CHANGED") {
-    return null;
-  }
-
-  // NOT_FOUND and the reserved-but-unreachable PENDING share this fixed,
-  // friendly message and block confirmation outright (canConfirmBetSlip.ts's
-  // hasUnverifiedOddsStatus) — UNAVAILABLE is already handled above, before
-  // this point is ever reached. There is deliberately no "submit anyway"
-  // framing here either: the provider never confirmed this selection, so it
-  // must never reach the operator queue.
-  return <StatusBox tone="warning" label="Odds could not be verified" description={ODDS_UNVERIFIED_MESSAGE} />;
+  // VERIFIED and ODDS_CHANGED are both a normal, confirmable selection —
+  // the "Odds" row above already shows the real current price, so there is
+  // nothing left to explain here.
+  return null;
 }
 
 function ExpressOddsSummary({ preview }: { preview: BetPreview }) {
