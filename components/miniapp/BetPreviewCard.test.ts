@@ -94,15 +94,17 @@ test("formatSingleOdds: a real current price is formatted, never 'Not available'
 });
 
 // Requirement 3: exactly one concise message, the new required copy.
+// Stage M4.6 — shortened again, same meaning, still one compact line.
 test("ODDS_UNAVAILABLE_NOTICE: matches the required concise copy exactly", () => {
-  assert.equal(ODDS_UNAVAILABLE_NOTICE, "Exact odds for this selection aren't available right now.");
+  assert.equal(ODDS_UNAVAILABLE_NOTICE, "Odds for this selection are currently unavailable.");
 });
 
-// Requirement 5: none of the old verbose warning copy this notice replaces
-// (the "could not be verified" / "check the bet details" / "try again
-// later" / "odds unavailable... edit your bet" boxes) may reappear inside
-// the new single message.
-test("ODDS_UNAVAILABLE_NOTICE: never contains any of the old verbose warning copy it replaces", () => {
+// Requirement 5/7: none of the old verbose warning copy this notice
+// replaces (the "could not be verified" / "check the bet details" / "try
+// again later" / "odds unavailable... edit your bet" boxes), AND the prior
+// Stage M4.5 sentence it just replaced, may reappear inside the new
+// message.
+test("ODDS_UNAVAILABLE_NOTICE: never contains any of the old verbose warning copy it replaces, including the prior M4.5 sentence", () => {
   const lower = ODDS_UNAVAILABLE_NOTICE.toLowerCase();
   for (const forbidden of [
     "could not be verified",
@@ -112,6 +114,8 @@ test("ODDS_UNAVAILABLE_NOTICE: never contains any of the old verbose warning cop
     "edit your bet",
     "operator",
     "provider",
+    "exact odds",
+    "aren't available right now",
   ]) {
     assert.equal(lower.includes(forbidden), false, `ODDS_UNAVAILABLE_NOTICE must not contain: "${forbidden}"`);
   }

@@ -154,6 +154,27 @@ function formatSignedLine(line: string): string {
   return `+${line}`;
 }
 
+// Stage M4.6 — generic dedup guard, not SPREAD- or team-specific: some
+// production selections classify with the raw, un-stripped text (including
+// an already-visible line, e.g. "Barcelona (-2)") as the participant name
+// itself (see lib/odds/legacyOddsBridge.ts's market-hint SPREAD
+// reconstruction path — a natural-language market hint like "Handicap" can
+// force a SPREAD classification without the classifier ever parsing the
+// parenthesized number out of the text, so it survives into
+// participantName unchanged), while the separately-stated canonical line
+// field is still correctly populated. Appending the formatted line again in
+// that case would double it ("Barcelona (-2) -2"). This only ever SKIPS the
+// append when the line is demonstrably already visible in the label — never
+// hides a line that isn't there, so a clean participant ("Barcelona") still
+// gets its line appended exactly as before. Checked against the line's raw
+// canonical form AND its signed display form (a positive line like "1.5" is
+// commonly written in the source text as "(1.5)" without a "+", so the
+// signed "+1.5" form alone wouldn't match).
+function labelAlreadyShowsLine(label: string, rawLine: string, formattedLine: string): boolean {
+  const lowerLabel = label.toLowerCase();
+  return lowerLabel.includes(rawLine.toLowerCase()) || lowerLabel.includes(formattedLine.toLowerCase());
+}
+
 export function normalizeSelectionToEnglish(input: NormalizeSelectionInput): string {
   const original = input.selection;
   if (typeof original !== "string") return original;
@@ -167,7 +188,12 @@ export function normalizeSelectionToEnglish(input: NormalizeSelectionInput): str
     typeof input.line === "string" &&
     isDecimalString(input.line)
   ) {
-    return `${clean(input.participant)} ${formatSignedLine(input.line)}`;
+    const participantLabel = clean(input.participant);
+    const formattedLine = formatSignedLine(input.line);
+    if (labelAlreadyShowsLine(participantLabel, input.line, formattedLine)) {
+      return participantLabel;
+    }
+    return `${participantLabel} ${formattedLine}`;
   }
 
   const text = clean(original);

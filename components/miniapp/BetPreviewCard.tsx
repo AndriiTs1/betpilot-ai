@@ -29,7 +29,8 @@ const ODDS_UNVERIFIED_MESSAGE =
 // never needs to know *why* odds aren't available (that distinction stays
 // server/log-side only, see Stage M4.4's diagnosticCode), only that they
 // aren't. See OddsStatus below for the one condition that triggers it.
-export const ODDS_UNAVAILABLE_NOTICE = "Exact odds for this selection aren't available right now.";
+// Stage M4.6 — shortened further, same meaning, no added explanation.
+export const ODDS_UNAVAILABLE_NOTICE = "Odds for this selection are currently unavailable.";
 
 // Provider-level technical failure (timeout, rate limit, quota exhausted,
 // auth failure, generic outage — see lib/odds/verification.ts's

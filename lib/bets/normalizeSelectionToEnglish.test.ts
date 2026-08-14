@@ -319,6 +319,79 @@ test("SPREAD branch never fires for TOTALS — 'Over 2.5' with a marketType of T
   );
 });
 
+// ---------------------------------------------------------------------
+// Stage M4.6 — generic "don't double the line" dedup guard.
+//
+// Root cause this proves fixed: lib/odds/legacyOddsBridge.ts's market-hint
+// SPREAD reconstruction path (classifyBettingSelectionTextWithMarketHint,
+// triggered when a natural-language market hint like "Handicap" forces a
+// SPREAD classification of an otherwise-unparsed selection string) can
+// leave the FULL raw text, including an already-visible parenthesized
+// line, as the canonical participant name (e.g. participant: "Barcelona
+// (-2)"), while the separately-submitted line field is still correctly
+// "-2" — so the old unconditional `${participant} ${formattedLine}`
+// concatenation doubled it: "Barcelona (-2) -2". The fix must be generic
+// (not Barcelona/team-specific) and must never suppress a line that
+// genuinely isn't already shown.
+// ---------------------------------------------------------------------
+
+test("SPREAD dedup: participant already containing the line ('Barcelona (-2)') renders only once, not doubled", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Barcelona (-2)", marketType: "SPREAD", participant: "Barcelona (-2)", line: "-2" }),
+    "Barcelona (-2)",
+  );
+});
+
+test("SPREAD dedup: a positive line embedded without an explicit '+' ('Coventry City (1.5)') still matches and is not doubled", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({
+      selection: "Coventry City (1.5)",
+      marketType: "SPREAD",
+      participant: "Coventry City (1.5)",
+      line: "1.5",
+    }),
+    "Coventry City (1.5)",
+  );
+});
+
+test("SPREAD dedup: a clean participant with NO embedded line ('Barcelona') still gets the line appended exactly once — the fix never hides real line information", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Barcelona F2(-2)", marketType: "SPREAD", participant: "Barcelona", line: "-2" }),
+    "Barcelona -2",
+  );
+});
+
+test("SPREAD dedup: this is not team/name-specific — the same rule applies to an unrelated participant/line pair ('Real Madrid (-1)')", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Real Madrid (-1)", marketType: "SPREAD", participant: "Real Madrid (-1)", line: "-1" }),
+    "Real Madrid (-1)",
+  );
+  // And the clean-participant case for the same team+line still appends normally.
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Real Madrid F1", marketType: "SPREAD", participant: "Real Madrid", line: "-1" }),
+    "Real Madrid -1",
+  );
+});
+
+test("TOTALS is entirely unaffected by the SPREAD dedup guard — 'Over 2.5' with an embedded line still renders exactly once, never 'Over 2.5 2.5'", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Over 2.5", marketType: "TOTALS", participant: null, line: "2.5" }),
+    "Over 2.5 Goals",
+  );
+});
+
+test("TOTALS: a parenthesized embedded line ('Over (2.5)') is untouched by the dedup guard and rendered exactly once (unchanged pre-existing behavior)", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Over (2.5)", marketType: "TOTALS", participant: null, line: "2.5" }),
+    "Over (2.5)",
+  );
+});
+
+test("MONEYLINE is unaffected by the SPREAD dedup guard — display unchanged", () => {
+  assert.equal(normalizeSelectionToEnglish({ selection: "Arsenal Win", marketType: "MONEYLINE_2WAY" }), "Arsenal Win");
+  assert.equal(normalizeSelectionToEnglish({ selection: "П1" }), "Home Win");
+});
+
 test("existing call sites (no marketType/participant/line fields at all) are completely unaffected — every pre-H2 test above this section still exercises the exact same code path", () => {
   assert.equal(normalizeSelectionToEnglish({ selection: "П1" }), "Home Win");
   assert.equal(normalizeSelectionToEnglish({ selection: "ТБ 2.5" }), "Over 2.5 Goals");
