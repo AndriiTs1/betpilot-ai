@@ -618,6 +618,14 @@ export async function buildBetSlipPreview(
         outcome: single.selection,
         stake: slip.stake,
         odds: single.submittedOdds,
+        // Stage M4.8 — the confirmation acceptance baseline: BetPilot's own
+        // current price, exactly what the "Odds" row shows the player (see
+        // components/miniapp/BetPreviewCard.tsx's formatSingleOdds, which
+        // reads this same field). Never `single.submittedOdds` above (the
+        // player's own screenshot/typed reference number) — see
+        // PreviewTokenPayload.acceptedOdds's own comment for why conflating
+        // the two broke reconfirmation.
+        acceptedOdds: single.currentOdds,
         totalOdds: totalOdds !== null ? totalOdds.toNumber() : single.submittedOdds,
         oddsCheck: rawOddsCheck
           ? {

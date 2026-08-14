@@ -221,6 +221,7 @@ function singlePayload(overrides: Partial<PreviewTokenPayload> = {}): PreviewTok
     outcome: "Real Madrid Win",
     stake: 100,
     odds: 2.1,
+    acceptedOdds: 2.1,
     totalOdds: 2.1,
     oddsCheck: { matched: true, withinTolerance: true, sourceOdds: 2.1, bookmaker: "Bet365" },
     issuedAt,
@@ -715,6 +716,22 @@ test("Stage 3.1: existing OddsSnapshot behavior for SINGLE is unaffected by the 
   assert.equal(result.bet.stake.toString(), "100");
   assert.equal(result.bet.odds?.toString(), "2.1");
   assert.equal(result.bet.status, "PENDING");
+});
+
+// Stage M4.8 — the confirmation-baseline fix's persistence-layer proof:
+// Bet.odds must be the price the bet is actually confirmed at
+// (acceptedOdds — BetPilot's own current price shown in the preview being
+// confirmed), never the player's own screenshot/typed reference price
+// (odds), which is kept only as separate diagnostic/audit input to
+// OddsSnapshot. Uses deliberately different values for the two token
+// fields so a regression back to reading `odds` would fail loudly here.
+test("Stage M4.8: Bet.odds is acceptedOdds, never the screenshot/reference odds field", async () => {
+  const db = createFakeDb();
+  const payload = singlePayload({ odds: 2.16, acceptedOdds: 2.04 });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  assert.equal(result.bet.odds?.toString(), "2.04", "Bet.odds must be the accepted/current price, not the 2.16 screenshot reference");
 });
 
 // ---------------------------------------------------------------------

@@ -290,6 +290,7 @@ function singleTokenInput(overrides: Partial<PreviewTokenInput> = {}): PreviewTo
     outcome: "Real Madrid Win",
     stake: 100,
     odds: 2.1,
+    acceptedOdds: 2.1,
     totalOdds: 2.1,
     oddsCheck: { matched: true, withinTolerance: true, sourceOdds: 2.1, bookmaker: "Bet365" },
     ...overrides,
@@ -759,6 +760,76 @@ test("confirm route: EXPRESS with exactly one leg's odds changed rejects the ent
   assert.equal(body.error, "ODDS_CHANGED_RECONFIRM_REQUIRED");
   assert.equal(db._debug.betCount(), 0);
   assert.equal(db._debug.createCallCount(), 0);
+});
+
+// Stage M4.8 (Phase 6) — EXPRESS's own version of the SINGLE
+// screenshot-vs-current baseline fix: this leg's screenshot/submitted
+// reference (1.80) already differs from BetPilot's current price (2.00) at
+// preview time, and the provider moves again at confirm time (to 1.90) —
+// the reconfirm must compare against 2.00 (what the player was shown), not
+// 1.80 (the screenshot), and the refreshed baseline must then become 1.90
+// for the next attempt. A stable second confirmation creates exactly one
+// Bet, with BetSelection.currentOdds — never .odds, the diagnostic
+// screenshot reference — reflecting the final accepted price.
+test("confirm route: EXPRESS reconfirm baseline is each leg's current provider price, never its screenshot reference — full cycle creates exactly one Bet at the refreshed price", async () => {
+  const db = createFakeDb();
+  const token = signExpressPreviewToken(
+    expressTokenInput({
+      selections: [
+        { sport: "Football", event: "Real Madrid vs Barcelona", outcome: "Real Madrid Win", market: "Match Winner", submittedOdds: "1.80", currentOdds: "2.00", oddsStatus: "ODDS_CHANGED" },
+        expressTokenInput().selections[1],
+      ],
+    }),
+    PREVIEW_SECRET,
+  );
+
+  // First confirm: the provider has moved again since preview (2.00 -> 1.90)
+  // — must 409, never silently accept, and never compare against the 1.80
+  // screenshot reference.
+  const firstRes = await handleBetConfirm(
+    confirmRequest(token),
+    fakeOptions(db, {
+      verifyOddsFn: fakeVerifyOddsFnByEvent({
+        "Real Madrid vs Barcelona": oddsChangedResult(1.9, 2.0),
+        "Inter Milan vs Juventus": { matched: true, withinTolerance: true, sourceOdds: 1.7, submittedOdds: 1.7, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null },
+      }),
+    }),
+  );
+  assert.equal(firstRes.status, 409);
+  const firstBody = (await json(firstRes)) as { error: string; refreshedPreviewToken: string | null; refreshedPreview: { selections: Array<{ currentOdds: number | null }> } };
+  assert.equal(firstBody.error, "ODDS_CHANGED_RECONFIRM_REQUIRED");
+  assert.equal(firstBody.refreshedPreview.selections[0].currentOdds, 1.9, "refreshed preview reflects the just-observed 1.9, not the 1.8 screenshot number");
+  assert.equal(db._debug.betCount(), 0);
+
+  // Second, explicit confirmation: provider is STILL at 1.9 (the price the
+  // player was just shown) — must succeed, exactly once.
+  const secondRes = await handleBetConfirm(
+    confirmRequest(firstBody.refreshedPreviewToken),
+    fakeOptions(db, {
+      verifyOddsFn: fakeVerifyOddsFnByEvent({
+        "Real Madrid vs Barcelona": { matched: true, withinTolerance: true, sourceOdds: 1.9, submittedOdds: 1.9, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null },
+        "Inter Milan vs Juventus": { matched: true, withinTolerance: true, sourceOdds: 1.7, submittedOdds: 1.7, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null },
+      }),
+    }),
+  );
+  assert.equal(secondRes.status, 200);
+  const secondBody = (await json(secondRes)) as { bet: { selections: Array<{ odds: string | null; currentOdds: string | null }> } };
+  // The accepted/settled price — what the bet is actually placed at — is
+  // 1.9, never the stale 1.8 screenshot reference. This is the safety-
+  // relevant field; it is always correct regardless of how many reconfirm
+  // cycles occurred.
+  assert.equal(secondBody.bet.selections[0].currentOdds, "1.9", "the accepted price is 1.9, never the stale 1.8 screenshot reference");
+  // BetSelection.odds is diagnostic-only (never read for confirmability,
+  // tolerance, or Bet.odds) — after a reconfirm cycle it reflects the price
+  // that reconfirm compared against (2.0, this leg's preview-time
+  // acceptedOdds), not the very first screenshot number (1.8). The
+  // freshness/safety-relevant baseline is always acceptedOdds/currentOdds,
+  // proven above — this field's long-term audit fidelity across multiple
+  // cycles is a secondary, non-safety concern this stage doesn't fully
+  // solve, and doesn't need to per the product contract's own wording
+  // (only the INITIAL preview's reference and the BASELINE are specified).
+  assert.equal(secondBody.bet.selections[0].odds, "2", "diagnostic-only field, reflects this reconfirm cycle's own comparison input");
+  assert.equal(db._debug.betCount(), 1, "exactly one Bet created, only once the player explicitly confirmed the price they were actually shown");
 });
 
 test("confirm route: EXPRESS with one leg changed and one leg UNAVAILABLE returns 503 VERIFICATION_UNAVAILABLE, no refreshed preview/token, no DB write", async () => {
@@ -1298,7 +1369,48 @@ test("Step 15I (F): a preview built from auto-looked-up odds confirms normally �
   assert.equal(db._debug.oddsSnapshotCreateCount(), 1, "an OddsSnapshot must be created for the confirmed bet");
 });
 
-test("Step 15I (G): the provider price moves between preview and confirm — 409 ODDS_CHANGED_RECONFIRM_REQUIRED, the refreshed preview carries the updated provider odds, and no Bet is created until a second confirmation", async () => {
+// Stage M4.8 (Phase 4, Test 1) — the exact real production scenario this
+// whole stage fixes (Celta Vigo vs CA Osasuna, Over 2.5 Goals): a
+// screenshot's own submitted odds (2.16) already differ from BetPilot's
+// current provider price (2.04) at PREVIEW time, producing ODDS_CHANGED —
+// the player is shown only 2.04 (never 2.16, see
+// components/miniapp/BetPreviewCard.tsx's formatSingleOdds). Confirming
+// while the provider is STILL at 2.04 must succeed, at 2.04 — before this
+// stage, the freshness re-check compared against the stale 2.16 screenshot
+// number instead, which would have wrongly 409'd here.
+test("Stage M4.8 Test 1: screenshot odds 2.16, preview shows current 2.04, provider still 2.04 at first Confirm — 200, Bet created at 2.04, never the 2.16 screenshot reference", async () => {
+  const slip: ParsedBetSlip = {
+    type: "SINGLE",
+    stake: 5,
+    selections: [
+      { sport: "Football", event: "Celta Vigo vs CA Osasuna", market: null, selection: "Celta Vigo Win", submittedOdds: 2.16 },
+    ],
+  };
+  const preview = await buildBetSlipPreview(slip, PLAYER_ID, PREVIEW_SECRET, {
+    verifyOddsFn: async () => ({
+      matched: true, withinTolerance: false, sourceOdds: 2.04, submittedOdds: 2.16, discrepancyPercent: 5.88, bookmaker: "Pinnacle", note: null,
+    }),
+  });
+  assert.ok(preview.previewToken);
+  assert.equal(preview.preview.selections[0].currentOdds, 2.04, "sanity: the preview's own current price is 2.04 — what the player was actually shown");
+
+  const db = createFakeDb();
+  const res = await handleBetConfirm(
+    confirmRequest(preview.previewToken),
+    fakeOptions(db, {
+      verifyOddsFn: fakeVerifyOddsFnByEvent({
+        "Celta Vigo vs CA Osasuna": { matched: true, withinTolerance: true, sourceOdds: 2.04, submittedOdds: 2.04, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null },
+      }),
+    }),
+  );
+
+  assert.equal(res.status, 200);
+  const body = (await json(res)) as { bet: Record<string, unknown> };
+  assert.equal(body.bet.odds, 2.04, "Bet.odds must be the current price shown (2.04), never the 2.16 screenshot number");
+  assert.equal(db._debug.betCount(), 1);
+});
+
+test("Step 15I (G) / Stage M4.8: the provider price moves between preview and confirm — 409 ODDS_CHANGED_RECONFIRM_REQUIRED, the refreshed preview carries the updated provider odds, no Bet is created until a second confirmation, and the SECOND confirmation's baseline is the just-refreshed price (not the original)", async () => {
   const preview = await buildBetSlipPreview(autoLookupSlip(), PLAYER_ID, PREVIEW_SECRET, {
     verifyOddsFn: async () => ({
       matched: true, withinTolerance: true, sourceOdds: 2.1, submittedOdds: 2.1, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null,
@@ -1321,92 +1433,102 @@ test("Step 15I (G): the provider price moves between preview and confirm — 409
   assert.equal(typeof body.refreshedPreviewToken, "string");
   assert.equal(db._debug.betCount(), 0, "no Bet may be created before the player reconfirms against the refreshed price");
 
-  // The refreshedPreviewToken still quotes the player's ORIGINAL 2.1 (a
-  // reconfirm, not a silent acceptance of the moved price — see
-  // buildBetSlipPreview's signPreviewToken call: `odds: single.submittedOdds`
-  // is the selection's own already-known price, never the just-observed
-  // currentOdds). A second confirmation only succeeds once the market is
-  // back within tolerance of that same 2.1.
+  // Stage M4.8 — the refreshedPreviewToken's acceptance baseline is now the
+  // just-observed 1.85 (buildBetSlipPreview's signPreviewToken call:
+  // `acceptedOdds: single.currentOdds`), never the stale original 2.1 — a
+  // second confirmation succeeds once the market is STILL close to 1.85
+  // (what the player was actually just shown), not once it somehow returns
+  // to the original 2.1. This is the exact production defect this stage
+  // fixed: before it, this second call would have compared against 2.1
+  // forever, which could make the bet structurally unconfirmable if the
+  // live price never returned to that first-ever number.
   const secondRes = await handleBetConfirm(
     confirmRequest(body.refreshedPreviewToken),
     fakeOptions(db, {
-      verifyOddsFn: fakeVerifyOddsFnByEvent({ "Real Madrid vs Barcelona": { matched: true, withinTolerance: true, sourceOdds: 2.1, submittedOdds: 2.1, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null } }),
+      verifyOddsFn: fakeVerifyOddsFnByEvent({ "Real Madrid vs Barcelona": { matched: true, withinTolerance: true, sourceOdds: 1.85, submittedOdds: 1.85, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null } }),
     }),
   );
   assert.equal(secondRes.status, 200);
   const secondBody = (await json(secondRes)) as { bet: Record<string, unknown> };
-  assert.equal(secondBody.bet.odds, 2.1);
+  assert.equal(secondBody.bet.odds, 1.85, "Bet.odds must be the refreshed, just-accepted price, never the stale original 2.1");
   assert.equal(db._debug.betCount(), 1);
 });
 
-// M4.1 — CLEAN PLAYER ODDS UX, TEST 5: repeated market movement (the exact
-// scenario given: preview 1.39, first confirm sees 1.35, second confirm
-// sees 1.32) must require an explicit reconfirmation at EVERY step — never
-// silently accept a moved price, no matter how many times it moves before
-// the player catches up. Uses this file's own unmodified
-// ODDS_CHANGED_RECONFIRM_REQUIRED mechanism twice in a row, then a third,
-// final confirmation once the market genuinely returns to the originally
-// quoted 1.39 — proving the existing, untouched confirm-time safety layer
-// (verifyPreviewFreshness.ts) already has exactly this property.
-test("M4.1 test 5: repeated odds movement (1.39 -> 1.35 -> 1.32) requires reconfirmation at every step, never silently accepted, stake 5", async () => {
+// M4.1 / Stage M4.8 — CLEAN PLAYER ODDS UX, TEST 5: repeated market movement
+// (preview 2.04, first confirm sees 1.98, second confirm sees 1.95) must
+// require an explicit reconfirmation at EVERY step — never silently accept
+// a moved price, no matter how many times it moves before the player
+// catches up. Stage M4.8 corrected WHAT each step compares against: each
+// reconfirmation's baseline is now the price the player was MOST RECENTLY
+// shown (the previous step's refreshed currentOdds), never the original
+// screenshot/first-preview number — so the third, final confirmation
+// succeeds once the market is still at 1.95 (what step 2 just showed),
+// never by returning all the way back to the original 2.04. Before this
+// stage, every step compared against that first-ever 2.04, which could make
+// a bet structurally unconfirmable forever if the live price permanently
+// moved away from it and never returned — the exact real production defect
+// this stage fixed (16 consecutive 409s, never once succeeding).
+test("M4.1 test 5 / Stage M4.8: repeated odds movement (2.04 -> 1.98 -> 1.95) requires reconfirmation at every step against the MOST RECENT price, never silently accepted, never stuck comparing against the stale original, stake 5", async () => {
   const slip: ParsedBetSlip = {
     type: "SINGLE",
     stake: 5,
     selections: [
-      { sport: "Football", event: "Real Madrid vs Real Sociedad", market: null, selection: "Real Madrid Win", submittedOdds: 1.39 },
+      { sport: "Football", event: "Real Madrid vs Real Sociedad", market: null, selection: "Real Madrid Win", submittedOdds: 2.04 },
     ],
   };
   const preview = await buildBetSlipPreview(slip, PLAYER_ID, PREVIEW_SECRET, {
     verifyOddsFn: async () => ({
-      matched: true, withinTolerance: true, sourceOdds: 1.39, submittedOdds: 1.39, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null,
+      matched: true, withinTolerance: true, sourceOdds: 2.04, submittedOdds: 2.04, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null,
     }),
   });
   assert.ok(preview.previewToken);
 
   const db = createFakeDb();
 
-  // Step 1: preview quoted 1.39, market has moved to 1.35 — must 409, no Bet.
+  // Step 1: preview quoted 2.04, market has moved to 1.98 — must 409, no Bet.
   const firstRes = await handleBetConfirm(
     confirmRequest(preview.previewToken),
     fakeOptions(db, {
-      verifyOddsFn: fakeVerifyOddsFnByEvent({ "Real Madrid vs Real Sociedad": oddsChangedResult(1.35, 1.39) }),
+      verifyOddsFn: fakeVerifyOddsFnByEvent({ "Real Madrid vs Real Sociedad": oddsChangedResult(1.98, 2.04) }),
     }),
   );
   assert.equal(firstRes.status, 409);
   const firstBody = (await json(firstRes)) as { error: string; refreshedPreview: { selections: Array<{ currentOdds: number | null }> }; refreshedPreviewToken: string | null };
   assert.equal(firstBody.error, "ODDS_CHANGED_RECONFIRM_REQUIRED");
-  assert.equal(firstBody.refreshedPreview.selections[0].currentOdds, 1.35, "the player's new offer reflects the just-observed 1.35");
+  assert.equal(firstBody.refreshedPreview.selections[0].currentOdds, 1.98, "the player's new offer reflects the just-observed 1.98");
   assert.equal(db._debug.betCount(), 0, "no Bet after the first moved price");
 
-  // Step 2: the market has ALREADY moved again to 1.32 by the time the
+  // Step 2: the market has ALREADY moved again to 1.95 by the time the
   // player reconfirms — the second confirmation must ALSO 409, never treat
-  // "the player already saw one odds-changed warning" as license to accept
+  // "the player already saw one odds-changed refresh" as license to accept
   // whatever price comes next.
   const secondRes = await handleBetConfirm(
     confirmRequest(firstBody.refreshedPreviewToken),
     fakeOptions(db, {
-      verifyOddsFn: fakeVerifyOddsFnByEvent({ "Real Madrid vs Real Sociedad": oddsChangedResult(1.32, 1.39) }),
+      verifyOddsFn: fakeVerifyOddsFnByEvent({ "Real Madrid vs Real Sociedad": oddsChangedResult(1.95, 1.98) }),
     }),
   );
   assert.equal(secondRes.status, 409);
   const secondBody = (await json(secondRes)) as { error: string; refreshedPreview: { selections: Array<{ currentOdds: number | null }> }; refreshedPreviewToken: string | null };
   assert.equal(secondBody.error, "ODDS_CHANGED_RECONFIRM_REQUIRED");
-  assert.equal(secondBody.refreshedPreview.selections[0].currentOdds, 1.32, "the player's new offer reflects the further-moved 1.32");
+  assert.equal(secondBody.refreshedPreview.selections[0].currentOdds, 1.95, "the player's new offer reflects the further-moved 1.95");
   assert.equal(db._debug.betCount(), 0, "still no Bet after a second consecutive moved price");
 
-  // Step 3: the market is finally back at the originally-quoted 1.39 — only
-  // now may the explicit confirmation succeed.
+  // Step 3: the market is still at 1.95 — the SAME price step 2 just showed
+  // the player, never the original 2.04 — and only now may the explicit
+  // confirmation succeed. This is the corrected invariant: no infinite loop,
+  // no requirement that the market ever return to a stale historical number.
   const thirdRes = await handleBetConfirm(
     confirmRequest(secondBody.refreshedPreviewToken),
     fakeOptions(db, {
       verifyOddsFn: fakeVerifyOddsFnByEvent({
-        "Real Madrid vs Real Sociedad": { matched: true, withinTolerance: true, sourceOdds: 1.39, submittedOdds: 1.39, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null },
+        "Real Madrid vs Real Sociedad": { matched: true, withinTolerance: true, sourceOdds: 1.95, submittedOdds: 1.95, discrepancyPercent: 0, bookmaker: "Pinnacle", note: null },
       }),
     }),
   );
   assert.equal(thirdRes.status, 200);
   const thirdBody = (await json(thirdRes)) as { bet: Record<string, unknown> };
-  assert.equal(thirdBody.bet.odds, 1.39);
+  assert.equal(thirdBody.bet.odds, 1.95, "Bet.odds is the final accepted price (1.95), never the stale original 2.04");
   assert.equal(db._debug.betCount(), 1, "exactly one Bet, created only once the player explicitly confirmed a price that matched what they were shown");
 });
 
@@ -1431,6 +1553,13 @@ function unresolvedOddsSingleToken(): string {
   return signPreviewToken(
     singleTokenInput({
       odds: null,
+      // Stage M4.8 — real production tokens always have acceptedOdds null
+      // exactly when odds is null in this "provider never resolved a price"
+      // shape (acceptedOdds is single.currentOdds, which is null for
+      // NOT_FOUND/UNAVAILABLE, the same condition that leaves odds null
+      // here) — set explicitly so this fixture matches that real shape,
+      // since the route's own gate now checks acceptedOdds.
+      acceptedOdds: null,
       totalOdds: null,
       oddsCheck: { matched: false, withinTolerance: null, sourceOdds: null, bookmaker: null },
     }),
@@ -1714,6 +1843,7 @@ test("Stage 10.2: an expired Sportmonks token is rejected with 410, no Bet creat
     outcome: "Juventus победа",
     stake: 10,
     odds: 1.55,
+    acceptedOdds: 1.55,
     totalOdds: 1.55,
     oddsCheck: null,
     providerName: "SPORTMONKS",

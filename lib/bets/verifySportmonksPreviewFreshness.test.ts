@@ -20,6 +20,7 @@ function payload(overrides: Partial<PreviewTokenPayload> = {}): PreviewTokenPayl
     outcome: "Juventus победа",
     stake: 100,
     odds: 1.55,
+    acceptedOdds: 1.55,
     totalOdds: 1.55,
     oddsCheck: null,
     providerName: "SPORTMONKS",

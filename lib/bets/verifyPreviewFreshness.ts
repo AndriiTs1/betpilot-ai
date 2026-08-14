@@ -88,6 +88,20 @@ export interface VerifyPreviewFreshnessOptions {
 // extracted once, at parse time, before a token ever existed), so
 // canonicalLine — the exact value originally signed — is the only honest
 // source for a fresh re-verification pass to use.
+// Stage M4.8 — this reconstruction feeds ParsedBetSlip.submittedOdds, which
+// buildBetSlipPreview() treats as "the price to compare the fresh live fetch
+// against" (the confirmation acceptance baseline) — NOT as "whatever the
+// player originally submitted". Before this stage, this used payload.odds /
+// selection.submittedOdds (the original screenshot/typed reference price),
+// which never updates across reconfirm cycles: every subsequent freshness
+// check kept comparing a fresh live price against that same first-ever
+// number, forever, which could make a bet structurally unconfirmable if the
+// live price had permanently moved away from it (see this stage's own
+// root-cause trace, and PreviewTokenPayload.acceptedOdds's own comment).
+// Now uses acceptedOdds / currentOdds — the CURRENT BetPilot price the
+// player was actually just shown in the preview being confirmed — so each
+// reconfirm cycle compares against what the player most recently saw, not
+// against history.
 function reconstructParsedBetSlip(payload: AnyPreviewTokenPayload): ParsedBetSlip {
   if (payload.type === "SINGLE") {
     return {
@@ -99,7 +113,7 @@ function reconstructParsedBetSlip(payload: AnyPreviewTokenPayload): ParsedBetSli
           event: payload.event,
           market: null,
           selection: payload.outcome,
-          submittedOdds: payload.odds,
+          submittedOdds: payload.acceptedOdds,
           line: payload.canonicalLine ?? null,
         },
       ],
@@ -119,10 +133,28 @@ function reconstructParsedBetSlip(payload: AnyPreviewTokenPayload): ParsedBetSli
       event: selection.event,
       market: selection.market,
       selection: selection.outcome,
-      submittedOdds: selection.submittedOdds !== null ? Number(selection.submittedOdds) : null,
+      submittedOdds: selection.currentOdds !== null ? Number(selection.currentOdds) : null,
       line: selection.canonicalLine ?? null,
     })),
   };
+}
+
+// Stage M4.8 — "did this selection ever have ANY known price at preview
+// time" (either the player's own reference OR a resolved current price) —
+// the signal that decides whether a selection is exempt from gating (see
+// verifyPreviewFreshness's own loop below). Deliberately reads the ORIGINAL
+// token fields directly, never the reconstructed slip's submittedOdds
+// (which, per reconstructParsedBetSlip above, is now acceptedOdds/
+// currentOdds only) — a selection that had a real reference price but
+// genuinely couldn't be matched (NOT_FOUND) must still be gated, never
+// silently exempted just because its CURRENT price happens to be null.
+function hadAnyKnownPriceAtPreviewTime(payload: AnyPreviewTokenPayload, index: number): boolean {
+  if (payload.type === "SINGLE") {
+    return payload.odds !== null || payload.acceptedOdds !== null;
+  }
+
+  const selection = payload.selections[index];
+  return selection.submittedOdds !== null || selection.currentOdds !== null;
 }
 
 // The exact required precedence, expressed directly as "does any selection
@@ -219,31 +251,34 @@ export async function verifyPreviewFreshness(
   const relevantStatuses: BetSlipPreviewSelection["oddsStatus"][] = [];
 
   result.preview.selections.forEach((selection, index) => {
-    const originalSubmittedOdds = slip.selections[index].submittedOdds;
-
-    // A selection with no originally-submitted odds was never sent to the
-    // provider at preview time either — buildBetSlipPreview.ts
-    // unconditionally skips verification for a null submittedOdds
-    // (confirmed by direct inspection: such a selection's index is never
-    // added to verifiableIndices, so its oddsCheck stays exactly null, and
-    // mapOddsCheckToSelectionStatus(null) always returns exactly
-    // "UNAVAILABLE" — never VERIFIED, never ODDS_CHANGED, and never
+    // A selection with no known price at all (never a player reference NOR
+    // a resolved current price) was never really priced to begin with —
+    // buildBetSlipPreview.ts unconditionally skips verification for a null
+    // submittedOdds (confirmed by direct inspection: such a selection's
+    // index is never added to verifiableIndices, so its oddsCheck stays
+    // exactly null, and mapOddsCheckToSelectionStatus(null) always returns
+    // exactly "UNAVAILABLE" — never VERIFIED, never ODDS_CHANGED, and never
     // NOT_FOUND, since that branch requires a real, attempted oddsCheck).
-    // This means a null-submittedOdds selection's fresh status is
-    // deterministically, structurally always "UNAVAILABLE" — not a
-    // newly-discovered problem, but the exact same non-signal preview time
-    // already produced for it. Treating this as a genuine "could not
-    // verify" signal here would make every bet that ever had an
-    // unclaimed-odds leg permanently unconfirmable, since this selection
-    // could structurally never produce any other status — a correctness
-    // bug, not a stricter safety improvement. Excluding it from gating is
-    // therefore the correct realization of "freshness could not be
-    // confirmed" for THIS selection specifically: there was never a
-    // claimed value to go stale.
+    // This means such a selection's fresh status is deterministically,
+    // structurally always "UNAVAILABLE" — not a newly-discovered problem,
+    // but the exact same non-signal preview time already produced for it.
+    // Treating this as a genuine "could not verify" signal here would make
+    // every bet that ever had an unclaimed-odds leg permanently
+    // unconfirmable, since this selection could structurally never produce
+    // any other status — a correctness bug, not a stricter safety
+    // improvement. Excluding it from gating is therefore the correct
+    // realization of "freshness could not be confirmed" for THIS selection
+    // specifically: there was never a claimed value to go stale.
+    // Stage M4.8 — deliberately checked against hadAnyKnownPriceAtPreviewTime
+    // (the ORIGINAL token fields), never against the reconstructed slip's
+    // own submittedOdds (which is now acceptedOdds/currentOdds only, per
+    // reconstructParsedBetSlip above): a selection that HAD a real
+    // reference price but genuinely couldn't be matched (NOT_FOUND, so its
+    // currentOdds is null) must still be gated, never silently exempted.
     // It does not affect any OTHER selection's own status in the same
     // slip, which is still gated normally (see the dedicated
     // "does not hide UNAVAILABLE" test).
-    if (originalSubmittedOdds === null) return;
+    if (!hadAnyKnownPriceAtPreviewTime(payload, index)) return;
 
     relevantStatuses.push(selection.oddsStatus);
   });

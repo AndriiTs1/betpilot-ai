@@ -327,7 +327,14 @@ async function createSingleBetFromPreview(
           event: payload.event,
           outcome: payload.outcome,
           stake: new Prisma.Decimal(payload.stake),
-          odds: payload.odds !== null ? new Prisma.Decimal(payload.odds) : null,
+          // Stage M4.8 — Bet.odds is the price the bet is actually placed
+          // at, so it must be the confirmation acceptance baseline
+          // (acceptedOdds — BetPilot's own current price, exactly what was
+          // shown in the preview being confirmed), never `odds` (the
+          // player's own screenshot/typed reference, kept only for the
+          // OddsSnapshot diagnostic write below). See
+          // PreviewTokenPayload.acceptedOdds's own comment.
+          odds: payload.acceptedOdds !== null ? new Prisma.Decimal(payload.acceptedOdds) : null,
           totalOdds: payload.totalOdds !== null ? new Prisma.Decimal(payload.totalOdds) : null,
           status: "PENDING",
           ...providerReferenceColumnsFromToken(payload),

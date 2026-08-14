@@ -64,6 +64,7 @@ function singlePayload(overrides: Partial<PreviewTokenPayload> = {}): PreviewTok
     outcome: "Real Madrid",
     stake: 50,
     odds: 2.05,
+    acceptedOdds: 2.05,
     totalOdds: 2.05,
     oddsCheck: { matched: true, withinTolerance: true, sourceOdds: 2.05, bookmaker: "Pinnacle" },
     issuedAt,
@@ -149,6 +150,39 @@ test("verifyPreviewFreshness: SINGLE ODDS_CHANGED (better) is never silently acc
   assert.equal(decision.kind, "ODDS_CHANGED");
 });
 
+// Stage M4.8 (Phase 5) — the existing, unmodified 3% tolerance is preserved,
+// but now applied against acceptedOdds (the current preview's own baseline,
+// 2.04), never the original screenshot/reference odds. Both cases here use
+// a SINGLE payload whose `odds` (screenshot reference, 2.16) deliberately
+// differs from `acceptedOdds` (2.04) — if the comparison were still using
+// `odds`, both cases below would come out differently (2.16 vs 2.03 is a
+// ~6.4% move — ODDS_CHANGED; 2.16 vs 1.80 is a much larger move — also
+// ODDS_CHANGED either way, so a regression here specifically requires
+// checking discrepancyPercent, not just the final kind — see the dedicated
+// "reconstructed slip forwards... acceptedOdds" test above for the direct
+// proof of which value is forwarded).
+test("verifyPreviewFreshness: preview acceptedOdds 2.04, provider 2.03 (within the existing 3% tolerance, ~0.49% off) — accepted", async () => {
+  const payload = singlePayload({ odds: 2.16, acceptedOdds: 2.04 });
+
+  const decision = await verifyPreviewFreshness(payload, TEST_SECRET, {
+    verifyOddsFn: fakeVerifyOddsFn({ "Real Madrid vs Barcelona": verified(2.03, 2.04) }),
+  });
+
+  assert.deepEqual(decision, { kind: "ACCEPT" });
+});
+
+test("verifyPreviewFreshness: preview acceptedOdds 2.04, provider 1.80 (well beyond the existing 3% tolerance) — reconfirmation required", async () => {
+  const payload = singlePayload({ odds: 2.16, acceptedOdds: 2.04 });
+
+  const decision = await verifyPreviewFreshness(payload, TEST_SECRET, {
+    verifyOddsFn: fakeVerifyOddsFn({ "Real Madrid vs Barcelona": oddsChanged(1.8, 2.04) }),
+  });
+
+  assert.equal(decision.kind, "ODDS_CHANGED");
+  if (decision.kind !== "ODDS_CHANGED") return;
+  assert.equal(decision.refreshedPreview.selections[0].currentOdds, 1.8);
+});
+
 test("verifyPreviewFreshness: SINGLE NOT_FOUND returns SELECTION_UNAVAILABLE — the provider never confirmed this event/market, so it must never become a Bet", async () => {
   const payload = singlePayload({ odds: 2.05 });
 
@@ -205,7 +239,7 @@ test("decideFreshnessOutcome: PENDING resolves to VERIFICATION_UNAVAILABLE (unre
 /* -------------------------------------------------------------------------- */
 
 test("verifyPreviewFreshness: null submittedOdds is exempt from gating and never produces a false ODDS_CHANGED", async () => {
-  const payload = singlePayload({ odds: null, oddsCheck: null });
+  const payload = singlePayload({ odds: null, acceptedOdds: null, oddsCheck: null });
 
   // No fake outcome configured at all — buildBetSlipPreview must never even
   // attempt to verify a null-submittedOdds selection, so this test also
@@ -213,6 +247,22 @@ test("verifyPreviewFreshness: null submittedOdds is exempt from gating and never
   const decision = await verifyPreviewFreshness(payload, TEST_SECRET, { verifyOddsFn: fakeVerifyOddsFn({}) });
 
   assert.deepEqual(decision, { kind: "ACCEPT" });
+});
+
+// Stage M4.8 regression guard — the exact safety hazard the acceptedOdds
+// fix had to avoid introducing: a selection that HAD a real player
+// reference price (odds non-null) but genuinely couldn't be matched
+// (NOT_FOUND, so acceptedOdds is null) must still be gated as
+// SELECTION_UNAVAILABLE — never silently exempted from relevantStatuses and
+// defaulted to ACCEPT just because its CURRENT price happens to be null.
+test("verifyPreviewFreshness: a real reference price with no confirmable current price (NOT_FOUND) is still gated — never silently exempted and ACCEPTed", async () => {
+  const payload = singlePayload({ odds: 2.16, acceptedOdds: null });
+
+  const decision = await verifyPreviewFreshness(payload, TEST_SECRET, {
+    verifyOddsFn: fakeVerifyOddsFn({ "Real Madrid vs Barcelona": notFound(2.16) }),
+  });
+
+  assert.deepEqual(decision, { kind: "SELECTION_UNAVAILABLE" });
 });
 
 test("verifyPreviewFreshness: a null-submittedOdds leg is exempted, but does not hide a genuine NOT_FOUND on another relevant leg", async () => {
@@ -398,8 +448,46 @@ test("verifyPreviewFreshness: EXPRESS NOT_FOUND + UNAVAILABLE resolves to VERIFI
   assert.deepEqual(decision, { kind: "VERIFICATION_UNAVAILABLE" });
 });
 
-test("verifyPreviewFreshness: the reconstructed slip forwards exactly sport/event/selection/odds to the provider, nothing invented", async () => {
-  const payload = singlePayload({ sport: "Tennis", event: "Alcaraz vs Sinner", outcome: "Alcaraz", odds: 1.75 });
+// Stage M4.8 — EXPRESS's own version of the SINGLE proof above: each leg's
+// submittedOdds (a stale screenshot reference) and currentOdds (the price
+// actually shown for that leg in the preview being confirmed) are
+// deliberately different, so this proves the reconstructed slip forwards
+// currentOdds — never submittedOdds — as each leg's comparison baseline.
+test("verifyPreviewFreshness: EXPRESS forwards each leg's currentOdds (never its stale submittedOdds) as the comparison baseline", async () => {
+  const payload = expressPayload({
+    selections: [
+      { ...expressPayload().selections[0], submittedOdds: "2.16", currentOdds: "1.8" },
+      { ...expressPayload().selections[1], submittedOdds: "2.30", currentOdds: "1.94" },
+    ],
+  });
+  const capturedOdds: Record<string, number | null> = {};
+
+  const decision = await verifyPreviewFreshness(payload, TEST_SECRET, {
+    verifyOddsFn: async (input) => {
+      capturedOdds[input.event] = input.odds;
+      return verified(input.event === "Real Madrid vs Barcelona" ? 1.8 : 1.94, input.odds ?? 0);
+    },
+  });
+
+  assert.deepEqual(decision, { kind: "ACCEPT" });
+  assert.equal(capturedOdds["Real Madrid vs Barcelona"], 1.8, "must forward currentOdds (1.8), never submittedOdds (2.16)");
+  assert.equal(capturedOdds["Inter vs Juventus"], 1.94, "must forward currentOdds (1.94), never submittedOdds (2.30)");
+});
+
+// Stage M4.8 — rewritten: odds (2.16, a stale screenshot reference) and
+// acceptedOdds (1.75, the current price actually shown in the preview being
+// confirmed) are deliberately DIFFERENT values here, so this test can prove
+// exactly which one the reconstructed slip forwards as the freshness
+// comparison baseline. A regression back to forwarding `odds` would send
+// 2.16 to the provider and fail this assertion loudly.
+test("verifyPreviewFreshness: the reconstructed slip forwards sport/event/selection unchanged, and acceptedOdds (never the stale odds/reference field) as the comparison baseline", async () => {
+  const payload = singlePayload({
+    sport: "Tennis",
+    event: "Alcaraz vs Sinner",
+    outcome: "Alcaraz",
+    odds: 2.16,
+    acceptedOdds: 1.75,
+  });
   let capturedInput: OddsVerificationInput | undefined;
 
   const decision = await verifyPreviewFreshness(payload, TEST_SECRET, {
@@ -417,5 +505,5 @@ test("verifyPreviewFreshness: the reconstructed slip forwards exactly sport/even
   assert.equal(capturedInput?.sport.toLowerCase(), "tennis");
   assert.equal(capturedInput?.event, "Alcaraz vs Sinner");
   assert.equal(capturedInput?.selection, "Alcaraz");
-  assert.equal(capturedInput?.odds, 1.75);
+  assert.equal(capturedInput?.odds, 1.75, "must forward acceptedOdds (1.75), never the stale odds/reference field (2.16)");
 });

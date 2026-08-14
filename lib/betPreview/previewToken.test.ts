@@ -22,6 +22,7 @@ function singleInput(overrides: Partial<PreviewTokenInput> = {}): PreviewTokenIn
     outcome: "Real Madrid Win",
     stake: 100,
     odds: 2.1,
+    acceptedOdds: 2.1,
     totalOdds: 2.1,
     oddsCheck: { matched: true, withinTolerance: true, sourceOdds: 2.1, bookmaker: "Bet365" },
     ...overrides,
@@ -83,6 +84,7 @@ test("SINGLE: sign -> verify roundtrip returns the exact payload", () => {
   assert.equal(result.payload.outcome, "Real Madrid Win");
   assert.equal(result.payload.stake, 100);
   assert.equal(result.payload.odds, 2.1);
+  assert.equal(result.payload.acceptedOdds, 2.1);
   assert.equal(result.payload.totalOdds, 2.1);
   assert.deepEqual(result.payload.oddsCheck, {
     matched: true,
@@ -103,6 +105,31 @@ test("SINGLE: null odds/totalOdds/oddsCheck round-trip as null", () => {
   assert.equal(result.payload.odds, null);
   assert.equal(result.payload.totalOdds, null);
   assert.equal(result.payload.oddsCheck, null);
+});
+
+// Stage M4.8 — acceptedOdds is a genuinely separate field from odds: a
+// selection can have a real player-submitted reference price (odds) while
+// having no confirmable current price at all (acceptedOdds: null, e.g. the
+// provider never matched this selection) — proven here as its own case,
+// distinct from the "both null" case above.
+test("Stage M4.8 SINGLE: acceptedOdds round-trips independently of odds, including null while odds is a real number", () => {
+  const token = signPreviewToken(singleInput({ odds: 2.16, acceptedOdds: null }), SECRET);
+  const result = verifyPreviewToken(token, SECRET);
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.payload.odds, 2.16);
+  assert.equal(result.payload.acceptedOdds, null);
+});
+
+test("Stage M4.8 SINGLE: acceptedOdds can differ from odds (the screenshot-vs-current-price case)", () => {
+  const token = signPreviewToken(singleInput({ odds: 2.16, acceptedOdds: 2.04 }), SECRET);
+  const result = verifyPreviewToken(token, SECRET);
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.payload.odds, 2.16);
+  assert.equal(result.payload.acceptedOdds, 2.04);
 });
 
 test("SINGLE: a corrupted signature is rejected", () => {
@@ -565,6 +592,12 @@ test("Stage 3.1 backward compatibility: an old SINGLE token (signed before these
   assert.equal(result.ok, true, "an old-shaped, validly-signed token must still verify successfully");
   if (!result.ok) return;
   assert.equal(result.payload.playerId, "player-1");
+  // Stage M4.8 — an old token has no acceptedOdds key at all; it must
+  // normalize to that same token's own `odds` (2.1), the exact value
+  // acceptedOdds already effectively represented before this field existed
+  // — never to null (which would wrongly make an old, otherwise-perfectly
+  // confirmable token look like it has no confirmable price at all).
+  assert.equal(result.payload.acceptedOdds, 2.1);
   assert.equal(result.payload.providerEventId, null);
   assert.equal(result.payload.providerSportKey, null);
   assert.equal(result.payload.eventStartTime, null);

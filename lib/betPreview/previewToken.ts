@@ -86,7 +86,27 @@ export interface PreviewTokenPayload extends Partial<PreviewTokenProviderMetadat
   event: string;
   outcome: string;
   stake: number;
+  // Stage M4.8 — the player's own submitted/screenshot reference price.
+  // Kept for diagnostics/audit only (see createBetFromPreview.ts's
+  // OddsSnapshot write) — NEVER the confirmation acceptance baseline. See
+  // `acceptedOdds` below for that.
   odds: number | null;
+  // Stage M4.8 — the CURRENT BetPilot/provider price actually shown to the
+  // player in the preview this token represents. This — never `odds` above
+  // — is the confirmation acceptance baseline: lib/bets/verifyPreviewFreshness.ts
+  // compares a fresh live price against THIS value, and
+  // lib/bets/createBetFromPreview.ts writes THIS value (never `odds`) as
+  // Bet.odds. Before this field existed, the freshness re-check compared
+  // against `odds` (the original screenshot/typed number) on every single
+  // reconfirm cycle, forever — never the price the player was actually just
+  // shown — which could make a bet structurally unconfirmable if the live
+  // price had permanently moved away from that first number (see this
+  // stage's own root-cause trace). `undefined` on an older token (signed
+  // before this field existed) normalizes to `odds` at verify time
+  // (verifyPreviewToken's normalizeProviderMetadata) — the exact same value
+  // that field already represented for such a token, since this bug did not
+  // exist yet when it was signed.
+  acceptedOdds: number | null;
   totalOdds: number | null;
   oddsCheck: PreviewTokenOddsCheck | null;
   providerName?: string;
@@ -101,6 +121,13 @@ export interface PreviewTokenInput extends Partial<PreviewTokenProviderMetadata>
   outcome: string;
   stake: number;
   odds: number | null;
+  // Stage M4.8 — required, not optional: every real caller (only
+  // lib/bets/buildBetSlipPreview.ts and
+  // lib/bets/buildSportmonksFootballPreview.ts sign SINGLE tokens today)
+  // always has the current provider price on hand at sign time — see
+  // PreviewTokenPayload.acceptedOdds's own comment for what this represents
+  // and why it must never be conflated with `odds`.
+  acceptedOdds: number | null;
   totalOdds: number | null;
   oddsCheck: PreviewTokenOddsCheck | null;
   providerName?: string;
@@ -179,6 +206,14 @@ function hasValidProviderMetadataShape(p: Record<string, unknown>): boolean {
 function normalizeProviderMetadata(p: PreviewTokenPayload): PreviewTokenPayload {
   return {
     ...p,
+    // Stage M4.8 — `undefined` (an older token, signed before this field
+    // existed) falls back to that same token's own `odds` value — the exact
+    // value `acceptedOdds` already effectively was for a token from before
+    // this bug was fixed. An explicit `null` (a newer token that genuinely
+    // has no accepted price, e.g. odds were unavailable) must NEVER be
+    // coerced to `odds` here — `??` would wrongly do that, so this checks
+    // `undefined` specifically.
+    acceptedOdds: p.acceptedOdds !== undefined ? p.acceptedOdds : p.odds,
     providerEventId: p.providerEventId ?? null,
     providerSportKey: p.providerSportKey ?? null,
     eventStartTime: p.eventStartTime ?? null,
@@ -216,6 +251,7 @@ function hasValidPreviewTokenShape(
     typeof p.outcome === "string" &&
     typeof p.stake === "number" &&
     (p.odds === null || typeof p.odds === "number") &&
+    (p.acceptedOdds === undefined || p.acceptedOdds === null || typeof p.acceptedOdds === "number") &&
     (p.totalOdds === null || typeof p.totalOdds === "number") &&
     isPreviewTokenOddsCheckShape(p.oddsCheck) &&
     (p.providerName === undefined || (typeof p.providerName === "string" && p.providerName.length > 0)) &&
@@ -242,6 +278,7 @@ export function signPreviewToken(input: PreviewTokenInput, secret: string): stri
     outcome: input.outcome,
     stake: input.stake,
     odds: input.odds,
+    acceptedOdds: input.acceptedOdds,
     totalOdds: input.totalOdds,
     oddsCheck: input.oddsCheck,
     providerName: input.providerName ?? "THE_ODDS_API",

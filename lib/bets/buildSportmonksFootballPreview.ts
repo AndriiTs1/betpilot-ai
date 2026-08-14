@@ -290,6 +290,13 @@ export function signSportmonksFootballPreviewToken(
       outcome: selection.selection,
       stake: result.preview.stake,
       odds: selection.currentOdds,
+      // Stage M4.8 — Sportmonks never carries a distinct screenshot/typed
+      // reference price at all (this flow's own ParsedBetSlip always has
+      // submittedOdds: null — see verifySportmonksPreviewFreshness.ts), so
+      // `odds` above is already always the current provider price; this is
+      // simply the same value under PreviewTokenPayload's new required
+      // field name, not a behavior change.
+      acceptedOdds: selection.currentOdds,
       totalOdds: result.preview.totalOdds,
       oddsCheck: null,
       providerName: "SPORTMONKS",

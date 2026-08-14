@@ -367,27 +367,33 @@ export async function handleBetConfirm(
       return NextResponse.json({ bet: serializeSingleBet(existingSingle), idempotent: true });
     }
 
-    // Step 15J — a SINGLE token with odds:null means either the player
-    // never had a price at all, or (Step 15I's new SINGLE auto-lookup path)
-    // the provider lookup for a no-odds text bet never resolved to a real
-    // price (event not found, market unsupported, provider unavailable).
-    // Either way there is no verified number to bet at, and
-    // verifyPreviewFreshness has no signal to check freshness against for
-    // this selection (it structurally skips a null-original-odds selection
-    // from its rank computation — see that file's own comment — so it
-    // would otherwise ACCEPT unconditionally). Blocked here, before any
-    // provider call or rate-limit consumption, rather than silently
-    // creating a Bet with odds:null and no OddsSnapshot. Deliberately not
-    // narrowed to "text-originated" tokens: buildBetSlipPreview.ts (and
-    // therefore this exact PreviewTokenPayload shape and this exact confirm
-    // route) is shared byte-for-byte by the screenshot/OCR preview route
-    // too, with no field anywhere in the token recording which route
-    // produced it — there is no way to distinguish them here, and nothing
-    // in the app today (client-side canConfirmBetSlip only checks
-    // previewToken !== null; canSubmitBetSlip's operator-review odds-status
-    // allowance is defined but has zero live call sites) actually depends
-    // on a null-odds SINGLE confirm succeeding for either origin.
-    if (payload.odds === null) {
+    // Step 15J — a SINGLE token with no confirmable current price means
+    // either the player never had a price at all, or (Step 15I's new SINGLE
+    // auto-lookup path) the provider lookup for a no-odds text bet never
+    // resolved to a real price (event not found, market unsupported,
+    // provider unavailable). Either way there is no verified number to bet
+    // at. Blocked here, before any provider call or rate-limit consumption,
+    // rather than silently creating a Bet with odds:null and no
+    // OddsSnapshot. Deliberately not narrowed to "text-originated" tokens:
+    // buildBetSlipPreview.ts (and therefore this exact PreviewTokenPayload
+    // shape and this exact confirm route) is shared byte-for-byte by the
+    // screenshot/OCR preview route too, with no field anywhere in the token
+    // recording which route produced it — there is no way to distinguish
+    // them here, and nothing in the app today (client-side
+    // canConfirmBetSlip only checks previewToken !== null;
+    // canSubmitBetSlip's operator-review odds-status allowance is defined
+    // but has zero live call sites) actually depends on a null-price SINGLE
+    // confirm succeeding for either origin.
+    // Stage M4.8 — checks acceptedOdds (the confirmation baseline, BetPilot's
+    // own current price), not `odds` (the player's own screenshot/typed
+    // reference, which can be non-null even when there is genuinely no
+    // confirmable current price — e.g. NOT_FOUND with a real submitted
+    // number). This is also what keeps verifyPreviewFreshness's own
+    // exemption-from-gating check safe for SINGLE: by the time freshness
+    // runs, acceptedOdds is guaranteed non-null, so the lone selection can
+    // never be skipped and silently ACCEPTed (see that file's own
+    // hadAnyKnownPriceAtPreviewTime comment).
+    if (payload.acceptedOdds === null) {
       return NextResponse.json(
         {
           error: "ODDS_REQUIRED_BEFORE_CONFIRMATION",
