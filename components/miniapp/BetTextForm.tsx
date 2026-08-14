@@ -8,7 +8,6 @@ import {
   shouldResetPreviewAfterConfirmFailure,
   buildOddsChangedReconfirm,
   type AnyConfirmedBet,
-  type OddsChangedReconfirmUpdate,
 } from "./betConfirmApi";
 import { OddsStatus, PreviewCard } from "./BetPreviewCard";
 import { canConfirmBetSlip, getConfirmButtonLabel, isOddsUnavailableForConfirm } from "./canConfirmBetSlip";
@@ -73,12 +72,6 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
   // betPreviewApi.ts itself exports. Reset everywhere `error` is reset, so
   // it can never outlive the failure that set it.
   const [isTimeoutError, setIsTimeoutError] = useState(false);
-  // UI-E2 — set only when the most recent confirm attempt came back
-  // ODDS_CHANGED_RECONFIRM_REQUIRED; renders as an amber informational
-  // card instead of the red `error` paragraph. Cleared everywhere `error`
-  // is cleared, so it can never outlive the state that set it (same
-  // discipline as isTimeoutError above).
-  const [oddsChangedInfo, setOddsChangedInfo] = useState<OddsChangedReconfirmUpdate | null>(null);
 
   // inFlightRef guards against a double click firing two requests: React
   // state updates aren't guaranteed to be visible to a second synchronous
@@ -141,7 +134,6 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     setPhase("previewing");
     setError(null);
     setIsTimeoutError(false);
-    setOddsChangedInfo(null);
 
     const result = await fetchBetPreview(tg.initData, message.trim());
 
@@ -182,7 +174,6 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     setPhase("editing");
     setError(null);
     setIsTimeoutError(false);
-    setOddsChangedInfo(null);
   }
 
   async function handleConfirm() {
@@ -218,7 +209,6 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     setPhase("confirming");
     setError(null);
     setIsTimeoutError(false);
-    setOddsChangedInfo(null);
 
     let result;
     try {
@@ -248,11 +238,19 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
       // state so the existing "Confirm bet" button is what the player must
       // explicitly tap again — this is the exact same control-flow shape
       // every other ready-state confirm already goes through.
+      // Stage M4.7 — SILENT CURRENT-ODDS PLAYER UX: no visible "offer
+      // refreshed"/odds-changed message is shown for this — the refreshed
+      // PreviewCard/OddsStatus above already display the new current
+      // odds/potential win from the staged preview; the player is never
+      // told a comparison happened, only shown today's price and asked to
+      // confirm it (again) explicitly. Safety is unchanged: setPreview
+      // still replaces the stale token with the fresh one, phase still
+      // returns to "ready" (never auto-confirms), and Confirm bet still
+      // requires its own explicit tap.
       if (result.failure.kind === "odds_changed") {
         const update = buildOddsChangedReconfirm(result.failure);
         setPreview(update.preview);
         setPhase("ready");
-        setOddsChangedInfo(update);
         triggerHaptic("warning-light");
         return;
       }
@@ -360,22 +358,15 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
           <PreviewCard preview={preview.preview} />
           <OddsStatus preview={preview.preview} />
 
-          {oddsChangedInfo ? (
-            <div
-              role="alert"
-              className="mt-3 rounded-2xl p-4"
-              style={{ background: "rgba(255,255,255,0.03)", border: "1px solid #E8B84A33" }}
-            >
-              <p className="text-sm font-semibold" style={{ color: "#E8B84A" }}>
-                {oddsChangedInfo.message}
-              </p>
-            </div>
-          ) : (
-            error && (
-              <p role="alert" className="mt-3 whitespace-pre-line text-sm text-red-400">
-                {error}
-              </p>
-            )
+          {/* Stage M4.7 — SILENT CURRENT-ODDS PLAYER UX: no separate
+              odds-changed/"offer refreshed" banner — a confirm-time price
+              move silently replaces `preview` above with the refreshed
+              current odds/potential win; only a genuine confirm error
+              (never a price change) shows here. */}
+          {error && (
+            <p role="alert" className="mt-3 whitespace-pre-line text-sm text-red-400">
+              {error}
+            </p>
           )}
 
           {!oddsUnavailable && (
