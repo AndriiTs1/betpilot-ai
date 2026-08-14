@@ -333,6 +333,55 @@ test("result mapping: FAILED/SELECTION_NOT_FOUND reconstructs matched:false and 
   assert.equal(oddsCheck?.reasonCode, "SELECTION_NOT_FOUND");
 });
 
+test("Stage M4.4: FAILED/SELECTION_NOT_FOUND with diagnosticCode LEGACY_SPREAD_LINE_NOT_AVAILABLE threads the granular spread sub-reason through, not just the coarse reasonCode", () => {
+  const result = createFailedResult({
+    submittedOdds: "1.91",
+    provider: "THE_ODDS_API",
+    checkedAt: CHECKED_AT,
+    reasonCode: "SELECTION_NOT_FOUND",
+    diagnosticCode: "LEGACY_SPREAD_LINE_NOT_AVAILABLE",
+  });
+  const { oddsCheck, wasExceptionMapped } = verificationResultToLegacyOddsCheck(result, 1.91);
+
+  assert.equal(wasExceptionMapped, false);
+  assert.equal(oddsCheck?.matched, false);
+  // Behavior/result unchanged: same reasonCode as before this stage.
+  assert.equal(oddsCheck?.reasonCode, "SELECTION_NOT_FOUND");
+  // This is the fix: the specific findSpreadOutcome() kind used to be
+  // dropped here, exactly as reasonCode itself was before Stage 4.2B1.
+  assert.equal(oddsCheck?.diagnosticCode, "LEGACY_SPREAD_LINE_NOT_AVAILABLE");
+});
+
+test("Stage M4.4: FAILED/SELECTION_NOT_FOUND with diagnosticCode LEGACY_SPREAD_MARKET_ABSENT is distinguishable from LINE_NOT_AVAILABLE even though reasonCode is identical", () => {
+  const result = createFailedResult({
+    submittedOdds: "1.91",
+    provider: "THE_ODDS_API",
+    checkedAt: CHECKED_AT,
+    reasonCode: "SELECTION_NOT_FOUND",
+    diagnosticCode: "LEGACY_SPREAD_MARKET_ABSENT",
+  });
+  const { oddsCheck } = verificationResultToLegacyOddsCheck(result, 1.91);
+
+  assert.equal(oddsCheck?.matched, false);
+  assert.equal(oddsCheck?.reasonCode, "SELECTION_NOT_FOUND");
+  assert.equal(oddsCheck?.diagnosticCode, "LEGACY_SPREAD_MARKET_ABSENT");
+});
+
+test("Stage M4.4: FAILED/SELECTION_NOT_FOUND with diagnosticCode LEGACY_SPREAD_PARTICIPANT_NOT_FOUND is distinguishable from MARKET_ABSENT and LINE_NOT_AVAILABLE", () => {
+  const result = createFailedResult({
+    submittedOdds: "1.91",
+    provider: "THE_ODDS_API",
+    checkedAt: CHECKED_AT,
+    reasonCode: "SELECTION_NOT_FOUND",
+    diagnosticCode: "LEGACY_SPREAD_PARTICIPANT_NOT_FOUND",
+  });
+  const { oddsCheck } = verificationResultToLegacyOddsCheck(result, 1.91);
+
+  assert.equal(oddsCheck?.matched, false);
+  assert.equal(oddsCheck?.reasonCode, "SELECTION_NOT_FOUND");
+  assert.equal(oddsCheck?.diagnosticCode, "LEGACY_SPREAD_PARTICIPANT_NOT_FOUND");
+});
+
 test("result mapping: FAILED/SPORT_NOT_SUPPORTED reconstructs matched:false", () => {
   const result = createFailedResult({ submittedOdds: "2.15", provider: "THE_ODDS_API", checkedAt: CHECKED_AT, reasonCode: "SPORT_NOT_SUPPORTED" });
   const { oddsCheck, wasExceptionMapped } = verificationResultToLegacyOddsCheck(result, 2.15);

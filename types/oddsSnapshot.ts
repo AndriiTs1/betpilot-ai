@@ -57,4 +57,16 @@ export interface OddsCheckResult {
   // NOT_FOUND for matched:false), so this is purely additive and never
   // changes the meaning of an OddsCheckResult that doesn't set it.
   reasonCode?: VerificationReasonCode;
+
+  // Stage M4.4 — the granular sub-reason lib/odds/verification.ts's
+  // VerificationResult.diagnosticCode already carries (e.g., for a spread
+  // SELECTION_NOT_FOUND, one of findSpreadOutcome's own
+  // MARKET_ABSENT/PARTICIPANT_NOT_FOUND/MISSING_POINT/MALFORMED_POINT/
+  // LINE_NOT_AVAILABLE kinds, threaded through theOddsApiProvider.ts's
+  // classifyLegacyFailureNote as "LEGACY_SPREAD_<kind>"), now threaded
+  // through lib/odds/legacyOddsBridge.ts instead of being discarded like
+  // reasonCode used to be before Stage 4.2B1. Optional for the same reason
+  // reasonCode is: older/hand-built OddsCheckResult values simply omit it,
+  // and nothing downstream requires its presence.
+  diagnosticCode?: string;
 }

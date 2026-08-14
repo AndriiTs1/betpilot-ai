@@ -516,13 +516,16 @@ export async function buildBetSlipPreview(
     // strip before the response goes out), and now there's nothing to
     // strip from the logs either: only a status enum, the internal
     // reasonCode (a fixed enum value, e.g. "PROVIDER_QUOTA_EXCEEDED" —
-    // never free text), and a purely positional index are logged, never
-    // the selection's own content.
+    // never free text), a purely positional index, and (Stage M4.4) the
+    // internal diagnosticCode (another fixed, enum-like token, e.g.
+    // "LEGACY_SPREAD_LINE_NOT_AVAILABLE" — see OddsCheckResult's own doc
+    // comment) are logged, never the selection's own content.
     if (oddsCheck && !oddsCheck.matched) {
       logScreenshotPipelineEvent("odds_check_not_matched", {
         selectionIndex: index,
         oddsVerificationStatus: mapOddsCheckToSelectionStatus(oddsCheck),
         failureCode: oddsCheck.reasonCode,
+        diagnosticCode: oddsCheck.diagnosticCode,
       });
     }
     // Equivalent to the old settledResult.status === "rejected" check —

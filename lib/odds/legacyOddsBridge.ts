@@ -458,6 +458,13 @@ export function verificationResultToLegacyOddsCheck(
           // "not found" by the time mapOddsStatus.ts saw only matched:false.
           // Now threaded through so that distinction survives to the UI.
           reasonCode: result.reasonCode,
+          // Stage M4.4 — same fix, one layer more granular: this used to be
+          // the point where the specific findSpreadOutcome() kind (already
+          // classified by classifyLegacyFailureNote() into
+          // result.diagnosticCode, e.g. "LEGACY_SPREAD_LINE_NOT_AVAILABLE")
+          // was silently dropped, leaving every spread SELECTION_NOT_FOUND
+          // indistinguishable from every other one downstream.
+          diagnosticCode: result.diagnosticCode,
         },
         wasExceptionMapped: false,
       };

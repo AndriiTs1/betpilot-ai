@@ -1747,6 +1747,136 @@ test("Handicap Stage H2: a positive-line SPREAD selection ('Coventry City F2(+1.
 });
 
 /* -------------------------------------------------------------------------- */
+/* Stage M4.4 — findSpreadOutcome()'s specific sub-reason (MARKET_ABSENT /   */
+/* PARTICIPANT_NOT_FOUND / LINE_NOT_AVAILABLE / etc., see                    */
+/* lib/odds/oddsVerifier.ts) now survives all the way to the structured      */
+/* screenshot-pipeline diagnostic log ("odds_check_not_matched"), instead    */
+/* of being silently dropped at lib/odds/legacyOddsBridge.ts as it used to   */
+/* be. These run the real classifyLegacyFailureNote() -> legacyOddsBridge -> */
+/* buildBetSlipPreview chain end to end, not just the bridge in isolation.   */
+/* -------------------------------------------------------------------------- */
+
+function spreadNotAvailable(kind: string, participant: string, line: string, event: string, submittedOdds: number): OddsCheckResult {
+  return {
+    matched: false,
+    withinTolerance: null,
+    sourceOdds: null,
+    submittedOdds,
+    discrepancyPercent: null,
+    bookmaker: null,
+    // Exactly lib/odds/oddsVerifier.ts's verifySpreadOdds() note template —
+    // this is what classifyLegacyFailureNote() parses `kind` back out of.
+    note: `Could not match spread selection "${participant} ${line}" for "${event}" (${kind})`,
+  };
+}
+
+test("Stage M4.4: production case (Elche CF vs Barcelona, Barcelona -2) — LINE_NOT_AVAILABLE logs as its exact diagnosticCode on odds_check_not_matched, oddsStatus still NOT_FOUND", async () => {
+  const originalConsoleLog = console.log;
+  const loggedCalls: unknown[][] = [];
+  console.log = (...args: unknown[]) => loggedCalls.push(args);
+
+  try {
+    const slip: ParsedBetSlip = {
+      type: "SINGLE",
+      stake: 5,
+      selections: [
+        { sport: "Football", event: "Elche CF vs Barcelona", market: null, selection: "Barcelona F2(-2)", submittedOdds: 1.9 },
+      ],
+    };
+
+    const provider = new TheOddsApiProvider(
+      fakeVerifyOddsFn({}),
+      undefined,
+      fakeVerifySpreadOddsFn({
+        "Elche CF vs Barcelona": spreadNotAvailable("LINE_NOT_AVAILABLE", "Barcelona", "-2", "Elche CF vs Barcelona", 1.9),
+      }),
+    );
+    const service = new OddsVerificationService(provider);
+
+    const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+
+    // Odds-verification behavior/result is unchanged by this stage.
+    assert.equal(result.preview.selections[0].oddsStatus, "NOT_FOUND");
+
+    const notMatchedEvents = loggedCalls
+      .map((call) => JSON.parse(String(call[0])))
+      .filter((parsed) => parsed.event === "odds_check_not_matched");
+    assert.equal(notMatchedEvents.length, 1);
+    assert.equal(notMatchedEvents[0].failureCode, "SELECTION_NOT_FOUND");
+    assert.equal(notMatchedEvents[0].diagnosticCode, "LEGACY_SPREAD_LINE_NOT_AVAILABLE");
+  } finally {
+    console.log = originalConsoleLog;
+  }
+});
+
+test("Stage M4.4: MARKET_ABSENT and PARTICIPANT_NOT_FOUND spread failures log distinct diagnosticCodes across an EXPRESS's legs, and no raw event/team text ever appears in the logs", async () => {
+  const originalConsoleLog = console.log;
+  const loggedCalls: unknown[][] = [];
+  console.log = (...args: unknown[]) => loggedCalls.push(args);
+
+  try {
+    const slip: ParsedBetSlip = {
+      type: "EXPRESS",
+      stake: 10,
+      selections: [
+        { sport: "Football", event: "Arsenal vs Coventry City", market: null, selection: "Arsenal F1(-1.5)", submittedOdds: 1.91 },
+        { sport: "Football", event: "Inter Milan vs Juventus", market: null, selection: "Inter Milan F1(-1)", submittedOdds: 1.85 },
+      ],
+    };
+
+    const provider = new TheOddsApiProvider(
+      fakeVerifyOddsFn({}),
+      undefined,
+      fakeVerifySpreadOddsFn({
+        "Arsenal vs Coventry City": spreadNotAvailable("MARKET_ABSENT", "Arsenal", "-1.5", "Arsenal vs Coventry City", 1.91),
+        "Inter Milan vs Juventus": spreadNotAvailable("PARTICIPANT_NOT_FOUND", "Inter Milan", "-1", "Inter Milan vs Juventus", 1.85),
+      }),
+    );
+    const service = new OddsVerificationService(provider);
+
+    const result = await buildBetSlipPreview(slip, "player-1", TEST_SECRET, { oddsVerificationService: service });
+
+    // Both legs still resolve to the same status as before this stage — the
+    // new diagnosticCode is purely additive, never changes the outcome.
+    assert.equal(result.preview.selections[0].oddsStatus, "NOT_FOUND");
+    assert.equal(result.preview.selections[1].oddsStatus, "NOT_FOUND");
+
+    const notMatchedEvents = loggedCalls
+      .map((call) => JSON.parse(String(call[0])))
+      .filter((parsed) => parsed.event === "odds_check_not_matched")
+      .sort((a, b) => (a.selectionIndex as number) - (b.selectionIndex as number));
+    assert.equal(notMatchedEvents.length, 2);
+    assert.equal(notMatchedEvents[0].failureCode, "SELECTION_NOT_FOUND");
+    assert.equal(notMatchedEvents[1].failureCode, "SELECTION_NOT_FOUND");
+    // Same coarse failureCode on both — diagnosticCode is what actually
+    // distinguishes MARKET_ABSENT from PARTICIPANT_NOT_FOUND.
+    assert.equal(notMatchedEvents[0].diagnosticCode, "LEGACY_SPREAD_MARKET_ABSENT");
+    assert.equal(notMatchedEvents[1].diagnosticCode, "LEGACY_SPREAD_PARTICIPANT_NOT_FOUND");
+    assert.notEqual(notMatchedEvents[0].diagnosticCode, notMatchedEvents[1].diagnosticCode);
+
+    // No raw provider payload / event / team text anywhere in the logs —
+    // only the fixed, enum-like diagnosticCode token.
+    const rawLoggedText = JSON.stringify(loggedCalls);
+    for (const forbidden of ["Arsenal vs Coventry City", "Inter Milan vs Juventus", "Coventry City", "Juventus"]) {
+      assert.equal(rawLoggedText.includes(forbidden), false, `logs must never contain: ${forbidden}`);
+    }
+
+    // Every logged line stays flat: string/number values only.
+    for (const call of loggedCalls) {
+      const parsed = JSON.parse(String(call[0]));
+      for (const [key, value] of Object.entries(parsed)) {
+        assert.ok(
+          typeof value === "string" || typeof value === "number",
+          `log field "${key}" must be a string or number, got ${typeof value}`,
+        );
+      }
+    }
+  } finally {
+    console.log = originalConsoleLog;
+  }
+});
+
+/* -------------------------------------------------------------------------- */
 /* H4-B5, Section 12 — real preview/confirmability path for a quarter-line   */
 /* SPREAD selection, through the REAL buildBetSlipPreview -> classifier ->   */
 /* TheOddsApiProvider chain (not a hand-built canonical selection).          */

@@ -70,6 +70,14 @@ export interface ScreenshotPipelineLogMetadata {
   durationMs?: number;
   totalDurationMs?: number;
   failureCode?: string;
+  // Stage M4.4 — the granular sub-reason behind failureCode, when one
+  // exists (currently only for spread SELECTION_NOT_FOUND: one of
+  // findSpreadOutcome's own kinds, e.g.
+  // "LEGACY_SPREAD_LINE_NOT_AVAILABLE"/"LEGACY_SPREAD_PARTICIPANT_NOT_FOUND"
+  // — see lib/odds/theOddsApiProvider.ts's classifyLegacyFailureNote).
+  // Always a short, fixed, enum-like token produced by that classifier,
+  // never raw provider payload/response text.
+  diagnosticCode?: string;
   parserMode?: "CHAT" | "OCR";
   selectionCount?: number;
   oddsVerificationStatus?: string;
