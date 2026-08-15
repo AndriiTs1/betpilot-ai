@@ -1,6 +1,6 @@
 import { forwardRef } from "react";
 import type { LucideIcon } from "lucide-react";
-import { Ban, Barcode, Calendar, CircleCheckBig, CircleX, Clock, Hash, Trophy, User, Zap } from "lucide-react";
+import { Ban, Barcode, CircleCheckBig, CircleX, Trophy, Zap } from "lucide-react";
 import { SportIcon } from "./sportIcons";
 import { getOddsStatusBadge } from "@/lib/bets/oddsStatusBadge";
 import { formatAmount } from "@/lib/bets/formatAmount";
@@ -100,43 +100,51 @@ interface BetTicketProps {
 // that's already a near-solid dark gradient in the zone this ticket renders.
 const NOTCH_COLOR = "#050915";
 
-const STATUS_CONFIG: Record<
+// Stage M5.1 — `detail` replaces the old `subtitle` field (a full
+// explanatory sentence per status, e.g. spelling out that a submitted bet
+// awaits confirmation) with a short phrase for the new one-line compact
+// status ("Submitted · Awaiting confirmation"). Applied uniformly across
+// every status, not special-cased to "submitted" — this config drives one
+// shared render path. Exported so the exact badge/detail text is
+// unit-testable without this project's deliberately absent DOM-rendering
+// test infra.
+export const STATUS_CONFIG: Record<
   BetTicketStatus,
-  { badgeLabel: string; subtitle: string; icon: LucideIcon; color: string }
+  { badgeLabel: string; detail: string; icon: LucideIcon; color: string }
 > = {
   submitted: {
     badgeLabel: "Submitted",
-    subtitle: "Your bet has been submitted and is awaiting confirmation.",
+    detail: "Awaiting confirmation",
     icon: CircleCheckBig,
     color: "#60E84A",
   },
   confirmed: {
     badgeLabel: "Confirmed",
-    subtitle: "Your bet has been confirmed and is now active.",
+    detail: "Now active",
     icon: CircleCheckBig,
     color: "#60A5FA",
   },
   rejected: {
     badgeLabel: "Rejected",
-    subtitle: "This bet was not accepted.",
+    detail: "Not accepted",
     icon: CircleX,
     color: "#94A3B8",
   },
   settled_won: {
     badgeLabel: "Won",
-    subtitle: "Congratulations — this bet won.",
+    detail: "Settled",
     icon: Trophy,
     color: "#60E84A",
   },
   settled_lost: {
     badgeLabel: "Lost",
-    subtitle: "This bet did not win.",
+    detail: "Settled",
     icon: CircleX,
     color: "#F87171",
   },
   void: {
     badgeLabel: "Void",
-    subtitle: "This bet was voided.",
+    detail: "Voided",
     icon: Ban,
     color: "#94A3B8",
   },
@@ -148,7 +156,9 @@ const STATUS_CONFIG: Record<
 // same final delay instead of the sequence growing unbounded.
 const STAGGER_STEP_MS = 25;
 const STAGGER_MAX_STEPS = 10;
-const TICKET_META_ROW_COUNT = 4; // Ticket ID, Player, Date, Time
+// Stage M5.1 — one compact row now (Ticket ID · Player · Date · Time on a
+// single line), not four separate grid cells.
+const TICKET_META_ROW_COUNT = 1;
 
 function ticketRowDelay(index: number): string {
   return `${Math.min(index, STAGGER_MAX_STEPS) * STAGGER_STEP_MS}ms`;
@@ -161,19 +171,23 @@ function ticketRowDelay(index: number): string {
 // vs "20 июл. 2026 г." on a browser with a Russian locale).
 const TICKET_LOCALE = "en-US";
 
-function formatDate(iso: string): string {
+// Stage M5.1 — exported (were module-private) so the compact meta line's
+// content is unit-testable without this project's deliberately absent
+// DOM-rendering test infra, same pattern as resolveTicketSelectionOdds/
+// resolveTicketStatusBadge above.
+export function formatDate(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "—";
   return date.toLocaleDateString(TICKET_LOCALE, { day: "2-digit", month: "short", year: "numeric" });
 }
 
-function formatTime(iso: string): string {
+export function formatTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "—";
   return date.toLocaleTimeString(TICKET_LOCALE, { hour: "2-digit", minute: "2-digit" });
 }
 
-function shortTicketId(id: string): string {
+export function shortTicketId(id: string): string {
   const clean = id.replace(/-/g, "");
   return `#${clean.slice(-8).toUpperCase()}`;
 }
@@ -190,8 +204,8 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
       ? ticket.stake * ticket.totalOdds
       : null;
 
-  // Financial rows pick up the stagger sequence right after the 4 ticket-meta
-  // rows and one row per selection — a pure index calculation instead of a
+  // Financial rows pick up the stagger sequence right after the ticket-meta
+  // row and one row per selection — a pure index calculation instead of a
   // mutable counter closure (React Compiler forbids reassigning a variable
   // captured by a render-time closure).
   const financialRowStart = TICKET_META_ROW_COUNT + ticket.selections.length;
@@ -209,47 +223,37 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
           boxShadow: "0 30px 80px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.02)",
         }}
       >
-        {/* Header */}
-        <div className="flex flex-col items-center px-5 pt-6">
-          <span className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.14em] text-white">
-            <Zap size={13} strokeWidth={2.5} style={{ color: "#60E84A" }} aria-hidden="true" />
+        {/* Header + status + meta — Stage M5.1: one compact block replacing
+            the old branding block, large 64px status icon circle, status
+            pill, full explanatory sentence, and 2×2 metadata grid. The
+            ticket screen fully replaces BetScreen's own top app bar while
+            shown (see BetScreen.tsx — confirmedBet renders ONLY this
+            component), so a small brand mark stays, just no longer a
+            dedicated multi-line section. Status is still immediately
+            readable — icon + label + short detail, all on one line — and
+            Ticket ID/Player/Date/Time are still all present, on one
+            de-emphasized line directly below, before the actual bet
+            content begins. */}
+        <div className="flex flex-col gap-2 px-5 pt-5 pb-4">
+          <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+            <Zap size={11} strokeWidth={2.5} style={{ color: "#60E84A" }} aria-hidden="true" />
             BetPilot AI
           </span>
-          <span className="mt-1 text-[10px] font-medium uppercase tracking-[0.22em] text-slate-500">
-            Digital Bet Ticket
-          </span>
-        </div>
 
-        {/* Status */}
-        <div className="flex flex-col items-center px-5 pb-5 pt-5 text-center">
-          <div
-            className="ticket-check-animate flex h-16 w-16 items-center justify-center rounded-full"
-            style={{ background: `${status.color}1A`, boxShadow: `0 0 28px 4px ${status.color}26` }}
-          >
-            <StatusIcon size={34} strokeWidth={2} color={status.color} aria-hidden="true" />
+          <div className="ticket-check-animate flex items-center gap-1.5">
+            <StatusIcon size={18} strokeWidth={2.5} color={status.color} aria-hidden="true" />
+            <span className="text-[15px] font-bold" style={{ color: status.color }}>
+              {status.badgeLabel}
+            </span>
+            <span className="text-[15px] text-slate-500">· {status.detail}</span>
           </div>
 
-          <span
-            className="mt-3 inline-flex items-center rounded-full px-3 py-1 text-[11px] font-bold uppercase tracking-wide"
-            style={{ background: `${status.color}1A`, color: status.color, border: `1px solid ${status.color}40` }}
-          >
-            {status.badgeLabel}
-          </span>
-
-          <p className="mt-2 max-w-[280px] text-sm text-slate-400">{status.subtitle}</p>
+          <p className="ticket-row-animate text-xs text-slate-500" style={{ animationDelay: ticketRowDelay(0) }}>
+            {shortTicketId(ticket.id)} · {ticket.player} · {formatDate(ticket.createdAt)} · {formatTime(ticket.createdAt)}
+          </p>
         </div>
 
         <TicketDivider notched />
-
-        {/* Ticket information */}
-        <div className="grid grid-cols-2 gap-x-4 gap-y-3 px-5 py-5">
-          <TicketMeta icon={Hash} label="Ticket ID" value={shortTicketId(ticket.id)} delay={ticketRowDelay(0)} />
-          <TicketMeta icon={User} label="Player" value={ticket.player} delay={ticketRowDelay(1)} />
-          <TicketMeta icon={Calendar} label="Date" value={formatDate(ticket.createdAt)} delay={ticketRowDelay(2)} />
-          <TicketMeta icon={Clock} label="Time" value={formatTime(ticket.createdAt)} delay={ticketRowDelay(3)} />
-        </div>
-
-        <TicketDivider />
 
         {/* Event */}
         <div className="px-5 py-5">
@@ -396,28 +400,6 @@ function TicketDivider({ notched = false }: { notched?: boolean }) {
         </>
       )}
       <div className="border-t border-dashed" style={{ borderColor: "rgba(255,255,255,0.12)" }} />
-    </div>
-  );
-}
-
-function TicketMeta({
-  icon: Icon,
-  label,
-  value,
-  delay,
-}: {
-  icon: LucideIcon;
-  label: string;
-  value: string;
-  delay: string;
-}) {
-  return (
-    <div className="ticket-row-animate min-w-0" style={{ animationDelay: delay }}>
-      <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-500">
-        <Icon size={12} strokeWidth={2} aria-hidden="true" />
-        {label}
-      </div>
-      <p className="mt-0.5 truncate text-sm font-semibold text-white">{value}</p>
     </div>
   );
 }
