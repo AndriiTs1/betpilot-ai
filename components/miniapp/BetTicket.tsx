@@ -4,6 +4,7 @@ import { Ban, Barcode, Calendar, CircleCheckBig, CircleX, Clock, Hash, Trophy, U
 import { SportIcon } from "./sportIcons";
 import { getOddsStatusBadge } from "@/lib/bets/oddsStatusBadge";
 import { formatAmount } from "@/lib/bets/formatAmount";
+import { getOddsPresentation } from "@/components/bets/SelectionRow";
 
 // The signature post-submission screen (Stage 4.5G) — replaces the plain
 // BetConfirmedCard that used to live inline in BetScreen.tsx. Deliberately
@@ -55,6 +56,35 @@ export interface BetTicketData {
   stake: number;
   totalOdds: number | null;
   availableCredit?: string | null;
+}
+
+// Stage M4.9 — CLEAN EXPRESS CURRENT-ODDS UX. This ticket screen has its
+// own inline per-selection rendering (never went through
+// components/bets/SelectionRow.tsx), so it never picked up Stage M4.1's
+// "current price only, no comparison, no badge for a confirmable status"
+// fix — it kept showing the submitted/screenshot odds on the main line
+// plus a separate "Current: X" line plus a "Verified"/"Odds changed"
+// badge for every EXPRESS leg. These two functions reuse
+// SelectionRow.tsx's own getOddsPresentation (the exact same decision the
+// preview screen already uses), so this screen can never drift out of
+// sync with it again. SINGLE selections (oddsStatus undefined —
+// toBetTicketData never sets it) are untouched: selection.odds already IS
+// the single accepted price (Stage M4.8), so there is nothing to resolve.
+export function resolveTicketSelectionOdds(selection: BetTicketSelection): number | null {
+  if (selection.oddsStatus == null) return selection.odds;
+  const presentation = getOddsPresentation(selection.oddsStatus, selection.currentOdds ?? null);
+  return presentation.mode === "prominent" ? presentation.value : null;
+}
+
+// A status badge is shown ONLY when there is no confirmable current price
+// to display (NOT_FOUND/UNAVAILABLE/PENDING, e.g. an exempt leg that never
+// had a submitted price at all) — the same "explain the absence, never
+// annotate a real price" rule SelectionRow.tsx already enforces. VERIFIED
+// and ODDS_CHANGED never render a badge here.
+export function resolveTicketStatusBadge(selection: BetTicketSelection): string | null {
+  if (selection.oddsStatus == null) return null;
+  const presentation = getOddsPresentation(selection.oddsStatus, selection.currentOdds ?? null);
+  return presentation.mode === "unavailable" ? selection.oddsStatus : null;
 }
 
 interface BetTicketProps {
@@ -224,9 +254,13 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
         {/* Event */}
         <div className="px-5 py-5">
           {ticket.selections.map((selection, index) => {
-            // Both undefined for SINGLE (toBetTicketData never sets them) —
-            // this row renders nothing extra, identical to before Step 5.
-            const showStatusRow = selection.currentOdds != null || selection.oddsStatus != null;
+            // Stage M4.9 — one value only: the current/accepted price
+            // (SINGLE) or the current provider price (EXPRESS VERIFIED/
+            // ODDS_CHANGED), never the submitted/screenshot number, never
+            // both. A status badge appears only when there is genuinely no
+            // confirmable price to show at all.
+            const displayOdds = resolveTicketSelectionOdds(selection);
+            const statusBadge = resolveTicketStatusBadge(selection);
 
             return (
               <div
@@ -248,12 +282,11 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
                 <p className="mt-0.5 text-sm break-words" style={{ color: "#60E84A" }}>
                   {selection.selection}
                   {selection.market ? ` · ${selection.market}` : ""}
-                  {selection.odds !== null ? ` · ${formatAmount(selection.odds)}` : ""}
+                  {displayOdds !== null ? ` · ${formatAmount(displayOdds)}` : ""}
                 </p>
-                {showStatusRow && (
+                {statusBadge && (
                   <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
-                    {selection.currentOdds != null && <span>Current: {formatAmount(selection.currentOdds)}</span>}
-                    {selection.oddsStatus != null && <OddsStatusPill status={selection.oddsStatus} />}
+                    <OddsStatusPill status={statusBadge} />
                   </div>
                 )}
               </div>
