@@ -9,8 +9,10 @@ import {
   formatTime,
   shortTicketId,
   STATUS_CONFIG,
+  computeTicketPotentialWin,
   type BetTicketSelection,
 } from "./BetTicket";
+import { formatPotentialWin } from "./BetPreviewCard";
 
 // Stage M4.9 — CLEAN EXPRESS CURRENT-ODDS UX. This project deliberately has
 // no DOM-rendering test infra (see e.g. ActiveBetsScreen.test.ts's own
@@ -213,11 +215,16 @@ test("source: EXPRESS leg rendering (event/selection/market/odds/badge) is uncha
 // Requirement 11 — Stake / Combined odds / Potential win rows and their
 // data sources (ticket.stake, ticket.totalOdds, the same
 // stake*totalOdds potentialWin computation) are unchanged.
+// Stage M5.2 — the computation itself moved from inline in the component
+// body into the exported computeTicketPotentialWin (see the dedicated
+// behavioral tests below), so this now checks the call site + the
+// function's own untouched formula, instead of the old inline expression.
 test("source: Stake / Combined odds / Potential win rows and their computation are unchanged", () => {
   assert.match(source, /label="Stake"/);
   assert.match(source, /isParlay \? "Combined odds" : "Odds"/);
   assert.match(source, /label="Potential win"/);
-  assert.match(source, /ticket\.stake \* ticket\.totalOdds/);
+  assert.match(source, /computeTicketPotentialWin\(ticket\.stake, ticket\.totalOdds\)/);
+  assert.match(source, /stake \* totalOdds/);
 });
 
 // Requirement 12 — Done / View History remain present and wired to the
@@ -234,4 +241,123 @@ test("source: Done / View History buttons are unchanged", () => {
 test("source: the ticket's own accessible group role/label is unchanged", () => {
   assert.match(source, /role="group"/);
   assert.match(source, /aria-label=\{`Digital bet ticket, status: \$\{status\.badgeLabel\}`\}/);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Stage M5.2 — BET TICKET FINANCIAL SUMMARY POLISH                          */
+/*                                                                             */
+/* Root cause this proves fixed: BetTicket.tsx's "Potential win" row rendered */
+/* a bare number ("34.10") with no currency, unlike the pre-confirmation      */
+/* preview (BetPreviewCard.tsx's formatPotentialWin, "34.10 USDC"). This      */
+/* stage makes the ticket reuse that exact same existing function/currency   */
+/* source rather than inventing a second, independently-maintained one.      */
+/* Behavioral tests are used where practical (computeTicketPotentialWin,     */
+/* formatPotentialWin are both now directly importable pure functions);      */
+/* source-text checks (this project's established no-DOM-render technique)   */
+/* cover what can't be expressed as a pure-function call (which literal      */
+/* value ticket.availableCredit/ticket.stake feed, styling tiers, etc).      */
+/* -------------------------------------------------------------------------- */
+
+// Requirement A/B — EXPRESS and SINGLE Potential win both format with the
+// project's existing currency source (formatPotentialWin, reused from
+// BetPreviewCard.tsx — not a second, independently hardcoded "USDC").
+// computeTicketPotentialWin itself is bet-type-agnostic (same formula for
+// both), matching the unchanged pre-M5.2 behavior.
+test("EXPRESS: Potential win (stake 5, combined odds 6.82) formats with the existing USDC currency source", () => {
+  const potentialWin = computeTicketPotentialWin(5, 6.82);
+  assert.equal(formatPotentialWin(potentialWin), "34.10 USDC");
+});
+
+test("SINGLE: Potential win (stake 75, odds 1.95) formats with the same existing USDC currency source", () => {
+  const potentialWin = computeTicketPotentialWin(75, 1.95);
+  assert.equal(formatPotentialWin(potentialWin), "146.25 USDC");
+});
+
+test("computeTicketPotentialWin: unchanged formula and null-handling — no totalOdds, non-finite stake/odds all degrade to null, never a fabricated number", () => {
+  assert.equal(computeTicketPotentialWin(5, null), null);
+  assert.equal(computeTicketPotentialWin(NaN, 6.82), null);
+  assert.equal(computeTicketPotentialWin(5, Infinity), null);
+});
+
+test("formatPotentialWin: a null potential win still falls back to 'Not available', exactly as it did before reuse (never a bare number, never a fabricated currency)", () => {
+  assert.equal(formatPotentialWin(null), "Not available");
+});
+
+// Requirement C — Stake value/calculation (ticket.stake, formatAmount, no
+// currency suffix) is unchanged. Bare formatting matches the pre-confirm
+// preview's own established convention (BetPreviewCard.tsx's Stake row
+// also has no currency suffix) — inspected before deciding, not invented.
+test("source: Stake keeps its exact pre-M5.2 bare (no-currency) formatting — matches the pre-confirm preview's own established convention", () => {
+  assert.match(source, /label="Stake" value=\{formatAmount\(ticket\.stake\)\}/);
+});
+
+// Requirement D — Combined odds (EXPRESS) unchanged: no badge, no
+// explanatory text, no provider info, no submitted/current comparison,
+// same totalOdds source.
+test("source: Combined odds (EXPRESS) is unchanged — bare totalOdds value only, no badge or comparison text", () => {
+  assert.match(source, /ticket\.totalOdds !== null \? formatAmount\(ticket\.totalOdds\) : "Not provided"/);
+});
+
+// Requirement E — SINGLE's "Odds" label (the same row, non-parlay branch)
+// is unchanged.
+test("source: SINGLE's 'Odds' label is unchanged — same row/branch as Combined odds, just isParlay ? ... : \"Odds\"", () => {
+  assert.match(source, /isParlay \? "Combined odds" : "Odds"/);
+});
+
+// Requirement F — Available credit's value/source (ticket.availableCredit,
+// passed through verbatim) is unchanged; only its visual weight changed.
+// Confirmed by inspection: every other surface that reads availableCredit
+// (BetScreen.tsx's own dashboard "Доступно" row, BalanceScreen.tsx's
+// "Доступно") also renders it as a bare value with no currency suffix —
+// GET /api/miniapp/me computes it as a plain Decimal.toString(), never
+// USDC-suffixed anywhere in the pipeline. Reusing that established
+// convention here, not inventing a new one.
+test("source: Available credit's value/source is unchanged (ticket.availableCredit, no currency appended) — matches the established convention every other surface already uses", () => {
+  assert.match(source, /value=\{ticket\.availableCredit\}/);
+  assert.equal(source.includes("ticket.availableCredit} USDC"), false, "must never append a currency suffix nowhere else in the product does");
+});
+
+// Requirement F (continued) — Available credit is now visually muted
+// relative to Stake/Combined odds, on top of already being secondary to
+// Potential win.
+test("source: Available credit now renders with the new muted tier", () => {
+  assert.match(source, /label="Available credit"[\s\S]{0,120}muted/);
+});
+
+test("FinancialRow: the new muted tier is additive — emphasize (Potential win) and the default tier (Stake/Combined odds) are untouched by its addition", () => {
+  // Structural proof (no rendering harness): the function signature still
+  // defaults muted to false, so every existing call site that never passes
+  // it keeps its exact prior rendering.
+  assert.match(source, /muted\?: boolean;/);
+  assert.match(source, /muted = false,/);
+});
+
+// Requirement G — the M5.1 compact header remains fully intact; this
+// stage touched only the financial block below it.
+test("source: the M5.1 compact header/status/meta block remains fully intact", () => {
+  assert.match(source, /· \{status\.detail\}/);
+  assert.match(source, /shortTicketId\(ticket\.id\)/);
+  assert.match(source, /\{ticket\.player\}/);
+  assert.equal(source.includes("Digital Bet Ticket"), false);
+  assert.equal(source.includes("h-16 w-16"), false);
+  assert.equal(source.includes("grid-cols-2"), false);
+});
+
+// Requirement H — M4.9's EXPRESS current-odds rendering (resolveTicketSelectionOdds/
+// resolveTicketStatusBadge) is completely untouched by this stage.
+test("source: M4.9 EXPRESS current-odds rendering (resolveTicketSelectionOdds/resolveTicketStatusBadge) remains intact", () => {
+  assert.match(source, /resolveTicketSelectionOdds\(selection\)/);
+  assert.match(source, /resolveTicketStatusBadge\(selection\)/);
+});
+
+// Requirement I — no old submitted/current comparison or Verified/Odds
+// changed badges are reintroduced anywhere in the file, including the
+// financial block this stage touched.
+// Checks the exact removed JSX pattern, not the bare substring "Current: "
+// — this file's own M4.9 header comment legitimately quotes that string as
+// historical documentation of the bug it fixed, which a plain substring
+// check would collide with.
+test("source: no old submitted/current odds comparison or unconditional Verified/Odds changed badges are reintroduced", () => {
+  assert.equal(/<span>Current: \{formatAmount\(selection\.currentOdds\)\}<\/span>/.test(source), false);
+  assert.equal(/\{selection\.oddsStatus != null && <OddsStatusPill/.test(source), false);
 });

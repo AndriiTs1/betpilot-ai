@@ -5,6 +5,7 @@ import { SportIcon } from "./sportIcons";
 import { getOddsStatusBadge } from "@/lib/bets/oddsStatusBadge";
 import { formatAmount } from "@/lib/bets/formatAmount";
 import { getOddsPresentation } from "@/components/bets/SelectionRow";
+import { formatPotentialWin } from "./BetPreviewCard";
 
 // The signature post-submission screen (Stage 4.5G) — replaces the plain
 // BetConfirmedCard that used to live inline in BetScreen.tsx. Deliberately
@@ -192,6 +193,16 @@ export function shortTicketId(id: string): string {
   return `#${clean.slice(-8).toUpperCase()}`;
 }
 
+// Stage M5.2 — exported (was inline in the component body) so the
+// potential-win computation itself is unit-testable without this project's
+// deliberately absent DOM-rendering test infra, same pattern as every other
+// pure decision in this file. Byte-for-byte the same formula as before this
+// stage — this extraction changes nothing about the calculation, only where
+// it's written.
+export function computeTicketPotentialWin(stake: number, totalOdds: number | null): number | null {
+  return totalOdds !== null && Number.isFinite(totalOdds) && Number.isFinite(stake) ? stake * totalOdds : null;
+}
+
 const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
   { ticket, onDone, onViewHistory },
   ref,
@@ -199,10 +210,7 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
   const status = STATUS_CONFIG[ticket.status];
   const StatusIcon = status.icon;
   const isParlay = ticket.selections.length > 1;
-  const potentialWin =
-    ticket.totalOdds !== null && Number.isFinite(ticket.totalOdds) && Number.isFinite(ticket.stake)
-      ? ticket.stake * ticket.totalOdds
-      : null;
+  const potentialWin = computeTicketPotentialWin(ticket.stake, ticket.totalOdds);
 
   // Financial rows pick up the stagger sequence right after the ticket-meta
   // row and one row per selection — a pure index calculation instead of a
@@ -300,7 +308,18 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
 
         <TicketDivider />
 
-        {/* Financial */}
+        {/* Financial — Stage M5.2: Potential win now carries its currency
+            (reusing BetPreviewCard.tsx's formatPotentialWin, the project's
+            one existing currency-suffix source — the data model has no
+            per-bet asset/currency field to derive it from instead, and
+            preview already established " USDC" as the single fixed
+            convention for a payout figure specifically). Stake/Combined
+            odds/Available credit deliberately keep their existing bare
+            (no-suffix) formatting — see this file's own header comment on
+            why. Available credit is now visually muted relative to
+            Stake/Combined odds, on top of already being visually secondary
+            to Potential win (emphasize). No spacing/margin changes — the
+            hierarchy is conveyed by weight/color only. */}
         <div className="px-5 py-5">
           <FinancialRow label="Stake" value={formatAmount(ticket.stake)} delay={ticketRowDelay(financialRowStart)} />
           <FinancialRow
@@ -310,7 +329,7 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
           />
           <FinancialRow
             label="Potential win"
-            value={potentialWin !== null ? formatAmount(potentialWin) : "Not available"}
+            value={formatPotentialWin(potentialWin)}
             delay={ticketRowDelay(financialRowStart + 2)}
             emphasize
             last={ticket.availableCredit == null}
@@ -320,6 +339,7 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
               label="Available credit"
               value={ticket.availableCredit}
               delay={ticketRowDelay(financialRowStart + 3)}
+              muted
               last
             />
           )}
@@ -409,12 +429,19 @@ function FinancialRow({
   value,
   delay,
   emphasize = false,
+  muted = false,
   last = false,
 }: {
   label: string;
   value: string;
   delay: string;
   emphasize?: boolean;
+  // Stage M5.2 — tertiary tier, one step below the default Stake/Combined
+  // odds weight (never used together with `emphasize`, which stays
+  // Potential win's own, strongest tier). Only Available credit uses this
+  // today — a smaller, more muted treatment for account-context
+  // information that isn't part of the bet's own numbers.
+  muted?: boolean;
   last?: boolean;
 }) {
   return (
@@ -422,10 +449,10 @@ function FinancialRow({
       className={`ticket-row-animate flex items-baseline justify-between gap-3 ${last ? "" : "mb-2.5"}`}
       style={{ animationDelay: delay }}
     >
-      <span className="text-xs text-slate-400">{label}</span>
+      <span className={`text-xs ${muted ? "text-slate-500" : "text-slate-400"}`}>{label}</span>
       <span
-        className={`text-right font-semibold ${emphasize ? "text-base" : "text-sm"}`}
-        style={{ color: emphasize ? "#60E84A" : "#F7F9FC" }}
+        className={`text-right font-semibold ${emphasize ? "text-base" : muted ? "text-xs font-medium" : "text-sm"}`}
+        style={{ color: emphasize ? "#60E84A" : muted ? "#94A3B8" : "#F7F9FC" }}
       >
         {value}
       </span>
