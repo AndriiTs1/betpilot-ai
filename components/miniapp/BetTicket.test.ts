@@ -361,3 +361,96 @@ test("source: no old submitted/current odds comparison or unconditional Verified
   assert.equal(/<span>Current: \{formatAmount\(selection\.currentOdds\)\}<\/span>/.test(source), false);
   assert.equal(/\{selection\.oddsStatus != null && <OddsStatusPill/.test(source), false);
 });
+
+/* -------------------------------------------------------------------------- */
+/* Stage M5.3 — BET TICKET FOOTER COMPACTION                                 */
+/*                                                                             */
+/* Goal: shrink the barcode/"Verified by BetPilot AI" footer's visual weight  */
+/* and vertical footprint without touching the barcode's own seed-derived    */
+/* data (barcodeWidths), removing it, or changing anything above the footer. */
+/* Same no-DOM-render, source-text-inspection technique as every prior       */
+/* BetTicket stage (this project deliberately has no rendering harness).     */
+/* -------------------------------------------------------------------------- */
+
+// Requirement A — the barcode is still rendered (same component, same
+// seed), never removed.
+test("source: the barcode is still rendered, wired to the same ticket.id seed", () => {
+  assert.match(source, /<TicketBarcode seed=\{ticket\.id\}\s*\/>/);
+});
+
+// Requirement B — "Verified by BetPilot AI" keeps its exact existing text
+// and icon, no new copy/badges/borders/cards added.
+test("source: 'Verified by BetPilot AI' is still rendered, unchanged text, no new icon/badge/border added", () => {
+  assert.match(source, /Verified by BetPilot AI/);
+  assert.match(source, /<Barcode size=\{12\} strokeWidth=\{2\} aria-hidden="true" \/>/);
+});
+
+// Requirement C — the footer uses the new compact sizing/spacing: the
+// barcode container shrank from h-10 (40px) to h-6 (24px, a 40%
+// reduction), the outer footer padding tightened (pt-5 pb-6 -> pt-4 pb-5),
+// and the gap before "Verified by BetPilot AI" tightened (mt-3 -> mt-1.5)
+// so the two elements read as one compact unit.
+test("source: the footer uses the new compact barcode height and tighter spacing", () => {
+  assert.match(source, /className="flex h-6 items-center gap-\[3px\]"/);
+  assert.equal(source.includes('className="flex h-10 items-center gap-[3px]"'), false, "old 40px barcode height must be gone");
+  assert.match(source, /className="flex flex-col items-center px-5 pt-4 pb-5"/);
+  assert.equal(source.includes('px-5 pb-6 pt-5"'), false, "old, looser footer padding must be gone");
+  assert.match(source, /<p className="mt-1\.5 flex items-center gap-1\.5 text-\[11px\] text-slate-500">/);
+  assert.equal(/<p className="mt-3 flex items-center gap-1\.5 text-\[11px\]/.test(source), false, "old, looser gap before the verification line must be gone");
+});
+
+// Requirement C (continued) — the barcode's own seed-derived pattern
+// generation is completely untouched by the height reduction.
+test("barcodeWidths generation logic is unaffected — behavioral proof via the still-unchanged TicketBarcode/seed wiring and bar-count/gap markers", () => {
+  assert.match(source, /function barcodeWidths\(seed: string\): number\[\]/);
+  assert.match(source, /for \(let i = 0; i < 36; i \+= 1\)/);
+  assert.match(source, /bars\.push\(1 \+ \(hash % 3\)\)/);
+});
+
+// Requirement D — the M5.1 compact header remains fully intact.
+test("M5.3 regression guard: the M5.1 compact header/status/meta block is untouched", () => {
+  assert.equal(STATUS_CONFIG.submitted.badgeLabel, "Submitted");
+  assert.equal(STATUS_CONFIG.submitted.detail, "Awaiting confirmation");
+  assert.match(source, /shortTicketId\(ticket\.id\)/);
+  assert.equal(source.includes("Digital Bet Ticket"), false);
+});
+
+// Requirement E — the M5.2 financial summary (including currency-suffixed
+// Potential win) remains fully intact.
+test("M5.3 regression guard: the M5.2 financial summary, including Potential win's USDC formatting, is untouched", () => {
+  assert.equal(formatPotentialWin(computeTicketPotentialWin(5, 6.82)), "34.10 USDC");
+  assert.match(source, /label="Stake" value=\{formatAmount\(ticket\.stake\)\}/);
+  assert.match(source, /label="Available credit"[\s\S]{0,120}muted/);
+});
+
+// Requirement F — M4.9's EXPRESS current-odds rendering remains intact
+// (behavioral, not just source-text).
+test("M5.3 regression guard: M4.9 EXPRESS current-odds behavior is untouched", () => {
+  const result = resolveTicketSelectionOdds(selection({ odds: 3.7, currentOdds: 3.87, oddsStatus: "ODDS_CHANGED" }));
+  assert.equal(result, 3.87);
+  assert.equal(resolveTicketStatusBadge(selection({ currentOdds: 3.87, oddsStatus: "ODDS_CHANGED" })), null);
+});
+
+// Requirement G — SINGLE ticket rendering (oddsStatus undefined — odds
+// passes straight through, "Odds" label) remains correct.
+test("M5.3 regression guard: SINGLE ticket rendering is untouched", () => {
+  assert.equal(resolveTicketSelectionOdds(selection({ odds: 2.04, currentOdds: null, oddsStatus: null })), 2.04);
+  assert.match(source, /isParlay \? "Combined odds" : "Odds"/);
+});
+
+// Requirement H — EXPRESS ticket rendering (leg list + "Combined odds"
+// label + financial summary) remains correct.
+test("M5.3 regression guard: EXPRESS ticket rendering is untouched", () => {
+  assert.match(source, /\{isParlay && \(/);
+  assert.match(source, /Leg \{index \+ 1\}/);
+  assert.match(source, /isParlay \? "Combined odds" : "Odds"/);
+});
+
+// Requirement I — Done / View History remain unchanged, same handlers,
+// same labels, unaffected by the footer change directly above them.
+test("M5.3 regression guard: Done / View History remain unchanged", () => {
+  assert.match(source, /aria-label="Done"/);
+  assert.match(source, /onClick=\{onDone\}/);
+  assert.match(source, /aria-label="View history"/);
+  assert.match(source, /onClick=\{onViewHistory\}/);
+});

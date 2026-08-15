@@ -347,10 +347,16 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
 
         <TicketDivider notched />
 
-        {/* Bottom */}
-        <div className="flex flex-col items-center px-5 pb-6 pt-5">
+        {/* Bottom — Stage M5.3: a subtle authenticity mark, not a major
+            content section. Reduced padding + the barcode's own shrunk
+            height (see TicketBarcode) + a tighter gap before "Verified by
+            BetPilot AI" so the two elements read as one compact
+            verification unit, closer together than the rest of the
+            ticket's section rhythm. Barcode data/generation (barcodeWidths)
+            is completely untouched — only its container's height shrank. */}
+        <div className="flex flex-col items-center px-5 pt-4 pb-5">
           <TicketBarcode seed={ticket.id} />
-          <p className="mt-3 flex items-center gap-1.5 text-[11px] text-slate-500">
+          <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-slate-500">
             <Barcode size={12} strokeWidth={2} aria-hidden="true" />
             Verified by BetPilot AI
           </p>
@@ -481,11 +487,17 @@ function OddsStatusPill({ status }: { status: string }) {
 // spec). Swapping this for a real barcode/QR image later only means
 // replacing this one function's render output; every consumer of BetTicket
 // stays the same.
+// Stage M5.3 — height reduced from h-10 (40px) to h-6 (24px), a 40%
+// reduction, matching the requested ~30-40% smaller footprint. Bar
+// count/widths/gap (barcodeWidths, the seed-derived pattern itself) are
+// completely untouched — narrowing was deliberately avoided per this
+// stage's own guidance ("prefer reducing height ... rather than making it
+// so narrow that it stops looking like a barcode").
 function TicketBarcode({ seed }: { seed: string }) {
   const bars = barcodeWidths(seed);
 
   return (
-    <div className="flex h-10 items-center gap-[3px]" aria-hidden="true">
+    <div className="flex h-6 items-center gap-[3px]" aria-hidden="true">
       {bars.map((width, index) => (
         <span
           key={index}
