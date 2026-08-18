@@ -80,3 +80,41 @@ test("source: the action-area gap above Confirm bet/Choose different image was t
   assert.match(source, /aria-label="Confirm bet"\s*className="mt-2\.5 min-h-11 w-full/);
   assert.match(source, /aria-label="Choose different image"\s*className="mt-2\.5 min-h-11 w-full/);
 });
+
+// Stage M5.5A — HIDE TECHNICAL FILE METADATA FROM PLAYER. The selected
+// image's raw upload metadata (filename, formatted byte size) is
+// implementation detail, not betting information — removing it, and its
+// now-dead formatFileSize helper and wrapper row, entirely.
+test("source: the uploaded filename (file.name) is no longer rendered anywhere in this file", () => {
+  assert.equal(source.includes("{file.name}"), false, "file.name must no longer be rendered");
+});
+
+test("source: the formatted file size (formatFileSize) is no longer rendered, and the now-unused helper itself is gone", () => {
+  assert.equal(source.includes("formatFileSize"), false, "formatFileSize must no longer exist — it was only ever used to render the removed file-size text");
+});
+
+test("source: the dead filename/size wrapper row is gone — the image preview flows directly into the Recognize bet button", () => {
+  assert.equal(source.includes('<div className="mt-2 flex items-center justify-between gap-3">'), false, "the wrapper row that existed only for filename/size must be removed, not just emptied");
+});
+
+test("source: the screenshot thumbnail/preview itself is still rendered, unchanged", () => {
+  assert.match(source, /<img\s*\n\s*src=\{previewUrl\}\s*\n\s*alt="Selected bet slip screenshot"\s*\n\s*className="max-h-64 w-full object-contain"/);
+});
+
+test("source: the Recognizing state is unchanged", () => {
+  assert.match(source, /\{phase === "recognizing" \? "Recognizing\.\.\." : "Recognize bet"\}/);
+});
+
+test("source: Remove is unchanged", () => {
+  assert.match(source, /onClick=\{handleRemove\}/);
+  assert.match(source, />\s*Remove\s*<\/button>/);
+});
+
+// M5.4 ready-state layout (Section G root-cause fix + action-area spacing)
+// is untouched by this stage — only the selected/pre-recognition block
+// (showSelectionBlock) changed.
+test("M5.5A regression guard: the M5.4 ready-state layout is untouched", () => {
+  assert.match(source, /<div className="flex flex-1 flex-col items-center text-center">/);
+  assert.match(source, /\{showPreviewBlock && preview && \(\s*<div className="mt-3 w-full">/);
+  assert.match(source, /aria-label="Confirm bet"\s*className="mt-2\.5 min-h-11 w-full/);
+});

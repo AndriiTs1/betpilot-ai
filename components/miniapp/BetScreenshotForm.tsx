@@ -55,12 +55,6 @@ function triggerHaptic(kind: "success" | "error" | "warning-light"): void {
   }
 }
 
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 type FormPhase = "idle" | "selected" | "recognizing" | "ready" | "confirming";
 
 // "Send a screenshot" screen: pick an image -> POST .../screenshot/preview
@@ -406,11 +400,6 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
                     alt="Selected bet slip screenshot"
                     className="max-h-64 w-full object-contain"
                   />
-                </div>
-
-                <div className="mt-2 flex items-center justify-between gap-3">
-                  <p className="min-w-0 flex-1 truncate text-sm text-slate-300">{file.name}</p>
-                  <span className="shrink-0 text-xs text-slate-500">{formatFileSize(file.size)}</span>
                 </div>
 
                 <button
