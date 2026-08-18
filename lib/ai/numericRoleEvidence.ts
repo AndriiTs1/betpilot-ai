@@ -63,6 +63,25 @@ export interface NumericRoleEvidence {
   // by position, never collapsed into "the value 2.5 exists somewhere."
   readonly start: number;
   readonly end: number;
+  // CORE BETTING PIPELINE STABILIZATION (Stage S2) — which semantic
+  // side/direction of the market this LINE evidence belongs to, when
+  // derivable: "OVER"/"UNDER" for TOTALS/TEAM_TOTAL (optionally suffixed
+  // with a named participant, e.g. "OVER:arsenal", for TEAM_TOTAL), a
+  // normalized participant name for a named SPREAD line (e.g.
+  // "PARTICIPANT:athletic bilbao"), or "SPREAD_SIDE_1"/"SPREAD_SIDE_2" for
+  // a bare, unattributed Ф1/Ф2-style SPREAD token. null for STAKE/ODDS
+  // (which have no "side" concept) and for a LINE entry whose side
+  // genuinely cannot be determined (e.g. a bare natural-language "фора
+  // -1.5" with no participant name and no Ф1/Ф2-style digit anywhere in
+  // the window). See deriveLineAttribution below — this is the ONE place
+  // that decision is made, so numericRoleVerifier.ts's side-aware
+  // filtering and this file's own claim-side attribution (computed
+  // identically in betDraftMapper.ts, via the same exported function) can
+  // never drift apart. A null attribution here (on EITHER the evidence or
+  // the claim it's compared against) always falls back to today's
+  // attribution-blind comparison — this field can only ever narrow a false
+  // conflict, never suppress a claim that genuinely still needs checking.
+  readonly attribution: string | null;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -247,7 +266,7 @@ function findMarkerBeforeNumberEvidence(text: string): NumericRoleEvidence[] {
       const captured = match[1];
       const end = match.index + match[0].length;
       const start = end - captured.length;
-      evidence.push({ role: spec.role, value: captured, marker: spec.markerLabel, confidence: spec.confidence, start, end });
+      evidence.push({ role: spec.role, value: captured, marker: spec.markerLabel, confidence: spec.confidence, start, end, attribution: null });
     }
   }
   return evidence;
@@ -284,7 +303,7 @@ function findNumberBeforeMarkerEvidence(text: string): NumberBeforeMarkerResult 
         excludedSpans.push({ start, end });
         continue;
       }
-      evidence.push({ role: spec.role, value: captured, marker: spec.markerLabel, confidence: spec.confidence, start, end });
+      evidence.push({ role: spec.role, value: captured, marker: spec.markerLabel, confidence: spec.confidence, start, end, attribution: null });
     }
   }
   return { evidence, excludedSpans };
@@ -457,6 +476,89 @@ function hasPlausibleParticipantName(name: string | null): boolean {
   return name === null || isWordLikeToken(name);
 }
 
+/* -------------------------------------------------------------------------- */
+/* CORE BETTING PIPELINE STABILIZATION (Stage S2) — side attribution         */
+/* -------------------------------------------------------------------------- */
+
+// A bare Ф1/Ф2 (or Latin F1/F2) shorthand token, with no participant name
+// attached in the window text at all — the exact shape that caused the
+// proven production regression (Ф1(-1.5) and Ф2(+1.5), both legitimate,
+// both real evidence for OPPOSITE sides of one spread market, previously
+// collided in the same undifferentiated LINE bucket). Deliberately narrow —
+// only recovers the digit already glued into the token's own spelling
+// (matching shorthandClassifier.ts's own SPREAD_TOKEN_BARE_PATTERN /
+// SPREAD_TOKEN_PARTICIPANT_PATTERN character class exactly, [фf][12]) —
+// never a new vocabulary, never a guess at meaning beyond what the token
+// itself already spells out.
+const BARE_SPREAD_SIDE_TOKEN_PATTERN = /(?<![a-zа-яё])[фf]\s*([12])(?![0-9a-zа-яё])/i;
+
+// CORE BETTING PIPELINE STABILIZATION (Stage S2) — the ONE place LINE
+// evidence's semantic side/direction is derived. Used ONLY to compare
+// EVIDENCE entries against EACH OTHER (numericRoleVerifier.ts's
+// detectSameRoleAmbiguity, below) — deliberately never compared against the
+// AI's own claim text: a real, proven test case showed that would be
+// unsafe (the claim's own selection text can name a participant in a
+// DIFFERENT script/transliteration than the OCR evidence's own text for the
+// SAME team — e.g. "Real Madrid" vs "Реал Мадрид" — so a naive string
+// comparison between the two would misjudge "same side, different
+// spelling" as "different side," which is exactly backwards). Restricting
+// this to evidence-vs-evidence keeps every comparison within the SAME
+// source text, so no cross-script mismatch can occur.
+//
+// TOTALS: selectionType is already "OVER"/"UNDER", and TOTALS never has a
+// participant name (shorthandClassifier.ts's matchTotals always returns
+// participantName: null) — always safe to use directly. SPREAD: only the
+// bare, unattributed Ф1/Ф2 shape (no participant name in the window at
+// all) recovers its own side digit from the raw window text via
+// BARE_SPREAD_SIDE_TOKEN_PATTERN; a SPREAD line WITH a named participant
+// returns null (unknown) rather than risk the same cross-script mismatch
+// this function exists to avoid. TEAM_TOTAL and every other market type
+// return null — genuinely out of this narrow, proven scope, not a guess.
+export function deriveLineAttribution(
+  classification: Pick<WindowClassification, "marketType" | "selectionType" | "participantName">,
+  rawText: string,
+): string | null {
+  if (classification.marketType === "TOTALS") {
+    return classification.selectionType;
+  }
+
+  if (classification.marketType === "SPREAD" && classification.participantName === null) {
+    const sideMatch = BARE_SPREAD_SIDE_TOKEN_PATTERN.exec(rawText);
+    return sideMatch ? `SPREAD_SIDE_${sideMatch[1]}` : null;
+  }
+
+  return null;
+}
+
+// CORE BETTING PIPELINE STABILIZATION (Stage S2) — Phase 2: a genuine
+// production case proved a bare, common Russian/English word ("меньше"/
+// "больше"/"under"/"over", with NO compact shorthand token — ТБ/ТМ, an
+// asian-total phrase, or the O<n>/U<n> letter form — anywhere in the
+// window) can sit directly next to an unrelated number that is actually
+// the bookmaker's displayed ODDS for that selector, not a competing totals
+// line, and get misread as one. "меньше"/"больше"/"under"/"over" are
+// ordinary vocabulary with meanings unrelated to betting in isolation —
+// the exact same "common word, weaker signal" reasoning this file's own
+// STAKE "на" marker already uses (MARKER_LOW, immediately below) — so a
+// LINE claim recovered from ONLY the bare word is downgraded to that same
+// tier: still real evidence (can still CORROBORATE a matching claim), but
+// — via numericRoleVerifier.ts's existing, unmodified MARKER_LOW handling
+// — can never by itself CONTRADICT another claim or make the source
+// AMBIGUOUS. The compact/explicit forms (ТБ 2.5, ТМ 2.5, asian total over
+// 2.5, O2.5, U2.5) are unaffected — they remain LABEL_STRONG, exactly as
+// before. Deliberately scoped to TOTALS only: TEAM_TOTAL (ИТБ/ИТМ) and
+// SPREAD (Ф1/Ф2/фора/handicap/spread) have no bare-common-word form in
+// shorthandClassifier.ts's own vocabulary to begin with, so this check
+// would always be false for them regardless — no separate market-type
+// guard is needed for correctness, but the call site below only invokes
+// this for TOTALS, matching the one proven case exactly.
+const BARE_TOTALS_WORD_PATTERN = /^(?:больше|меньше|over|under)$/i;
+
+function isBareTotalsWordMarker(windowText: string, embeddedLine: string): boolean {
+  const withoutLine = windowText.replace(embeddedLine, "").trim();
+  return BARE_TOTALS_WORD_PATTERN.test(withoutLine);
+}
+
 function findLineEvidence(text: string, occurrences: readonly NumberOccurrence[], alreadyClaimed: readonly NumericRoleEvidence[]): LineEvidenceResult {
   const tokens = tokenize(text);
   const lineEvidence: NumericRoleEvidence[] = [];
@@ -480,6 +582,12 @@ function findLineEvidence(text: string, occurrences: readonly NumberOccurrence[]
         sameNumericValue(classified.embeddedLine, occurrence.value) &&
         hasPlausibleParticipantName(classified.participantName)
       ) {
+        // Stage S2, Phase 2 — see isBareTotalsWordMarker's own header: a
+        // bare "меньше"/"больше"/"under"/"over" word (no compact shorthand
+        // token) is weaker LINE evidence than every other recognized form.
+        const isWeakBareTotalsWord =
+          classified.marketType === "TOTALS" && isBareTotalsWordMarker(classified.windowText, classified.embeddedLine);
+
         lineEvidence.push({
           role: "LINE",
           value: occurrence.value,
@@ -490,9 +598,11 @@ function findLineEvidence(text: string, occurrences: readonly NumberOccurrence[]
           // found inside the normalized window text, leaving the label
           // uncleanly stripped for comma inputs.
           marker: deriveLineMarkerLabel(classified.windowText, classified.embeddedLine),
-          confidence: "LABEL_STRONG",
+          confidence: isWeakBareTotalsWord ? "MARKER_LOW" : "LABEL_STRONG",
           start: occurrence.start,
           end: occurrence.end,
+          // Stage S2, Phase 1 — see deriveLineAttribution's own header.
+          attribution: deriveLineAttribution(classified, classified.windowText),
         });
       }
       break;
@@ -525,7 +635,7 @@ function findSoleCandidateEvidence(
   if (unclaimed.length !== 1) return [];
 
   const sole = unclaimed[0];
-  return [{ role: "STAKE", value: sole.value, marker: null, confidence: "SOLE_CANDIDATE", start: sole.start, end: sole.end }];
+  return [{ role: "STAKE", value: sole.value, marker: null, confidence: "SOLE_CANDIDATE", start: sole.start, end: sole.end, attribution: null }];
 }
 
 /* -------------------------------------------------------------------------- */

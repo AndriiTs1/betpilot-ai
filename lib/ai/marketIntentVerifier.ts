@@ -94,6 +94,20 @@ function distinctSignatures(evidence: readonly MarketIntentEvidence[]): Readonly
   return signatures;
 }
 
+// CORE BETTING PIPELINE STABILIZATION (Stage S2), Phase 4 — see
+// MarketIntentEvidence's own MarketIntentConfidence header. A BARE_DIGIT
+// entry (a lone "1"/"2" glyph, as likely to be unrelated screen noise as a
+// genuine selection) is never strong enough, on its own, to assert or
+// block a market claim — mirroring numericRoleVerifier.ts's own
+// MARKER_LOW/SOLE_CANDIDATE precedent (real evidence, allowed to
+// corroborate, never allowed to solely contradict or manufacture
+// ambiguity). Every genuinely distinctive token (a named participant, a
+// multi-character shorthand like "п1"/"ф1"/"тб", a real word like "ничья")
+// stays TOKEN_MATCH and is completely unaffected.
+function isStrongEvidence(entry: MarketIntentEvidence): boolean {
+  return entry.confidence === "TOKEN_MATCH";
+}
+
 /* -------------------------------------------------------------------------- */
 /* Public entry point                                                         */
 /* -------------------------------------------------------------------------- */
@@ -106,26 +120,32 @@ function distinctSignatures(evidence: readonly MarketIntentEvidence[]): Readonly
 // different signed line than SPREAD evidence still CORROBORATES on market
 // intent (section 6, section 8 item 19).
 export function verifyMarketIntentClaim(claim: MarketIntentClaim, evidence: readonly MarketIntentEvidence[]): MarketIntentVerification {
-  const signatures = distinctSignatures(evidence);
+  // Stage S2, Phase 4 — AMBIGUOUS/CONTRADICTED are ONLY ever driven by
+  // strong (TOKEN_MATCH) evidence; a BARE_DIGIT-only source (no strong
+  // evidence anywhere) is treated exactly like a source with no market-
+  // shape evidence at all — UNVERIFIED, never a rejection.
+  const strongEvidence = evidence.filter(isStrongEvidence);
+  const signatures = distinctSignatures(strongEvidence);
 
   if (signatures.size === 0) {
     // No strong market-shape token anywhere in the original text at all
-    // ("Арсенал 10", "ставка 10 на Арсенал") — absence of evidence is never
-    // treated as evidence of contradiction (section 4's explicit rule).
+    // ("Арсенал 10", "ставка 10 на Арсенал"), or only weak BARE_DIGIT noise
+    // — absence of reliable evidence is never treated as evidence of
+    // contradiction (section 4's explicit rule).
     return { verdict: "UNVERIFIED", supportingEvidence: [], conflictingEvidence: [] };
   }
 
-  const matching = evidence.filter((entry) => sameSignature(entry.classification, claim));
-  const conflicting = evidence.filter((entry) => !sameSignature(entry.classification, claim));
+  const matching = strongEvidence.filter((entry) => sameSignature(entry.classification, claim));
+  const conflicting = strongEvidence.filter((entry) => !sameSignature(entry.classification, claim));
 
   if (signatures.size >= 2) {
     return { verdict: "AMBIGUOUS", supportingEvidence: matching, conflictingEvidence: conflicting };
   }
 
-  // Exactly one distinct signature exists in the source — every entry in
-  // `evidence` shares it, so `matching`/`conflicting` are simply "does that
-  // one signature equal the claim" split across however many (semantically
-  // identical) occurrences were found.
+  // Exactly one distinct strong signature exists in the source — every
+  // strong entry shares it, so `matching`/`conflicting` are simply "does
+  // that one signature equal the claim" split across however many
+  // (semantically identical) occurrences were found.
   if (matching.length > 0) {
     return { verdict: "CORROBORATED", supportingEvidence: matching, conflictingEvidence: [] };
   }

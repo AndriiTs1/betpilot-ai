@@ -656,6 +656,30 @@ function isDeferrableLineMarketClaim(observation: MarketIntentObservation, rawSe
   return true;
 }
 
+// CORE BETTING PIPELINE STABILIZATION (Stage S2), Phase 3 — evaluated and
+// deliberately NOT implemented. The obvious version (defer a numeric-role
+// LINE ambiguity whenever the corresponding market-intent claim is an
+// otherwise-safe TOTALS/SPREAD shape with no CROSS-market-type conflict —
+// mirroring isDeferrableLineMarketClaim above) turned out to be unsafe: it
+// is blind to a genuine, same-market-type NUMERIC contradiction. Concrete
+// counter-example, proven by a real existing regression test (BA-2B Step 4
+// (6)): claim TOTALS/OVER, line "10"; text "Арсенал ТБ 2.5" — the
+// market-intent SIGNATURE matches perfectly (TOTALS/OVER both sides, zero
+// market-intent conflicting evidence), so that proposed rule would defer
+// this claim to the provider — silently accepting a claimed line (10) the
+// message plainly contradicts (2.5), which is exactly the class of
+// hallucinated-value bug this codebase's numeric-role safety net exists to
+// catch. A safe version would need its own, independently-proven
+// side-attribution check on the NUMERIC conflict itself — Phase 1's
+// evidence-vs-evidence attribution comparison already provides exactly
+// that, directly inside verifyNumericRoleClaim (see
+// numericRoleVerifier.ts's hasGenuineHighConfidenceConflict), which is why
+// both production regressions (SPREAD Ф1/Ф2, TOTALS bare-word-vs-odds) are
+// already fully resolved by Phase 1/2 without touching this file's
+// deferral order at all. Numeric safety is therefore still checked before,
+// and independently of, market-intent safety — unchanged from before this
+// stage.
+
 // Wraps mapRawBetSlipToParsedBetSlip() so a programmer-error throw (the
 // mapper/adapter only ever throws for a non-finite stake/odds or a sport
 // with no raw text at all — both impossible given betFieldsSchema/

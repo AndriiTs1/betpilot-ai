@@ -19,7 +19,23 @@
 import { classifyBettingSelectionText, type ShorthandClassification } from "@/lib/odds/shorthandClassifier";
 import { tokenize, findControlRowTokenIndices, type Token } from "./screenshotUiNoise";
 
-export type MarketIntentConfidence = "TOKEN_MATCH";
+// CORE BETTING PIPELINE STABILIZATION (Stage S2), Phase 4 — BARE_DIGIT
+// added alongside the original single-tier TOKEN_MATCH: a real production
+// case proved that a bare, single-character "1"/"2" token — the closed
+// HOME_TOKENS/AWAY_TOKENS shorthand for a 1X2 moneyline pick — is exactly
+// as likely to be unrelated screen noise (a sibling market button, a page/
+// row counter, any other lone digit glyph elsewhere on a bookmaker screen)
+// as it is to be a genuine, intentional selection marker. Every OTHER
+// token this file recognizes (п1/p1/w1/home, ничья/draw, a named
+// participant, ТБ/ТМ/Ф1/Ф2/фора, ...) is multi-character and therefore
+// far less likely to appear as incidental screen content — those stay
+// TOKEN_MATCH, unaffected. See marketIntentVerifier.ts's own header for how
+// the two tiers interact: BARE_DIGIT can still corroborate a claim it
+// happens to match (real, if weak, positive signal), but can never by
+// itself create an AMBIGUOUS or CONTRADICTED verdict — the same asymmetric
+// treatment numericRoleVerifier.ts's own MARKER_LOW tier already
+// established for this codebase's "на" STAKE marker.
+export type MarketIntentConfidence = "TOKEN_MATCH" | "BARE_DIGIT";
 
 export interface MarketIntentEvidence {
   // The classifier's own, unmodified result for the matched window — reused
@@ -188,6 +204,19 @@ function findBackwardMatch(tokens: readonly Token[], endIndex: number, consumed:
   return null;
 }
 
+// CORE BETTING PIPELINE STABILIZATION (Stage S2), Phase 4 — see
+// MarketIntentConfidence's own header. A window counts as a bare digit
+// ONLY when it is exactly one token AND that token's entire text is
+// literally "1" or "2" (HOME_TOKENS'/AWAY_TOKENS' own bare-digit members) —
+// every other single-token match (a real word like "ничья", a multi-char
+// shorthand like "п1"/"ф1"/"тб") or any multi-token window (a genuine
+// selection is being described, not a lone glyph) stays full TOKEN_MATCH.
+const BARE_DIGIT_TOKEN_PATTERN = /^[12]$/;
+
+function isBareDigitWindow(match: WindowMatch): boolean {
+  return match.consumedIndices.length === 1 && BARE_DIGIT_TOKEN_PATTERN.test(match.windowText);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Public entry point                                                         */
 /* -------------------------------------------------------------------------- */
@@ -233,7 +262,7 @@ export function extractMarketIntentEvidence(originalText: string): readonly Mark
     if (!match) continue;
     evidence.push({
       classification: match.classification,
-      confidence: "TOKEN_MATCH",
+      confidence: isBareDigitWindow(match) ? "BARE_DIGIT" : "TOKEN_MATCH",
       start: match.start,
       end: match.end,
       matchedText: match.windowText,
@@ -264,7 +293,7 @@ export function extractMarketIntentEvidence(originalText: string): readonly Mark
     if (!match) continue;
     evidence.push({
       classification: match.classification,
-      confidence: "TOKEN_MATCH",
+      confidence: isBareDigitWindow(match) ? "BARE_DIGIT" : "TOKEN_MATCH",
       start: match.start,
       end: match.end,
       matchedText: match.windowText,

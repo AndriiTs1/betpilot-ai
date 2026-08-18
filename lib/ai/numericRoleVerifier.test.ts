@@ -8,7 +8,7 @@ function claim(role: NumericRoleClaim["role"], value: string | number): NumericR
 }
 
 function evidenceEntry(overrides: Partial<NumericRoleEvidence> & Pick<NumericRoleEvidence, "role" | "value" | "confidence">): NumericRoleEvidence {
-  return { marker: null, start: 0, end: overrides.value.length, ...overrides };
+  return { marker: null, start: 0, end: overrides.value.length, attribution: null, ...overrides };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -181,38 +181,61 @@ test("15. EXPRESS global stake: 'Арсенал ТБ 2.5 + Реал ТМ 3.5, э
   assert.equal(result.verdict, "CORROBORATED");
 });
 
-test("16. EXPRESS multiple DIFFERENT lines: correctly AMBIGUOUS, not falsely CORROBORATED — the verifier has no leg-attribution capability, so it honestly cannot tell which leg a matching claim actually belongs to", () => {
-  // Revised on review: this used to assert CORROBORATED for a claim
-  // matching one of two distinct per-leg lines. That overclaimed
-  // confidence the verifier doesn't actually have — from its flat,
-  // leg-unaware view, two distinct LABEL_STRONG LINE values are
-  // indistinguishable from the "ставка 10, ставка 20" self-contradiction
-  // case (see the AMBIGUOUS tests above). AMBIGUOUS is the honest verdict
-  // here; leg attribution remains a separate, future problem, exactly as
-  // this stage's own brief said it must.
+test("16. two DIFFERENT-DIRECTION TOTALS lines (OVER vs UNDER): Stage S2 attribution now recognizes them as two legitimate sides of one market, not a self-contradiction", () => {
+  // CORE BETTING PIPELINE STABILIZATION (Stage S2) taught this verifier
+  // that a TOTALS OVER line and a TOTALS UNDER line are two different,
+  // non-conflicting sides of the same two-sided market (see
+  // numericRoleEvidence.ts's own deriveLineAttribution/`attribution`
+  // field) — the exact, proven fix for a real production false-AMBIGUOUS
+  // regression on ordinary SINGLE totals/spread screenshots (Ф1(-1.5) vs
+  // Ф2(+1.5) colliding the same way, before this stage). This function is
+  // never actually invoked for EXPRESS's LINE/ODDS role in production
+  // (computeNumericRoleObservations in betDraftMapper.ts only ever
+  // computes a LINE/ODDS observation for a SINGLE slip's one selection —
+  // see that file's own comment), so this two-different-clubs input shape
+  // is not something real production traffic can trigger for this role;
+  // this test exercises the pure function's own, now slightly more
+  // capable, standalone contract — see test 16b immediately below for
+  // proof this new capability never suppresses a GENUINE conflict.
   const evidence = extractNumericRoleEvidence("Арсенал ТБ 2.5 + Реал ТМ 3.5, экспресс 20");
   const lines = evidence.filter((e) => e.role === "LINE");
   assert.equal(lines.length, 2);
+  assert.equal(lines[0].attribution, "OVER");
+  assert.equal(lines[1].attribution, "UNDER");
 
   const matchFirst = verifyNumericRoleClaim(claim("LINE", 2.5), evidence);
-  assert.equal(matchFirst.verdict, "AMBIGUOUS");
-  assert.equal(matchFirst.supportingEvidence[0].value, "2.5");
-  assert.equal(matchFirst.conflictingEvidence[0].value, "3.5");
+  assert.equal(matchFirst.verdict, "CORROBORATED");
 
   const matchSecond = verifyNumericRoleClaim(claim("LINE", 3.5), evidence);
-  assert.equal(matchSecond.verdict, "AMBIGUOUS");
+  assert.equal(matchSecond.verdict, "CORROBORATED");
 
-  // A value matching NEITHER leg is also AMBIGUOUS, not CONTRADICTED — the
-  // hard rule applies regardless of whether the claim happens to match one
-  // of the conflicting values.
+  // A value matching NEITHER attributed side is CONTRADICTED — real,
+  // attributed LINE evidence exists for this role, and this claim matches
+  // none of it.
   const matchNeither = verifyNumericRoleClaim(claim("LINE", 4.5), evidence);
-  assert.equal(matchNeither.verdict, "AMBIGUOUS");
+  assert.equal(matchNeither.verdict, "CONTRADICTED");
   assert.equal(matchNeither.supportingEvidence.length, 0);
   assert.equal(matchNeither.conflictingEvidence.length, 2);
 
   // The slip-level STAKE claim is entirely unaffected — only one STAKE
   // value exists in the text, so no ambiguity applies to that role.
   assert.equal(verifyNumericRoleClaim(claim("STAKE", 20), evidence).verdict, "CORROBORATED");
+});
+
+test("16b. two SAME-DIRECTION TOTALS lines (both OVER) remain honestly AMBIGUOUS — attribution can only ever narrow a false conflict, never suppress a genuine one", () => {
+  // Same attribution ("OVER" for both) means these two entries are NOT
+  // explainable as different sides of the market — a genuine, unresolved
+  // same-side disagreement, and Stage S2's attribution awareness must
+  // never paper over that. This is the direct proof that the fix is
+  // narrowly scoped, not a general ambiguity-detection weakening.
+  const evidence = extractNumericRoleEvidence("ТБ 2.5, ТБ 3.5, ставка 10");
+  const lines = evidence.filter((e) => e.role === "LINE");
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0].attribution, "OVER");
+  assert.equal(lines[1].attribution, "OVER");
+
+  assert.equal(verifyNumericRoleClaim(claim("LINE", 2.5), evidence).verdict, "AMBIGUOUS");
+  assert.equal(verifyNumericRoleClaim(claim("LINE", 3.5), evidence).verdict, "AMBIGUOUS");
 });
 
 test("17. EXPRESS repeated same line: 'Арсенал ТБ 2.5 + Реал ТМ 2.5, экспресс 20' — two distinct LINE=2.5 occurrences both preserved and both corroborate the same claim", () => {
@@ -768,4 +791,106 @@ test("M1.3 real Case D fixture: the 'ℹ +10' control never becomes ODDS evidenc
   const result = verifyNumericRoleClaim(claim("ODDS", 1.9), evidence);
   assert.notEqual(result.verdict, "CONTRADICTED");
   assert.notEqual(result.verdict, "AMBIGUOUS");
+});
+
+/* ============================================================================
+ * S2.1 CORE EVIDENCE SEMANTIC REVIEW — direct isGenuineConflictPair matrix.
+ * Hand-built evidence (bypasses the extractor entirely) proving the exact
+ * boolean rule in isolation: NOT a conflict when the value matches OR both
+ * attributions are known and differ; a genuine conflict otherwise. See
+ * isGenuineConflictPair's own header in numericRoleVerifier.ts.
+ * ============================================================================ */
+
+test("S2.1-A. same attribution + same value (SPREAD_SIDE_1 -1.5 twice) is NOT a conflict", () => {
+  const evidence: NumericRoleEvidence[] = [
+    evidenceEntry({ role: "LINE", value: "-1.5", confidence: "LABEL_STRONG", marker: "ф1", attribution: "SPREAD_SIDE_1" }),
+    evidenceEntry({ role: "LINE", value: "-1.5", confidence: "LABEL_STRONG", marker: "ф1", attribution: "SPREAD_SIDE_1" }),
+  ];
+  const result = verifyNumericRoleClaim(claim("LINE", -1.5), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+});
+
+test("S2.1-B. same attribution + different value (SPREAD_SIDE_1 -1.5 vs SPREAD_SIDE_1 -2.5) is a genuine conflict", () => {
+  const evidence: NumericRoleEvidence[] = [
+    evidenceEntry({ role: "LINE", value: "-1.5", confidence: "LABEL_STRONG", marker: "ф1", attribution: "SPREAD_SIDE_1" }),
+    evidenceEntry({ role: "LINE", value: "-2.5", confidence: "LABEL_STRONG", marker: "ф1", attribution: "SPREAD_SIDE_1" }),
+  ];
+  const result = verifyNumericRoleClaim(claim("LINE", -1.5), evidence);
+  assert.equal(result.verdict, "AMBIGUOUS");
+});
+
+test("S2.1-C. different known attribution (SPREAD_SIDE_1 -1.5 vs SPREAD_SIDE_2 +1.5) is NOT a self-conflict", () => {
+  const evidence: NumericRoleEvidence[] = [
+    evidenceEntry({ role: "LINE", value: "-1.5", confidence: "LABEL_STRONG", marker: "ф1", attribution: "SPREAD_SIDE_1" }),
+    evidenceEntry({ role: "LINE", value: "1.5", confidence: "LABEL_STRONG", marker: "ф2", attribution: "SPREAD_SIDE_2" }),
+  ];
+  const result = verifyNumericRoleClaim(claim("LINE", -1.5), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+});
+
+test("S2.1-D. bare-word OVER 2.5 + bare-word UNDER 2.5 is NOT a self-conflict merely because both LINE values exist", () => {
+  const evidence = extractNumericRoleEvidence("Тотал больше 2.5, тотал меньше 2.5");
+  const result = verifyNumericRoleClaim(claim("LINE", 2.5), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+});
+
+test("S2.1-E. bare-word 'Over 2.5' + 'Over 3.5' (same MARKER_LOW attribution, different values) is a genuine same-direction conflict — regression for the fail-open bug this review found", () => {
+  // Before this fix, hasGenuineHighConfidenceConflict only ever looked at
+  // LABEL_STRONG/LABEL_WEAK entries, so two MARKER_LOW bare-totals-word LINE
+  // entries (isBareTotalsWordMarker's downgrade — see numericRoleEvidence.ts)
+  // sharing the same attribution but disagreeing on value silently fell
+  // through to CORROBORATED against whichever one the claim happened to
+  // match, never surfacing the other as a conflict at all.
+  const evidence = extractNumericRoleEvidence("Over 2.5\nOver 3.5");
+  const lines = evidence.filter((e) => e.role === "LINE");
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0].confidence, "MARKER_LOW");
+  assert.equal(lines[1].confidence, "MARKER_LOW");
+  assert.equal(lines[0].attribution, "OVER");
+  assert.equal(lines[1].attribution, "OVER");
+
+  assert.equal(verifyNumericRoleClaim(claim("LINE", 2.5), evidence).verdict, "AMBIGUOUS");
+  assert.equal(verifyNumericRoleClaim(claim("LINE", 3.5), evidence).verdict, "AMBIGUOUS");
+});
+
+test("S2.1-F. an unrelated bare MARKER_LOW STAKE 'на' pair (no attribution) is still NOT ambiguous — the Phase 2 conflict fix is scoped to attributed LINE entries only", () => {
+  const evidence: NumericRoleEvidence[] = [
+    evidenceEntry({ role: "STAKE", value: "10", confidence: "MARKER_LOW", marker: "на" }),
+    evidenceEntry({ role: "STAKE", value: "20", confidence: "MARKER_LOW", marker: "на" }),
+  ];
+  const result = verifyNumericRoleClaim(claim("STAKE", 10), evidence);
+  assert.notEqual(result.verdict, "AMBIGUOUS");
+});
+
+test("S2.1-G. 'Over 2.5' next to an unrelated bare odds value '1.45' never becomes LINE ambiguity — the number never resolves to LINE evidence at all", () => {
+  const evidence = extractNumericRoleEvidence("Over 2.5\n1.45");
+  const lines = evidence.filter((e) => e.role === "LINE");
+  assert.equal(lines.length, 1, "the bare odds-shaped '1.45' must not be read as a second competing LINE value");
+  const result = verifyNumericRoleClaim(claim("LINE", 2.5), evidence);
+  assert.equal(result.verdict, "CORROBORATED");
+});
+
+test("S2.1-H. ordinary standalone totals phrases extract the correct line and direction: Over 2.5 / Under 2.5 / Over 3.5 / Under 1.5 / Тотал больше 2.5 / Тотал меньше 2.5", () => {
+  const cases: Array<[string, string, string]> = [
+    ["Over 2.5", "2.5", "OVER"],
+    ["Under 2.5", "2.5", "UNDER"],
+    ["Over 3.5", "3.5", "OVER"],
+    ["Under 1.5", "1.5", "UNDER"],
+    ["Тотал больше 2.5", "2.5", "OVER"],
+    ["Тотал меньше 2.5", "2.5", "UNDER"],
+  ];
+  for (const [text, expectedValue, expectedAttribution] of cases) {
+    const lines = extractNumericRoleEvidence(text).filter((e) => e.role === "LINE");
+    assert.equal(lines.length, 1, `expected exactly one LINE entry for "${text}"`);
+    assert.equal(lines[0].value, expectedValue, `wrong value extracted for "${text}"`);
+    assert.equal(lines[0].attribution, expectedAttribution, `wrong direction extracted for "${text}"`);
+    assert.equal(verifyNumericRoleClaim(claim("LINE", expectedValue), extractNumericRoleEvidence(text)).verdict, "CORROBORATED");
+  }
+});
+
+test("S2.1-I. deriveLineAttribution safety: a named-participant SPREAD ('Barcelona -1.5') never gets SPREAD_SIDE_1/SPREAD_SIDE_2 attribution — unknown attribution stays conservative (null)", () => {
+  const evidence = extractNumericRoleEvidence("Barcelona -1.5");
+  const lines = evidence.filter((e) => e.role === "LINE");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].attribution, null, "a named participant must never be arbitrarily mapped to a bare Ф1/Ф2-style side");
 });

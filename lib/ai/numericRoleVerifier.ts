@@ -131,21 +131,66 @@ function claimMatchesEvidence(claim: NumericRoleClaim, evidence: NumericRoleEvid
 /* matching logic                                                             */
 /* -------------------------------------------------------------------------- */
 
-// Only LABEL_STRONG/LABEL_WEAK entries are considered — a single high-tier
-// value plus an unrelated MARKER_LOW mention of a different number must
-// never trigger this (MARKER_LOW was never strong enough to assert anything
-// on its own, so it cannot make the source "ambiguous" either). Callers
-// already pass this function evidence that primaryTierEvidence() has
+// CORE BETTING PIPELINE STABILIZATION (Stage S2) — two high-tier entries
+// are a genuine ambiguous pair unless they (a) already agree on the value,
+// or (b) both carry a KNOWN (non-null) `attribution` (see
+// NumericRoleEvidence's own field comment) that DIFFERS — in which case
+// they describe two different, legitimate sides/directions of the same
+// two-sided market (e.g. Ф1's line vs Ф2's line, or a TOTALS OVER line vs
+// its own UNDER line), not a self-contradiction. Whenever either entry's
+// attribution is unknown (null — including every entry from before this
+// stage, which never set the field), this degrades to exactly today's
+// fully attribution-blind rule: any two different values are a conflict,
+// full fail-closed safety preserved. This only ever compares evidence
+// entries against EACH OTHER, both drawn from the same extractNumericRoleEvidence
+// call over the same source text — never against the claim's own
+// (possibly differently-spelled/transliterated) text, which is what keeps
+// this safe (see deriveLineAttribution's own header for the proven reason
+// a claim-vs-evidence comparison would NOT be safe here).
+function isGenuineConflictPair(a: NumericRoleEvidence, b: NumericRoleEvidence): boolean {
+  if (sameNumericValue(a.value, b.value)) return false;
+  if (a.attribution != null && b.attribution != null && a.attribution !== b.attribution) return false;
+  return true;
+}
+
+// LABEL_STRONG/LABEL_WEAK entries always count. A plain MARKER_LOW entry
+// (e.g. STAKE's "на" preposition) never does — it was never strong enough
+// to assert anything on its own, so it cannot make the source "ambiguous"
+// either, and this must stay true regardless of what else changes here.
+//
+// CORE BETTING PIPELINE STABILIZATION (Stage S2), Phase 2 fix — a MARKER_LOW
+// LINE entry produced by isBareTotalsWordMarker (numericRoleEvidence.ts) is
+// a DIFFERENT kind of weak: its confidence was downgraded purely to stop it
+// out-ranking/competing with an unrelated ODDS-shaped number (the odds-vs-
+// line discrimination problem), never because the direction word itself is
+// vague the way "на" is. Such an entry always carries a non-null
+// `attribution` ("OVER"/"UNDER" — deriveLineAttribution's TOTALS branch runs
+// unconditionally before the confidence downgrade). Two of these for the
+// same role are therefore still eligible to conflict with each other
+// exactly like two LABEL_STRONG entries would (e.g. "Over 2.5" + "Over
+// 3.5"): same reasoning as isGenuineConflictPair itself — a shared
+// attribution with a different value is a genuine same-direction
+// disagreement, not two sides of one market. A bare STAKE/ODDS MARKER_LOW
+// entry never has an attribution (that field only exists for LINE), so this
+// is a no-op for "на" and every other non-LINE weak marker — the exclusion
+// above is preserved for exactly the cases it was meant for.
+function isAmbiguityEligible(entry: NumericRoleEvidence): boolean {
+  return entry.confidence === "LABEL_STRONG" || entry.confidence === "LABEL_WEAK" || (entry.confidence === "MARKER_LOW" && entry.attribution != null);
+}
+
+// Callers already pass this function evidence that primaryTierEvidence() has
 // filtered, so in practice at most ONE of LABEL_STRONG/LABEL_WEAK is ever
-// actually present here for a given role — this check simply covers both
-// tier names rather than assuming which one survived filtering.
-function distinctHighConfidenceValues(sameRole: readonly NumericRoleEvidence[]): NumericRoleEvidence[] {
-  const highConfidence = sameRole.filter((entry) => entry.confidence === "LABEL_STRONG" || entry.confidence === "LABEL_WEAK");
-  const distinct: NumericRoleEvidence[] = [];
-  for (const entry of highConfidence) {
-    if (!distinct.some((existing) => sameNumericValue(existing.value, entry.value))) distinct.push(entry);
+// actually present here for a given role — isAmbiguityEligible simply covers
+// both tier names (plus the attributed-MARKER_LOW case above) rather than
+// assuming which one survived filtering.
+function hasGenuineHighConfidenceConflict(sameRole: readonly NumericRoleEvidence[]): boolean {
+  const highConfidence = sameRole.filter(isAmbiguityEligible);
+  for (let i = 0; i < highConfidence.length; i += 1) {
+    for (let j = i + 1; j < highConfidence.length; j += 1) {
+      if (isGenuineConflictPair(highConfidence[i], highConfidence[j])) return true;
+    }
   }
-  return distinct;
+  return false;
 }
 
 // Detects when the source text itself carries two or more DISTINCT,
@@ -156,14 +201,12 @@ function distinctHighConfidenceValues(sameRole: readonly NumericRoleEvidence[]):
 // values must not be reported as confidently CORROBORATED while another
 // explicit high-confidence mention disagrees — the hard rule this stage
 // exists to enforce. A repeated mention of the exact SAME value
-// ("ставка 10 ... ставка 10") is NOT ambiguous — sameNumericValue-based
-// deduplication in distinctHighConfidenceValues means only genuinely
-// different values ever reach this branch. This never attempts to decide
-// which value the player "really meant" — both are simply reported.
+// ("ставка 10 ... ставка 10") is NOT ambiguous. This never attempts to
+// decide which value the player "really meant" — both are simply reported.
 function detectSameRoleAmbiguity(claim: NumericRoleClaim, sameRole: readonly NumericRoleEvidence[]): NumericRoleVerification | null {
-  if (distinctHighConfidenceValues(sameRole).length < 2) return null;
+  if (!hasGenuineHighConfidenceConflict(sameRole)) return null;
 
-  const highConfidenceEntries = sameRole.filter((entry) => entry.confidence === "LABEL_STRONG" || entry.confidence === "LABEL_WEAK");
+  const highConfidenceEntries = sameRole.filter(isAmbiguityEligible);
   return {
     verdict: "AMBIGUOUS",
     supportingEvidence: highConfidenceEntries.filter((entry) => claimMatchesEvidence(claim, entry)),

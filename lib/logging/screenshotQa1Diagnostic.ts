@@ -205,16 +205,18 @@ export interface Qa1ReconciliationDiagnostic {
 // MAX_WINDOW_TOKENS (3) tokens by construction — never a larger substring,
 // never the rest of the OCR text — the same safety class already used by
 // Qa1NumericEvidenceEntry's own `marker` field above. `confidence` mirrors
-// MarketIntentEvidence's own single-tier model today (only "TOKEN_MATCH"
-// exists); inlined as a literal type here rather than imported, matching
-// this file's own existing convention for Qa1NumericEvidenceEntry.confidence.
+// MarketIntentEvidence's own two-tier model (Stage S2, Phase 4 added
+// "BARE_DIGIT" — a lone "1"/"2" glyph, too weak to independently assert or
+// block a market claim — alongside the original "TOKEN_MATCH"); inlined as
+// a literal type here rather than imported, matching this file's own
+// existing convention for Qa1NumericEvidenceEntry.confidence.
 export interface Qa1MarketIntentEvidenceEntry {
   marketType: string;
   selectionType: string;
   participantName: string | null;
   embeddedLine: string | null;
   matchedText: string;
-  confidence: "TOKEN_MATCH";
+  confidence: "TOKEN_MATCH" | "BARE_DIGIT";
 }
 
 export interface Qa1MarketIntentEvidenceDiagnostic {

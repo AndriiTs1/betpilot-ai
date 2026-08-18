@@ -506,3 +506,151 @@ test("Matrix 15 — real Case D (laliga4.jpg): SPREAD 'Real Madrid -1.5' with a 
   assert.equal(result.selections[0].submittedOdds, 1.9);
   assert.equal(result.stake, 50);
 });
+
+/* ============================================================================
+ * CORE BETTING PIPELINE STABILIZATION (Stage S2) — the two fresh, real
+ * production SINGLE-screenshot regressions this stage fixed, reconstructed
+ * as permanent fixtures at this same OCR-text level, plus the proven-safe
+ * generic UI-noise case and two genuine-fail-closed guards proving the fix
+ * is narrowly scoped (never weakens a real conflict). See lib/ai/
+ * numericRoleEvidence.ts's `attribution` field and isBareTotalsWordMarker,
+ * and lib/ai/marketIntentEvidence.ts's BARE_DIGIT tier, for the underlying
+ * mechanism each fixture below exercises end-to-end.
+ * ============================================================================ */
+
+test("Matrix 16 — SINGLE SPREAD: bare Ф1(-1.5)/Ф2(+1.5) BOTH present (the exact fresh production regression — previously false-rejected as numeric_mismatch)", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({
+        sport: "Football",
+        event: "Athletic Bilbao vs Sevilla",
+        market: "Handicap",
+        selection: "Athletic Bilbao -1.5",
+        line: "-1.5",
+        stake: 5,
+        odds: 1.74,
+      }),
+    );
+
+  const text = "Атлетик Бильбао - Севилья\nФ1 -1.5\nФ2 +1.5\nСтавка 5";
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `${result.error} (${result.code})`);
+  if (!result.valid) return;
+  assert.equal(result.selections[0].event, "Athletic Bilbao vs Sevilla");
+  assert.equal(result.selections[0].line, "-1.5");
+  assert.equal(result.selections[0].submittedOdds, 1.74);
+  assert.equal(result.stake, 5);
+});
+
+test("Matrix 17 — SINGLE TOTALS: bare 'Меньше' next to an unrelated odds-shaped decimal (the exact fresh production regression — previously false-rejected as numeric_mismatch)", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({
+        sport: "Football",
+        event: "Real Betis vs Real Sociedad",
+        market: "Totals",
+        selection: "Under 2",
+        line: "2",
+        stake: 5,
+        odds: 1.45,
+      }),
+    );
+
+  // "1.45" here is the bookmaker's own displayed ODDS for the Under
+  // selector, sitting right next to the bare word "Меньше" with no
+  // separating text — exactly the fresh production shape that used to be
+  // misread as a second, competing TOTALS line.
+  const text = "Реал Бетис - Реал Сосьедад\nТотал\nМеньше 2\n1.45\nСтавка 5";
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `${result.error} (${result.code})`);
+  if (!result.valid) return;
+  assert.equal(result.selections[0].line, "2");
+  assert.equal(result.selections[0].submittedOdds, 1.45);
+  assert.equal(result.stake, 5);
+});
+
+test("Matrix 18 — SINGLE MONEYLINE with bare sibling '1'/'2' UI-noise present (Stage S2 Phase 4 — a lone digit glyph must never outrank the AI's own named-participant claim)", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({
+        sport: "Football",
+        event: "Athletic Bilbao vs Sevilla",
+        market: "1X2",
+        selection: "Athletic Bilbao",
+        stake: 5,
+        odds: 1.74,
+      }),
+    );
+
+  // "1"/"2" here are bare, unlabeled digits with no participant text of
+  // their own attached (unlike Matrix 1's real "П1 - Бавария") — exactly
+  // the shape a sibling quick-bet-selector row or an unrelated on-screen
+  // counter produces, which previously manufactured a false MONEYLINE_3WAY
+  // AMBIGUOUS/CONTRADICTED verdict against the AI's own correct claim.
+  const text = "Атлетик Бильбао - Севилья\n1\n2\n2\nСтавка 5";
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, true, result.valid ? "" : `${result.error} (${result.code})`);
+  if (!result.valid) return;
+  assert.equal(result.selections[0].selection, "Athletic Bilbao");
+  assert.equal(result.selections[0].submittedOdds, 1.74);
+  assert.equal(result.stake, 5);
+});
+
+test("Matrix 19 — GENUINE FAIL-CLOSED: two conflicting SAME-side SPREAD lines (both Ф1, different values) must still be rejected", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({
+        sport: "Football",
+        event: "Athletic Bilbao vs Sevilla",
+        market: "Handicap",
+        selection: "Athletic Bilbao -1.5",
+        line: "-1.5",
+        stake: 5,
+        odds: 1.74,
+      }),
+    );
+
+  // BOTH occurrences are Ф1 (the SAME side), with genuinely different
+  // values — Stage S2's attribution awareness must never treat this as
+  // "two legitimate sides," since they share the identical attribution.
+  const text = "Атлетик Бильбао - Севилья\nФ1 -1.5\nФ1 -2.5\nСтавка 5";
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, false, "a genuine same-side SPREAD conflict must still hard-reject");
+  if (result.valid) return;
+  assert.equal(result.code, "numeric_mismatch");
+});
+
+test("Matrix 20 — GENUINE FAIL-CLOSED: two conflicting SAME-direction TOTALS lines (both Over, different values) must still be rejected", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({
+        sport: "Football",
+        event: "Real Betis vs Real Sociedad",
+        market: "Totals",
+        selection: "Over 2.5",
+        line: "2.5",
+        stake: 5,
+        odds: 1.74,
+      }),
+    );
+
+  // Both are explicit ТБ (compact shorthand, LABEL_STRONG — not the weak
+  // bare-word form Matrix 17 exercises) for the SAME direction (OVER),
+  // with genuinely different values — a real, meaningful disagreement that
+  // must never be silently accepted.
+  const text = "Реал Бетис - Реал Сосьедад\nТБ 2.5\nТБ 3.5\nСтавка 5";
+  const result = await parseBetSlipMessage(text, "OCR");
+
+  assert.equal(result.valid, false, "a genuine same-direction TOTALS conflict must still hard-reject");
+  if (result.valid) return;
+  assert.equal(result.code, "numeric_mismatch");
+});
