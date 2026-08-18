@@ -191,16 +191,16 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
       className="rounded-2xl p-4"
       style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
     >
-      <h3 className="text-base font-bold text-white">Express ×{preview.selections.length}</h3>
+      <h3 className="mb-2 text-base font-bold text-white">Express ×{preview.selections.length}</h3>
 
       {/* Decision context (the player is about to confirm) — every
           selection is always shown, never truncated, regardless of count. */}
-      <div className="mt-4">
+      <div>
         <SelectionList selections={selections} mode="full" showStatus />
       </div>
 
       <div
-        className="mt-4 rounded-xl p-3"
+        className="mt-3 rounded-xl p-2.5"
         style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
       >
         <PreviewRow label="Stake" value={formatAmount(preview.stake)} />
@@ -244,7 +244,7 @@ function PreviewRow({
   const valueColor = emphasis === "hero" ? "#60E84A" : "#ffffff";
 
   return (
-    <div className={`flex items-start justify-between gap-3 ${last ? "" : "mb-2"}`}>
+    <div className={`flex items-start justify-between gap-3 ${last ? "" : "mb-1.5"}`}>
       <span className="shrink-0 text-xs text-slate-400">{label}</span>
       <span
         className={`min-w-0 text-right ${valueClass} ${wrap ? "break-words" : ""}`}

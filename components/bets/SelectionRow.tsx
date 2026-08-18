@@ -107,7 +107,7 @@ export default function SelectionRow({ selection, legLabel, showStatus = true }:
 
   return (
     <div
-      className="rounded-xl p-3"
+      className="rounded-xl p-2.5"
       style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
     >
       <div className="flex items-start gap-2.5">
@@ -148,19 +148,19 @@ export default function SelectionRow({ selection, legLabel, showStatus = true }:
           {presentation.mode === "prominent" ? (
             // The one and only value a player sees: BetPilot's current
             // offer for this leg. No comparison, no second number.
-            <div className="mt-1.5 flex items-baseline gap-1.5">
+            <div className="mt-1 flex items-baseline gap-1.5">
               <span className="text-xs text-slate-500">Odds</span>
               <span className="text-base font-bold" style={{ color: statusColor }}>
                 {formatAmount(presentation.value)}
               </span>
             </div>
           ) : presentation.mode === "unavailable" ? (
-            <div className="mt-1.5 text-xs text-slate-500">Odds: —</div>
+            <div className="mt-1 text-xs text-slate-500">Odds: —</div>
           ) : (
             // Review-context only (showStatus=false) — the bet's own final,
             // already-accepted odds; unrelated to the preview/confirm-time
             // concerns above.
-            <div className="mt-1.5 text-xs text-slate-500">
+            <div className="mt-1 text-xs text-slate-500">
               Odds: {presentation.odds !== null ? formatAmount(presentation.odds) : "—"}
             </div>
           )}

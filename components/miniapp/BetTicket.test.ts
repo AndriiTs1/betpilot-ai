@@ -454,3 +454,45 @@ test("M5.3 regression guard: Done / View History remain unchanged", () => {
   assert.match(source, /aria-label="View history"/);
   assert.match(source, /onClick=\{onViewHistory\}/);
 });
+
+// Stage M5.4 — SINGLE-SCREEN CORE BET FLOW. Section E: leg/section spacing
+// tightened so an EXPRESS ×2 submitted ticket has a realistic shot at
+// fitting a normal iPhone viewport without scrolling. Every assertion below
+// checks spacing classes only — no text content, field, or number changed.
+test("source: the Event section's container padding was tightened (py-5 -> py-4)", () => {
+  assert.match(source, /\{\/\* Event.*[\s\S]{0,400}className="px-5 py-4"/);
+  assert.equal(/\{\/\* Event\b[\s\S]{0,50}className="px-5 py-5"/.test(source), false, "old, looser Event section padding must be gone");
+});
+
+test("source: the gap between legs was tightened (mt-4 -> mt-3)", () => {
+  assert.match(source, /className=\{`ticket-row-animate \$\{index > 0 \? "mt-3" : ""\}`\}/);
+  assert.equal(source.includes('className={`ticket-row-animate ${index > 0 ? "mt-4" : ""}`}'), false, "old, looser inter-leg gap must be gone");
+});
+
+test("source: the Leg N label gap was tightened (mb-1.5 -> mb-1)", () => {
+  assert.match(source, /<p className="mb-1 text-\[11px\] font-semibold uppercase tracking-wide text-slate-500">\s*Leg \{index \+ 1\}/);
+});
+
+test("source: the event-name gap was tightened (mt-1 -> mt-0.5)", () => {
+  assert.match(source, /<p className="mt-0\.5 text-\[15px\] font-semibold text-white break-words">\{selection\.event\}<\/p>/);
+});
+
+test("source: the Financial section's container padding was tightened (py-5 -> py-4)", () => {
+  assert.match(source, /hierarchy is conveyed by weight\/color only\.[\s\S]{0,300}className="px-5 py-4"/);
+});
+
+test("source: FinancialRow's inter-row gap was tightened (mb-2.5 -> mb-2)", () => {
+  assert.match(source, /\$\{last \? "" : "mb-2"\}`/);
+  assert.equal(source.includes('${last ? "" : "mb-2.5"}`'), false, "old, looser financial-row gap must be gone");
+});
+
+// Nothing else about the leg/financial rows changed: every field, label,
+// and value is still present, just closer together.
+test("M5.4 regression guard: no leg/financial content was removed, only spacing", () => {
+  assert.match(source, /selection\.sport/);
+  assert.match(source, /selection\.event/);
+  assert.match(source, /selection\.selection/);
+  assert.match(source, /label="Stake"/);
+  assert.match(source, /label=\{isParlay \? "Combined odds" : "Odds"\}/);
+  assert.match(source, /label="Potential win"/);
+});

@@ -36,7 +36,7 @@ export default function SelectionList({
   const remaining = selections.length - LIST_VISIBLE_THRESHOLD;
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-1.5">
       {visible.map((selection, index) => (
         <SelectionRow
           key={selection.id}

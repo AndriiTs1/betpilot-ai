@@ -263,8 +263,13 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
 
         <TicketDivider notched />
 
-        {/* Event */}
-        <div className="px-5 py-5">
+        {/* Event — Stage M5.4: section padding and leg-internal spacing
+            tightened (py-5 -> py-4, mt-4 -> mt-3 between legs, mb-1.5 -> mb-1
+            leg label gap, mt-1 -> mt-0.5 event gap) so an EXPRESS ×2 ticket
+            has a realistic shot at fitting a normal iPhone viewport without
+            scrolling. No line of information was removed — only the gaps
+            between them shrank. */}
+        <div className="px-5 py-4">
           {ticket.selections.map((selection, index) => {
             // Stage M4.9 — one value only: the current/accepted price
             // (SINGLE) or the current provider price (EXPRESS VERIFIED/
@@ -277,11 +282,11 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
             return (
               <div
                 key={index}
-                className={`ticket-row-animate ${index > 0 ? "mt-4" : ""}`}
+                className={`ticket-row-animate ${index > 0 ? "mt-3" : ""}`}
                 style={{ animationDelay: ticketRowDelay(TICKET_META_ROW_COUNT + index) }}
               >
                 {isParlay && (
-                  <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                     Leg {index + 1}
                   </p>
                 )}
@@ -290,7 +295,7 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
                   {selection.sport}
                   {selection.league ? ` · ${selection.league}` : ""}
                 </div>
-                <p className="mt-1 text-[15px] font-semibold text-white break-words">{selection.event}</p>
+                <p className="mt-0.5 text-[15px] font-semibold text-white break-words">{selection.event}</p>
                 <p className="mt-0.5 text-sm break-words" style={{ color: "#60E84A" }}>
                   {selection.selection}
                   {selection.market ? ` · ${selection.market}` : ""}
@@ -319,8 +324,10 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
             why. Available credit is now visually muted relative to
             Stake/Combined odds, on top of already being visually secondary
             to Potential win (emphasize). No spacing/margin changes — the
-            hierarchy is conveyed by weight/color only. */}
-        <div className="px-5 py-5">
+            hierarchy is conveyed by weight/color only. Stage M5.4: section
+            padding tightened (py-5 -> py-4), same reasoning as the Event
+            section above. */}
+        <div className="px-5 py-4">
           <FinancialRow label="Stake" value={formatAmount(ticket.stake)} delay={ticketRowDelay(financialRowStart)} />
           <FinancialRow
             label={isParlay ? "Combined odds" : "Odds"}
@@ -452,7 +459,7 @@ function FinancialRow({
 }) {
   return (
     <div
-      className={`ticket-row-animate flex items-baseline justify-between gap-3 ${last ? "" : "mb-2.5"}`}
+      className={`ticket-row-animate flex items-baseline justify-between gap-3 ${last ? "" : "mb-2"}`}
       style={{ animationDelay: delay }}
     >
       <span className={`text-xs ${muted ? "text-slate-500" : "text-slate-400"}`}>{label}</span>

@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   isProviderUnavailable,
   PROVIDER_UNAVAILABLE_TITLE,
@@ -9,6 +11,8 @@ import {
   ODDS_UNAVAILABLE_NOTICE,
 } from "./BetPreviewCard";
 import type { BetSelectionOddsStatus } from "./betPreviewApi";
+
+const source = readFileSync(fileURLToPath(new URL("./BetPreviewCard.tsx", import.meta.url)), "utf8");
 
 // This project deliberately has no DOM-rendering test infra (see
 // ActiveBetsScreen.test.ts's own comment on why jsdom/@testing-library were
@@ -119,4 +123,23 @@ test("ODDS_UNAVAILABLE_NOTICE: never contains any of the old verbose warning cop
   ]) {
     assert.equal(lower.includes(forbidden), false, `ODDS_UNAVAILABLE_NOTICE must not contain: "${forbidden}"`);
   }
+});
+
+// Stage M5.4 — SINGLE-SCREEN CORE BET FLOW. Section C: the EXPRESS card's
+// internal spacing (heading-to-list gap, list-to-financial gap, financial
+// block's own padding) tightened so a 2-leg EXPRESS preview + financial
+// summary has a realistic shot at fitting a normal iPhone viewport without
+// scrolling. No selection, label, or figure was removed — only the gaps
+// between them shrank.
+test("source: the EXPRESS heading-to-selection-list gap was tightened (h3 mb-3 -> mb-2, wrapper mt-4 removed)", () => {
+  assert.match(source, /<h3 className="mb-2 text-base font-bold text-white">Express ×\{preview\.selections\.length\}<\/h3>/);
+});
+
+test("source: the EXPRESS financial block's gap and internal padding were tightened (mt-4 -> mt-3, p-3 -> p-2.5)", () => {
+  assert.match(source, /className="mt-3 rounded-xl p-2\.5"/);
+  assert.equal(source.includes('className="mt-4 rounded-xl p-3"'), false, "old, looser EXPRESS financial block spacing must be gone");
+});
+
+test("source: PreviewRow's inter-row gap was tightened (mb-2 -> mb-1.5) — applies to both SINGLE and EXPRESS, since both share PreviewRow", () => {
+  assert.match(source, /\$\{last \? "" : "mb-1\.5"\}`/);
 });

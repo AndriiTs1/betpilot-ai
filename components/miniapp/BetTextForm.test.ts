@@ -61,3 +61,12 @@ test("BetTextForm: an odds_changed confirm failure still stages the refreshed pr
 test("BetTextForm: Confirm bet is gated ONLY on the Stage M4.5 unavailable-odds check, never on any odds-changed flag", () => {
   assert.match(source, /\{!oddsUnavailable && \(\s*<button[\s\S]{0,300}aria-label="Confirm bet"/);
 });
+
+// Stage M5.4 — SINGLE-SCREEN CORE BET FLOW. Same action-area tightening as
+// BetScreenshotForm.tsx, applied here for consistency between the two
+// submission flows (both share this exact preview/Confirm/Edit structure).
+test("source: the action-area gap above Confirm bet/Edit message was tightened (mt-4 -> mt-3 wrapper, mt-3 -> mt-2.5 buttons)", () => {
+  assert.match(source, /\{showPreviewBlock && preview && \(\s*<div className="mt-3">/);
+  assert.match(source, /aria-label="Confirm bet"\s*className="mt-2\.5 min-h-11 w-full/);
+  assert.match(source, /aria-label="Edit message"\s*className="mt-2\.5 min-h-11 w-full/);
+});

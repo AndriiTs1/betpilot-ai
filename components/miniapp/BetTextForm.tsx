@@ -354,7 +354,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
       )}
 
       {showPreviewBlock && preview && (
-        <div className="mt-4">
+        <div className="mt-3">
           <PreviewCard preview={preview.preview} />
           <OddsStatus preview={preview.preview} />
 
@@ -375,7 +375,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
               onClick={handleConfirm}
               disabled={!canConfirm}
               aria-label="Confirm bet"
-              className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
+              className="mt-2.5 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
               style={{
                 background: "#60E84A",
                 color: "#04170C",
@@ -390,7 +390,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
             onClick={handleEditMessage}
             disabled={phase === "confirming"}
             aria-label="Edit message"
-            className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-medium text-slate-400 disabled:opacity-50"
+            className="mt-2.5 min-h-11 w-full rounded-2xl text-[15px] font-medium text-slate-400 disabled:opacity-50"
             style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
           >
             Edit message

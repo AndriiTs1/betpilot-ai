@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { getOddsPresentation } from "./SelectionRow";
+
+const source = readFileSync(fileURLToPath(new URL("./SelectionRow.tsx", import.meta.url)), "utf8");
 
 // UI Polish task — Bet Preview Cards. This project deliberately has no
 // DOM-rendering test infra (see e.g. ActiveBetsScreen.test.ts's own
@@ -55,4 +59,20 @@ test("a null/undefined oddsStatus (review-context rows that never set it) falls 
 test("VERIFIED/ODDS_CHANGED with a missing current odds degrades to unavailable, never a fabricated prominent value", () => {
   assert.deepEqual(getOddsPresentation("VERIFIED", null), { mode: "unavailable" });
   assert.deepEqual(getOddsPresentation("ODDS_CHANGED", null), { mode: "unavailable" });
+});
+
+// Stage M5.4 — SINGLE-SCREEN CORE BET FLOW. Section B: card padding and the
+// odds-row gap tightened (this row is the shared leg card used by every
+// EXPRESS preview/queue/list surface) so a 2-leg EXPRESS preview has a
+// realistic shot at fitting a normal iPhone viewport without scrolling. No
+// field (sport icon, event, competition/date, selection, market, odds,
+// status badge) was removed — only the gaps around them shrank.
+test("source: the card's own padding was tightened (p-3 -> p-2.5)", () => {
+  assert.match(source, /className="rounded-xl p-2\.5"/);
+  assert.equal(source.includes('className="rounded-xl p-3"'), false, "old, looser card padding must be gone");
+});
+
+test("source: the odds-row gap was tightened (mt-1.5 -> mt-1) for all three odds-row branches (prominent/unavailable/plain)", () => {
+  assert.equal((source.match(/mt-1 (flex items-baseline gap-1\.5|text-xs text-slate-500)/g) ?? []).length, 3);
+  assert.equal(source.includes("mt-1.5"), false, "old, looser odds-row gap must be gone");
 });

@@ -333,23 +333,34 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
         className="hidden"
       />
 
-      {/* Everything below Back is one vertical group — hero icon, title,
-          subtitle, and whichever action content the current phase shows
-          (the two choice buttons, or the selected-image/preview states) —
-          centered together in the remaining space below Back, not just a
-          centered text block sitting at the top. Same ScanLine icon as the
-          action sheet entry (BetActionSheet.tsx) and BetScreen's own main
-          CTA, so the visual thread carries through from "tap Send
-          screenshot" to landing here. */}
-      <div className="flex flex-1 flex-col items-center justify-center text-center">
-        <div
-          className="flex h-16 w-16 items-center justify-center rounded-full"
-          style={{ background: "rgba(96,232,74,0.14)", boxShadow: "0 0 28px 6px rgba(96,232,74,0.22)" }}
-        >
-          <ScanLine size={32} strokeWidth={2} color="#60E84A" aria-hidden="true" />
-        </div>
-        <p className="mt-5 text-xl font-bold text-white">Upload your bet slip</p>
-        <p className="mt-2 text-sm text-slate-400">Choose a photo from your gallery or take a new one.</p>
+      {/* Stage M5.4 — top-anchored, not vertically centered. The previous
+          `justify-center` here made this whole group's vertical position a
+          function of how much content sat below it (a couple of buttons vs.
+          a full EXPRESS preview), so "Upload your bet slip" landed at very
+          different heights depending on phase — the exact inconsistency
+          production screenshots showed. Anchoring to the top makes every
+          phase start from the same place, and lets the recognized-preview
+          phase reclaim the vertical space a centered layout would otherwise
+          spend as top/bottom padding. The hero icon/subtitle (full size,
+          same ScanLine icon as the action sheet entry/BetScreen's own main
+          CTA) stays only for the pre-recognition phases; once a preview is
+          ready, only the compact heading remains — the icon and "choose a
+          photo" subtitle no longer describe what's on screen. */}
+      <div className="flex flex-1 flex-col items-center text-center">
+        {showSelectionBlock && (
+          <div
+            className="flex h-16 w-16 items-center justify-center rounded-full"
+            style={{ background: "rgba(96,232,74,0.14)", boxShadow: "0 0 28px 6px rgba(96,232,74,0.22)" }}
+          >
+            <ScanLine size={32} strokeWidth={2} color="#60E84A" aria-hidden="true" />
+          </div>
+        )}
+        <p className={showSelectionBlock ? "mt-5 text-xl font-bold text-white" : "mt-3 text-lg font-bold text-white"}>
+          Upload your bet slip
+        </p>
+        {showSelectionBlock && (
+          <p className="mt-2 text-sm text-slate-400">Choose a photo from your gallery or take a new one.</p>
+        )}
 
         {showSelectionBlock && (
           <div className="mt-8 w-full">
@@ -438,7 +449,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
         )}
 
         {showPreviewBlock && preview && (
-          <div className="mt-4 w-full">
+          <div className="mt-3 w-full">
             <PreviewCard preview={preview.preview} />
             <OddsStatus preview={preview.preview} />
 
@@ -459,7 +470,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
                 onClick={handleConfirm}
                 disabled={!canConfirm}
                 aria-label="Confirm bet"
-                className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
+                className="mt-2.5 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
                 style={{
                   background: "#60E84A",
                   color: "#04170C",
@@ -474,7 +485,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
               onClick={handleChooseDifferent}
               disabled={phase === "confirming"}
               aria-label="Choose different image"
-              className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-medium text-slate-400 disabled:opacity-50"
+              className="mt-2.5 min-h-11 w-full rounded-2xl text-[15px] font-medium text-slate-400 disabled:opacity-50"
               style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
             >
               Choose different image
