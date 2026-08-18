@@ -133,14 +133,27 @@ export default function BetScreen({
 
   if (confirmedBet) {
     return (
-      <BetTicket
-        ticket={toBetTicketData(confirmedBet, playerName, availableCredit)}
-        onDone={closeToDashboard}
-        onViewHistory={() => {
-          closeToDashboard();
-          onNavigateToHistory();
-        }}
-      />
+      // Stage M5.5B — SUBMITTED TICKET TOP-SPACING POLISH. The shared shell
+      // (app/miniapp/page.tsx's DataScreen) wraps every BetScreen state in
+      // its own `mt-4` (16px), on top of its own `py-6` (24px) top padding —
+      // a sensible offset for the dashboard/preview forms, but stacking
+      // both on top of a full-screen ticket read as an oversized empty band
+      // above it on a real device. This cancels exactly that known,
+      // documented `mt-4` (not an arbitrary guess), leaving only the
+      // shell's own `py-6` top padding as the ticket's breathing room — a
+      // real, existing spacing token, not a new invented one. Scoped to
+      // only this branch, so the dashboard and both preview forms below
+      // keep their untouched `mt-4` offset.
+      <div className="-mt-4">
+        <BetTicket
+          ticket={toBetTicketData(confirmedBet, playerName, availableCredit)}
+          onDone={closeToDashboard}
+          onViewHistory={() => {
+            closeToDashboard();
+            onNavigateToHistory();
+          }}
+        />
+      </div>
     );
   }
 

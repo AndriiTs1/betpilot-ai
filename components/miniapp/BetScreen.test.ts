@@ -188,3 +188,70 @@ test("BetScreen: BetTextForm and BetScreenshotForm are both wired to the exact s
   // optimistic-merge callback, not just set local ticket state.
   assert.match(source, /onBetConfirmed\(bet\)/);
 });
+
+// ---------------------------------------------------------------------
+// Stage M5.5B — SUBMITTED TICKET TOP-SPACING POLISH. The shared shell
+// (app/miniapp/page.tsx's DataScreen) applies a `mt-4` on top of its own
+// `py-6` top padding above whatever BetScreen renders — appropriate for
+// the dashboard/preview forms, but doubling that gap above a full-screen
+// ticket read as an oversized empty band on a real device. The
+// confirmedBet branch now cancels that known, documented `mt-4` with its
+// own wrapper, leaving only the shell's `py-6` as breathing room. Scoped
+// to only that branch — the dashboard/BetTextForm/BetScreenshotForm
+// branches keep inheriting the ancestor's `mt-4` exactly as before.
+// ---------------------------------------------------------------------
+
+test("source: submitted BetTicket still renders from the confirmedBet branch, wired to the same ticket/onDone/onViewHistory as before", () => {
+  const source = readFileSync(fileURLToPath(new URL("./BetScreen.tsx", import.meta.url)), "utf8");
+
+  assert.match(source, /if \(confirmedBet\) \{\s*return \(/);
+  assert.match(source, /<BetTicket\s*\n\s*ticket=\{toBetTicketData\(confirmedBet, playerName, availableCredit\)\}\s*\n\s*onDone=\{closeToDashboard\}/);
+  assert.match(source, /onViewHistory=\{\(\) => \{\s*closeToDashboard\(\);\s*onNavigateToHistory\(\);\s*\}\}/);
+});
+
+test("source: the confirmedBet branch wraps BetTicket in the new compact-top-spacing wrapper (-mt-4, canceling the shell's known mt-4)", () => {
+  const source = readFileSync(fileURLToPath(new URL("./BetScreen.tsx", import.meta.url)), "utf8");
+
+  assert.match(source, /if \(confirmedBet\) \{\s*return \(\s*\/\/[\s\S]{0,900}?<div className="-mt-4">\s*<BetTicket/);
+});
+
+test("source: the old bare (unwrapped) BetTicket return is gone — BetTicket is no longer the direct JSX child of the confirmedBet return", () => {
+  const source = readFileSync(fileURLToPath(new URL("./BetScreen.tsx", import.meta.url)), "utf8");
+
+  assert.equal(/if \(confirmedBet\) \{\s*return \(\s*<BetTicket/.test(source), false, "BetTicket must now be wrapped, not returned bare");
+});
+
+test("source: preview-form state (BetTextForm) spacing is untouched — still a bare return, no new wrapper added", () => {
+  const source = readFileSync(fileURLToPath(new URL("./BetScreen.tsx", import.meta.url)), "utf8");
+
+  assert.match(source, /if \(isTextFormOpen\) \{\s*return <BetTextForm onBack=\{\(\) => setTextFormOpen\(false\)\} onConfirmed=\{handleConfirmed\} \/>;\s*\}/);
+});
+
+test("source: upload/recognizing-form state (BetScreenshotForm) spacing is untouched — still a bare return, no new wrapper added", () => {
+  const source = readFileSync(fileURLToPath(new URL("./BetScreen.tsx", import.meta.url)), "utf8");
+
+  assert.match(source, /if \(isScreenshotFormOpen\) \{\s*return \(\s*<BetScreenshotForm onBack=\{\(\) => setScreenshotFormOpen\(false\)\} onConfirmed=\{handleConfirmed\} \/>\s*\);\s*\}/);
+});
+
+test("source: Done / View History wiring into BetTicket is byte-for-byte unchanged — only a new ancestor wrapper was added around the same call", () => {
+  const source = readFileSync(fileURLToPath(new URL("./BetScreen.tsx", import.meta.url)), "utf8");
+
+  assert.match(source, /onDone=\{closeToDashboard\}/);
+  assert.match(source, /onViewHistory=\{\(\) => \{\s*closeToDashboard\(\);\s*onNavigateToHistory\(\);\s*\}\}/);
+});
+
+// BetTicket.tsx itself (M5.1 header, M5.2 financial summary, M5.3
+// barcode/footer, M5.4 leg density) is not touched by this stage at all —
+// this file only adds an ancestor wrapper around the existing <BetTicket
+// .../> call, so those internals' own regression coverage in
+// BetTicket.test.ts (unmodified by this stage) remains the proof they are
+// unaffected.
+test("source: BetTicket itself is imported and invoked exactly as before — no new props, no prop removed", () => {
+  const source = readFileSync(fileURLToPath(new URL("./BetScreen.tsx", import.meta.url)), "utf8");
+
+  assert.match(source, /import BetTicket, \{ type BetTicketData \} from "\.\/BetTicket";/);
+  const betTicketCall = source.match(
+    /<BetTicket\s*\n\s*ticket=\{toBetTicketData\(confirmedBet, playerName, availableCredit\)\}\s*\n\s*onDone=\{closeToDashboard\}\s*\n\s*onViewHistory=\{\(\) => \{\s*\n\s*closeToDashboard\(\);\s*\n\s*onNavigateToHistory\(\);\s*\n\s*\}\}\s*\n\s*\/>/,
+  );
+  assert.ok(betTicketCall, "expected BetTicket to still be called with exactly ticket/onDone/onViewHistory, nothing added or removed");
+});
