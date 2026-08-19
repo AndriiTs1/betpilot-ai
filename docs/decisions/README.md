@@ -46,3 +46,4 @@ Status: Accepted / Superseded / Deprecated
 | ADR | Title | Status |
 |---|---|---|
 | [ADR-0001](./ADR-0001-project-history.md) | Project history — architectural evolution to date | Accepted |
+| [ADR-0002](./ADR-0002-final-architecture-contract.md) | Final Architecture Contract & Sector Roadmap | Accepted |

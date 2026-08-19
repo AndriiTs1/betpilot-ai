@@ -19,6 +19,7 @@ import {
   type SettledBetDisplayFields,
 } from "./[id]/settle/route";
 import { Prisma, type PrismaClient, type BetStatus } from "@/lib/generated/prisma/client";
+import { INTERNAL_OPERATOR_SCOPE_HEADER } from "@/lib/auth/operatorAuth";
 
 // ---------------------------------------------------------------------
 // Same hand-written in-memory fake Prisma client convention as
@@ -28,6 +29,11 @@ import { Prisma, type PrismaClient, type BetStatus } from "@/lib/generated/prism
 // ---------------------------------------------------------------------
 
 const OPERATOR_SECRET = "test-operator-secret";
+// Sector 0 (ADR-0002) — two distinct operators, for cross-operator IDOR
+// coverage. OPERATOR_ID_A is the default owner in every pre-existing
+// fixture below, matching every existing test's assumption unchanged.
+const OPERATOR_ID_A = "operator-a";
+const OPERATOR_ID_B = "operator-b";
 const PLAYER_ID = "player-1";
 const BET_ID = "bet-1";
 
@@ -65,10 +71,18 @@ function fakeBet(overrides: Partial<FakeBetRow> = {}): FakeBetRow {
 }
 
 function createFakeDb(
-  seed: { bet?: FakeBetRow | null; playerCurrentCredit?: Prisma.Decimal; playerTelegramId?: string | null } = {},
+  seed: {
+    bet?: FakeBetRow | null;
+    playerCurrentCredit?: Prisma.Decimal;
+    playerTelegramId?: string | null;
+    operatorId?: string;
+  } = {},
 ) {
   const bets = new Map<string, FakeBetRow>();
-  const players = new Map<string, { id: string; currentCredit: Prisma.Decimal; telegramId: string | null }>();
+  const players = new Map<
+    string,
+    { id: string; operatorId: string; currentCredit: Prisma.Decimal; telegramId: string | null }
+  >();
   const transactions: Array<Record<string, unknown>> = [];
   let nextTxId = 1;
 
@@ -77,6 +91,7 @@ function createFakeDb(
     bets.set(initialBet.id, { ...initialBet });
     players.set(initialBet.playerId, {
       id: initialBet.playerId,
+      operatorId: seed.operatorId ?? OPERATOR_ID_A,
       currentCredit: seed.playerCurrentCredit ?? new Prisma.Decimal(0),
       telegramId: seed.playerTelegramId === undefined ? "555000111" : seed.playerTelegramId,
     });
@@ -124,7 +139,14 @@ function createFakeDb(
         const bet = bets.get(where.id);
         if (!bet) return null;
         const player = players.get(bet.playerId);
-        return { ...bet, player: { telegramId: player?.telegramId ?? null } };
+        // Sector 0 (ADR-0002) — operatorId included alongside telegramId; a
+        // fake returning a superset of what a real `select` would name is
+        // harmless (consuming code only reads the fields it names), same
+        // rule as this function's own comment above already documents.
+        return {
+          ...bet,
+          player: { telegramId: player?.telegramId ?? null, operatorId: player?.operatorId ?? null },
+        };
       },
     },
     $transaction: async <T>(fn: (t: typeof tx) => Promise<T>) => fn(tx),
@@ -143,9 +165,11 @@ function settleRequest(
   betId: string | undefined,
   body: unknown,
   authHeader: string | null = `Bearer ${OPERATOR_SECRET}`,
+  scopedOperatorId?: string,
 ): NextRequest {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (authHeader !== null) headers.Authorization = authHeader;
+  if (scopedOperatorId !== undefined) headers[INTERNAL_OPERATOR_SCOPE_HEADER] = scopedOperatorId;
 
   return new NextRequest(`http://localhost/api/bets/${betId ?? "x"}/settle`, {
     method: "POST",
@@ -662,4 +686,63 @@ test("settle route: a player with no telegramId still settles successfully, with
   assert.equal(body.success, true);
   assert.equal((body.result as { kind: string }).kind, "APPLIED");
   assert.equal(sentTelegramMessages.length, 0);
+});
+
+// ---------------------------------------------------------------------
+// Sector 0 (ADR-0002) — cross-operator IDOR
+// ---------------------------------------------------------------------
+
+test("settle route: own-bet settle still succeeds when the caller's operator scope matches the bet's owner", async () => {
+  const fake = createFakeDb({ bet: fakeBet(), operatorId: OPERATOR_ID_A });
+
+  const res = await handleSettleBet(
+    settleRequest(BET_ID, { status: "SETTLED_WIN" }, undefined, OPERATOR_ID_A),
+    BET_ID,
+    fakeOptions(fake),
+  );
+
+  assert.equal(res.status, 200);
+  const body = await json(res);
+  assert.equal(body.success, true);
+});
+
+test("settle route: a different operator's bet is blocked with the exact same BET_NOT_FOUND_FOR_SETTLEMENT 404 body as a genuinely unknown bet id (no existence disclosure)", async () => {
+  const fake = createFakeDb({ bet: fakeBet(), operatorId: OPERATOR_ID_A });
+
+  const foreignRes = await handleSettleBet(
+    settleRequest(BET_ID, { status: "SETTLED_WIN" }, undefined, OPERATOR_ID_B),
+    BET_ID,
+    fakeOptions(fake),
+  );
+  const unknownRes = await handleSettleBet(
+    settleRequest("does-not-exist", { status: "SETTLED_WIN" }, undefined, OPERATOR_ID_B),
+    "does-not-exist",
+    fakeOptions(fake),
+  );
+
+  assert.equal(foreignRes.status, 404);
+  assert.equal(unknownRes.status, 404);
+  const foreignBody = await json(foreignRes);
+  const unknownBody = await json(unknownRes);
+  assert.equal((foreignBody.error as { code: string }).code, "BET_NOT_FOUND_FOR_SETTLEMENT");
+  assert.equal((foreignBody.error as { betId: string }).betId, BET_ID);
+  assert.equal((unknownBody.error as { code: string }).code, "BET_NOT_FOUND_FOR_SETTLEMENT");
+  // Only betId legitimately differs (each request names a different id) —
+  // the code/message shape is otherwise byte-for-byte identical, which is
+  // what actually matters for "a foreign bet looks like a missing one."
+  assert.equal((foreignBody.error as { message: string }).message, `No Bet found with id ${BET_ID}`);
+  assert.equal((unknownBody.error as { message: string }).message, "No Bet found with id does-not-exist");
+  // The bet was never touched — blocked before settleBet() (and its own
+  // transaction/idempotency logic) ever ran.
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "CONFIRMED");
+});
+
+test("settle route: with no operator-scope header at all, behavior is unscoped and unchanged — single-operator regression", async () => {
+  const fake = createFakeDb({ bet: fakeBet(), operatorId: OPERATOR_ID_A });
+
+  const res = await handleSettleBet(settleRequest(BET_ID, { status: "SETTLED_WIN" }), BET_ID, fakeOptions(fake));
+
+  assert.equal(res.status, 200);
+  const body = await json(res);
+  assert.equal(body.success, true);
 });

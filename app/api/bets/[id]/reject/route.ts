@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { Prisma, type PrismaClient } from "@/lib/generated/prisma/client";
-import { isOperatorAuthorized } from "@/lib/auth/operatorAuth";
+import { isOperatorAuthorized, getScopedOperatorId } from "@/lib/auth/operatorAuth";
 import { serializeBet } from "@/lib/bets/serialize";
 import { sendBetStatusNotification } from "@/lib/telegram/betStatusNotifications";
 import { escapeHtml } from "@/lib/telegram/escapeHtml";
@@ -33,6 +33,15 @@ export async function handleBetReject(
     });
 
     if (!existing) {
+      return NextResponse.json({ error: "Bet not found" }, { status: 404 });
+    }
+
+    // Sector 0 (ADR-0002) — cross-operator IDOR fix. Same shape/placement as
+    // handleBetConfirm's identical check: before the status check, returning
+    // the exact same "Bet not found" 404 as the !existing branch above, so a
+    // foreign bet is indistinguishable from a genuinely nonexistent one.
+    const scopedOperatorId = getScopedOperatorId(request);
+    if (scopedOperatorId !== null && existing.player.operatorId !== scopedOperatorId) {
       return NextResponse.json({ error: "Bet not found" }, { status: 404 });
     }
 

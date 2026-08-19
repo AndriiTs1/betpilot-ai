@@ -7,8 +7,15 @@ import { NextRequest } from "next/server";
 // via a normal relative ESM path, which has no such restriction.
 import { handleBetConfirm, type HandleBetConfirmOptions } from "./[id]/confirm/route";
 import { Prisma, type PrismaClient, type BetStatus } from "@/lib/generated/prisma/client";
+import { INTERNAL_OPERATOR_SCOPE_HEADER } from "@/lib/auth/operatorAuth";
 
 const OPERATOR_SECRET = "test-operator-secret";
+// Sector 0 (ADR-0002) — two distinct operators, for cross-operator IDOR
+// coverage. OPERATOR_ID_A owns PLAYER_ID/BET_ID/BET_ID_2 in every existing
+// fixture below (fakePlayer's default), matching every pre-existing test's
+// assumption unchanged; OPERATOR_ID_B exists only for the new tests.
+const OPERATOR_ID_A = "operator-a";
+const OPERATOR_ID_B = "operator-b";
 const PLAYER_ID = "player-1";
 const BET_ID = "bet-1";
 const BET_ID_2 = "bet-2";
@@ -24,6 +31,7 @@ interface FakeBetRow {
 
 interface FakePlayerRow {
   id: string;
+  operatorId: string;
   creditLimit: Prisma.Decimal;
   currentCredit: Prisma.Decimal;
   telegramId: string | null;
@@ -52,6 +60,7 @@ function fakeBet(overrides: Partial<FakeBetRow> = {}): FakeBetRow {
 function fakePlayer(overrides: Partial<FakePlayerRow> = {}): FakePlayerRow {
   return {
     id: PLAYER_ID,
+    operatorId: OPERATOR_ID_A,
     creditLimit: new Prisma.Decimal(1000),
     currentCredit: new Prisma.Decimal(0),
     telegramId: "555000111",
@@ -71,7 +80,9 @@ function fakePlayer(overrides: Partial<FakePlayerRow> = {}): FakePlayerRow {
 // what handleBetConfirm's fix now depends on to be correct.
 // ---------------------------------------------------------------------
 
-function createFakeDb(seed: { bets?: FakeBetRow[]; player?: FakePlayerRow } = {}) {
+function createFakeDb(
+  seed: { bets?: FakeBetRow[]; player?: FakePlayerRow; extraPlayers?: FakePlayerRow[] } = {},
+) {
   const bets = new Map<string, FakeBetRow>();
   const players = new Map<string, FakePlayerRow>();
   const lockTails = new Map<string, Promise<void>>();
@@ -83,6 +94,12 @@ function createFakeDb(seed: { bets?: FakeBetRow[]; player?: FakePlayerRow } = {}
   }
   const player = seed.player ?? fakePlayer();
   players.set(player.id, { ...player });
+  // Sector 0 (ADR-0002) — a second (or more) player, for cross-operator
+  // fixtures where two different operators' players/bets must coexist in
+  // the same fake db (e.g. the concurrent multi-operator confirm test).
+  for (const extra of seed.extraPlayers ?? []) {
+    players.set(extra.id, { ...extra });
+  }
 
   const fakeDb = {
     bet: {
@@ -166,9 +183,11 @@ function fakeOptions(fake: ReturnType<typeof createFakeDb>): HandleBetConfirmOpt
 function confirmRequest(
   betId: string | undefined,
   authHeader: string | null = `Bearer ${OPERATOR_SECRET}`,
+  scopedOperatorId?: string,
 ): NextRequest {
   const headers: Record<string, string> = {};
   if (authHeader !== null) headers.Authorization = authHeader;
+  if (scopedOperatorId !== undefined) headers[INTERNAL_OPERATOR_SCOPE_HEADER] = scopedOperatorId;
 
   return new NextRequest(`http://localhost/api/bets/${betId ?? "x"}/confirm`, {
     method: "POST",
@@ -402,6 +421,86 @@ test("confirm route: concurrent confirmation of two different bets that together
   const [resA, resB] = await Promise.all([
     handleBetConfirm(confirmRequest(BET_ID), BET_ID, fakeOptions(fake)),
     handleBetConfirm(confirmRequest(BET_ID_2), BET_ID_2, fakeOptions(fake)),
+  ]);
+
+  assert.equal(resA.status, 200);
+  assert.equal(resB.status, 200);
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "CONFIRMED");
+  assert.equal(fake._debug.getBet(BET_ID_2)?.status, "CONFIRMED");
+});
+
+// ---------------------------------------------------------------------
+// Sector 0 (ADR-0002) — cross-operator IDOR
+// ---------------------------------------------------------------------
+
+test("confirm route: own-bet confirm still succeeds when the caller's operator scope matches the bet's owner", async () => {
+  const fake = createFakeDb({
+    bets: [fakeBet({ stake: new Prisma.Decimal(100) })],
+    player: fakePlayer({ operatorId: OPERATOR_ID_A }),
+  });
+
+  const res = await handleBetConfirm(
+    confirmRequest(BET_ID, undefined, OPERATOR_ID_A),
+    BET_ID,
+    fakeOptions(fake),
+  );
+
+  assert.equal(res.status, 200);
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "CONFIRMED");
+});
+
+test("confirm route: a different operator's bet is blocked with the exact same 404 body as a genuinely unknown bet id (no existence disclosure)", async () => {
+  const fake = createFakeDb({
+    bets: [fakeBet({ stake: new Prisma.Decimal(100) })],
+    player: fakePlayer({ operatorId: OPERATOR_ID_A }),
+  });
+
+  const foreignRes = await handleBetConfirm(
+    confirmRequest(BET_ID, undefined, OPERATOR_ID_B),
+    BET_ID,
+    fakeOptions(fake),
+  );
+  const unknownRes = await handleBetConfirm(
+    confirmRequest("does-not-exist", undefined, OPERATOR_ID_B),
+    "does-not-exist",
+    fakeOptions(fake),
+  );
+
+  assert.equal(foreignRes.status, 404);
+  assert.equal(unknownRes.status, 404);
+  assert.deepEqual(await json(foreignRes), await json(unknownRes));
+  // The bet was never touched — blocked before any status/credit logic ran.
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "PENDING");
+});
+
+test("confirm route: with no operator-scope header at all (e.g. a hypothetical direct OPERATOR_SECRET caller), behavior is unscoped and unchanged — single-operator regression", async () => {
+  const fake = createFakeDb({
+    bets: [fakeBet({ stake: new Prisma.Decimal(100) })],
+    player: fakePlayer({ operatorId: OPERATOR_ID_A }),
+  });
+
+  const res = await handleBetConfirm(confirmRequest(BET_ID), BET_ID, fakeOptions(fake));
+
+  assert.equal(res.status, 200);
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "CONFIRMED");
+});
+
+test("confirm route: concurrent confirms by two different operators for their own, unrelated players/bets both succeed independently", async () => {
+  const playerA = fakePlayer({ id: "player-a", operatorId: OPERATOR_ID_A, creditLimit: new Prisma.Decimal(1000) });
+  const playerB = fakePlayer({ id: "player-b", operatorId: OPERATOR_ID_B, creditLimit: new Prisma.Decimal(1000) });
+
+  const fake = createFakeDb({
+    bets: [
+      fakeBet({ id: BET_ID, playerId: playerA.id, stake: new Prisma.Decimal(100) }),
+      fakeBet({ id: BET_ID_2, playerId: playerB.id, stake: new Prisma.Decimal(100) }),
+    ],
+    player: playerA,
+    extraPlayers: [playerB],
+  });
+
+  const [resA, resB] = await Promise.all([
+    handleBetConfirm(confirmRequest(BET_ID, undefined, OPERATOR_ID_A), BET_ID, fakeOptions(fake)),
+    handleBetConfirm(confirmRequest(BET_ID_2, undefined, OPERATOR_ID_B), BET_ID_2, fakeOptions(fake)),
   ]);
 
   assert.equal(resA.status, 200);

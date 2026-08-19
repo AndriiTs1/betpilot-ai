@@ -8,8 +8,14 @@ import { NextRequest } from "next/server";
 // path, which has no such restriction.
 import { handleBetReject, type HandleBetRejectOptions } from "./[id]/reject/route";
 import { Prisma, type PrismaClient, type BetStatus } from "@/lib/generated/prisma/client";
+import { INTERNAL_OPERATOR_SCOPE_HEADER } from "@/lib/auth/operatorAuth";
 
 const OPERATOR_SECRET = "test-operator-secret";
+// Sector 0 (ADR-0002) — two distinct operators, for cross-operator IDOR
+// coverage. OPERATOR_ID_A is the default owner in every pre-existing
+// fixture below, matching every existing test's assumption unchanged.
+const OPERATOR_ID_A = "operator-a";
+const OPERATOR_ID_B = "operator-b";
 const PLAYER_ID = "player-1";
 const BET_ID = "bet-1";
 
@@ -24,6 +30,7 @@ interface FakeBetRow {
 
 interface FakePlayerRow {
   id: string;
+  operatorId: string;
   telegramId: string | null;
 }
 
@@ -55,7 +62,9 @@ function fakeBet(overrides: Partial<FakeBetRow> = {}): FakeBetRow {
 // for the *same* bet without needing a lock.
 // ---------------------------------------------------------------------
 
-function createFakeDb(seed: { bet?: FakeBetRow | null; telegramId?: string | null } = {}) {
+function createFakeDb(
+  seed: { bet?: FakeBetRow | null; telegramId?: string | null; operatorId?: string } = {},
+) {
   const bets = new Map<string, FakeBetRow>();
   const players = new Map<string, FakePlayerRow>();
   let betUpdateAttemptCount = 0;
@@ -65,6 +74,7 @@ function createFakeDb(seed: { bet?: FakeBetRow | null; telegramId?: string | nul
     bets.set(initialBet.id, { ...initialBet });
     players.set(initialBet.playerId, {
       id: initialBet.playerId,
+      operatorId: seed.operatorId ?? OPERATOR_ID_A,
       telegramId: seed.telegramId === undefined ? "555000111" : seed.telegramId,
     });
   }
@@ -105,9 +115,11 @@ function fakeOptions(fake: ReturnType<typeof createFakeDb>): HandleBetRejectOpti
 function rejectRequest(
   betId: string | undefined,
   authHeader: string | null = `Bearer ${OPERATOR_SECRET}`,
+  scopedOperatorId?: string,
 ): NextRequest {
   const headers: Record<string, string> = {};
   if (authHeader !== null) headers.Authorization = authHeader;
+  if (scopedOperatorId !== undefined) headers[INTERNAL_OPERATOR_SCOPE_HEADER] = scopedOperatorId;
 
   return new NextRequest(`http://localhost/api/bets/${betId ?? "x"}/reject`, {
     method: "POST",
@@ -233,4 +245,40 @@ test("reject route: two concurrent rejects of the same bet — exactly one succe
   assert.deepEqual(statuses, [200, 409]);
   assert.equal(fake._debug.getBet(BET_ID)?.status, "REJECTED");
   assert.equal(fake._debug.betUpdateAttemptCount(), 2);
+});
+
+// ---------------------------------------------------------------------
+// Sector 0 (ADR-0002) — cross-operator IDOR
+// ---------------------------------------------------------------------
+
+test("reject route: own-bet reject still succeeds when the caller's operator scope matches the bet's owner", async () => {
+  const fake = createFakeDb({ bet: fakeBet(), operatorId: OPERATOR_ID_A });
+  const res = await handleBetReject(rejectRequest(BET_ID, undefined, OPERATOR_ID_A), BET_ID, fakeOptions(fake));
+
+  assert.equal(res.status, 200);
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "REJECTED");
+});
+
+test("reject route: a different operator's bet is blocked with the exact same 404 body as a genuinely unknown bet id (no existence disclosure)", async () => {
+  const fake = createFakeDb({ bet: fakeBet(), operatorId: OPERATOR_ID_A });
+
+  const foreignRes = await handleBetReject(rejectRequest(BET_ID, undefined, OPERATOR_ID_B), BET_ID, fakeOptions(fake));
+  const unknownRes = await handleBetReject(
+    rejectRequest("does-not-exist", undefined, OPERATOR_ID_B),
+    "does-not-exist",
+    fakeOptions(fake),
+  );
+
+  assert.equal(foreignRes.status, 404);
+  assert.equal(unknownRes.status, 404);
+  assert.deepEqual(await json(foreignRes), await json(unknownRes));
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "PENDING");
+});
+
+test("reject route: with no operator-scope header at all, behavior is unscoped and unchanged — single-operator regression", async () => {
+  const fake = createFakeDb({ bet: fakeBet(), operatorId: OPERATOR_ID_A });
+  const res = await handleBetReject(rejectRequest(BET_ID), BET_ID, fakeOptions(fake));
+
+  assert.equal(res.status, 200);
+  assert.equal(fake._debug.getBet(BET_ID)?.status, "REJECTED");
 });

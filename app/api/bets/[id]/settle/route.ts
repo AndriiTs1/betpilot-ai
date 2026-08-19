@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import type { Prisma, PrismaClient } from "@/lib/generated/prisma/client";
-import { isOperatorAuthorized } from "@/lib/auth/operatorAuth";
+import { isOperatorAuthorized, getScopedOperatorId } from "@/lib/auth/operatorAuth";
 import {
   settleBet,
   BetNotFoundForSettlementError,
@@ -300,6 +300,29 @@ export async function handleSettleBet(
   }
 
   const db = options.db ?? prisma;
+
+  // Sector 0 (ADR-0002) — cross-operator IDOR fix. A deliberately separate,
+  // read-only pre-check here rather than inside settleBet()/
+  // settlementRules.ts — this stage does not touch either file (ADR-0002's
+  // scope boundary), so this reuses BetNotFoundForSettlementError's exact
+  // {code, message, betId} shape by hand, making a foreign bet
+  // indistinguishable from a genuinely nonexistent one at the HTTP layer.
+  // Read-only and ordered strictly before settleBet() is ever called, so it
+  // cannot affect settlement's own transaction/locking/idempotency behavior.
+  const scopedOperatorId = getScopedOperatorId(request);
+  if (scopedOperatorId !== null) {
+    const owner = await db.bet.findUnique({
+      where: { id: betId },
+      select: { player: { select: { operatorId: true } } },
+    });
+    if (!owner || owner.player.operatorId !== scopedOperatorId) {
+      return errorResponse(404, {
+        code: "BET_NOT_FOUND_FOR_SETTLEMENT",
+        message: `No Bet found with id ${betId}`,
+        betId,
+      });
+    }
+  }
 
   try {
     const result = await settleBet(db, { betId, requestedStatus: status });

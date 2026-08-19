@@ -17,7 +17,7 @@ export async function POST(
   const { id } = await params;
   const body = await request.text();
 
-  return proxyToOperatorApi(request, `/api/bets/${id}/settle`, {
+  return proxyToOperatorApi(request, `/api/bets/${id}/settle`, auth.operator.operatorId, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body,

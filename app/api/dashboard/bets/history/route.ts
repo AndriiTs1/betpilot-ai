@@ -6,5 +6,5 @@ export async function GET(request: NextRequest) {
   const auth = await requireOperatorApi(request);
   if (!auth.ok) return auth.response;
 
-  return proxyToOperatorApi(request, "/api/bets/history");
+  return proxyToOperatorApi(request, "/api/bets/history", auth.operator.operatorId);
 }

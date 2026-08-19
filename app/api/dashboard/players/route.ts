@@ -1,13 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
-import { Prisma } from "@/lib/generated/prisma/client";
+import { Prisma, type PrismaClient } from "@/lib/generated/prisma/client";
 import { requireOperatorApi } from "@/lib/auth/requireOperator";
+import type { OperatorSessionStore } from "@/lib/auth/operatorSession";
 import { computeRemainingCredit, clampAvailableForDisplay } from "@/lib/players/credit";
 import { getCurrentSettlementPeriodBounds } from "@/lib/dashboard/settlementPeriod";
 
-export async function GET(request: NextRequest) {
-  const auth = await requireOperatorApi(request);
+// Sector 0 (ADR-0002) — DI options exported so a route test can inject an
+// in-memory fake db/session store instead of hitting the real, single
+// shared database, same shape as app/api/dashboard/debug/screenshot-preview/
+// route.ts's operatorSessionStore option and app/api/bets/[id]/confirm/
+// route.ts's db option. GET itself always calls this with no overrides.
+export interface HandleDashboardPlayersOptions {
+  db?: PrismaClient;
+  operatorSessionStore?: OperatorSessionStore;
+}
+
+export async function handleDashboardPlayers(
+  request: NextRequest,
+  options: HandleDashboardPlayersOptions = {},
+): Promise<NextResponse> {
+  const auth = await requireOperatorApi(request, options.operatorSessionStore);
   if (!auth.ok) return auth.response;
+
+  const prismaClient = options.db ?? prisma;
 
   try {
     const { start: periodStart, nextSettlementDate } = getCurrentSettlementPeriodBounds();
@@ -20,7 +36,11 @@ export async function GET(request: NextRequest) {
     // (GET /api/dashboard/bets/pending). No longer bounded by the current
     // settlement period — the card is meant to show the player's real
     // lifecycle end to end, not just this period's activity.
-    const players = await prisma.player.findMany({
+    const players = await prismaClient.player.findMany({
+      // Sector 0 (ADR-0002) — cross-operator IDOR fix: scope to the
+      // authenticated caller's own operator instead of returning every
+      // operator's players.
+      where: { operatorId: auth.operator.operatorId },
       select: {
         id: true,
         name: true,
@@ -71,8 +91,9 @@ export async function GET(request: NextRequest) {
     // for all players, grouped by playerId via reduce — same explicit-sum
     // approach as the correctness-sensitive totals in
     // /api/dashboard/overview, not a SQL groupBy/aggregate.
-    const confirmedBets = await prisma.bet.findMany({
-      where: { status: "CONFIRMED" },
+    const confirmedBets = await prismaClient.bet.findMany({
+      // Sector 0 (ADR-0002) — same operator scope as the players query above.
+      where: { status: "CONFIRMED", player: { operatorId: auth.operator.operatorId } },
       select: { playerId: true, stake: true },
     });
 
@@ -91,8 +112,9 @@ export async function GET(request: NextRequest) {
     // there), so they need their own count per player — used only for the
     // header status pill ("Pending Bets"); the pending bet's own full
     // detail still lives exclusively in GET /api/dashboard/bets/pending.
-    const pendingBets = await prisma.bet.findMany({
-      where: { status: "PENDING" },
+    const pendingBets = await prismaClient.bet.findMany({
+      // Sector 0 (ADR-0002) — same operator scope as the players query above.
+      where: { status: "PENDING", player: { operatorId: auth.operator.operatorId } },
       select: { playerId: true },
     });
 
@@ -106,8 +128,9 @@ export async function GET(request: NextRequest) {
     // period started. Same Transaction.amount convention as
     // GET /api/dashboard/overview's total figure — a straight sum, no
     // re-derivation of the WIN/LOSS/VOID math.
-    const periodTransactions = await prisma.transaction.findMany({
-      where: { createdAt: { gte: periodStart } },
+    const periodTransactions = await prismaClient.transaction.findMany({
+      // Sector 0 (ADR-0002) — same operator scope as the players query above.
+      where: { createdAt: { gte: periodStart }, player: { operatorId: auth.operator.operatorId } },
       select: { playerId: true, amount: true },
     });
 
@@ -171,4 +194,8 @@ export async function GET(request: NextRequest) {
     console.error("GET /api/dashboard/players failed:", err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
+}
+
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  return handleDashboardPlayers(request);
 }

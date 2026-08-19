@@ -10,5 +10,5 @@ export async function POST(
   if (!auth.ok) return auth.response;
 
   const { id } = await params;
-  return proxyToOperatorApi(request, `/api/bets/${id}/confirm`, { method: "POST" });
+  return proxyToOperatorApi(request, `/api/bets/${id}/confirm`, auth.operator.operatorId, { method: "POST" });
 }

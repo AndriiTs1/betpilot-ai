@@ -1,8 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
+import { INTERNAL_OPERATOR_SCOPE_HEADER } from "@/lib/auth/operatorAuth";
 
 // Server-only proxy: attaches OPERATOR_SECRET to the internal request so the
 // dashboard's client-side code never sees it. Forwards the upstream status
 // and JSON body as-is (401/404/409/etc.) rather than masking them.
+//
+// Sector 0 (ADR-0002) — also attaches the caller's already-authenticated
+// operatorId as a trusted internal header (INTERNAL_OPERATOR_SCOPE_HEADER),
+// so the downstream /api/bets/* handler can scope its query/ownership check
+// to this operator instead of acting globally across every operator's data.
 
 function resolveUpstreamBase(request: NextRequest): string {
   // request.url can resolve to a raw per-deployment URL (e.g.
@@ -21,6 +27,7 @@ function resolveUpstreamBase(request: NextRequest): string {
 export async function proxyToOperatorApi(
   request: NextRequest,
   path: string,
+  operatorId: string,
   init?: RequestInit,
 ): Promise<NextResponse> {
   const upstreamUrl = new URL(path, resolveUpstreamBase(request));
@@ -31,6 +38,7 @@ export async function proxyToOperatorApi(
       headers: {
         ...init?.headers,
         Authorization: `Bearer ${process.env.OPERATOR_SECRET}`,
+        [INTERNAL_OPERATOR_SCOPE_HEADER]: operatorId,
       },
       cache: "no-store",
     });
