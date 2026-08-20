@@ -71,9 +71,9 @@ export default function LanguageSwitcher() {
           aria-label={t("common.language")}
           className="absolute right-0 top-[calc(100%+6px)] z-30 w-full overflow-hidden rounded-full"
           style={{
-            background: "#0B1220",
-            border: "1px solid rgba(145,190,220,0.14)",
-            boxShadow: "0 12px 32px rgba(0,0,0,0.45)",
+            background: "rgba(255,255,255,0.05)",
+            border: "1px solid rgba(255,255,255,0.10)",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
           }}
         >
           <button
