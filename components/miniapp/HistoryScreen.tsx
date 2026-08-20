@@ -83,10 +83,12 @@ export default function HistoryScreen({ recentBets }: HistoryScreenProps) {
 
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-[15px] font-semibold leading-5 text-white">
-                        {display.displayTitle}
+                        {isExpress
+                          ? `${t("bet.express")} ×${display.selectionCount}`
+                          : display.displayTitle}
                       </p>
 
-                      {(display.displayCompetition || display.displayEventTime) && (
+                      {!isExpress && (display.displayCompetition || display.displayEventTime) && (
                         <p className="mt-0.5 truncate text-xs text-slate-500">
                           {display.displayCompetition}
                           {display.displayCompetition && display.displayEventTime ? " · " : ""}
