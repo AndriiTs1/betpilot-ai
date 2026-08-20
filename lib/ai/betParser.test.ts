@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractBetTool, rejectBetTool, extractExpressBetTool, parseBetSlipMessage, parseBetMessage, MAX_DECIMAL_ODDS } from "./betParser";
+import { extractBetTool, rejectBetTool, extractExpressBetTool, parseBetSlipMessage, parseBetMessage, MAX_DECIMAL_ODDS, CLAUDE_TIMEOUT_MS } from "./betParser";
 import { chatPrompt, ocrPrompt } from "./betParserPrompt";
 import { SCREENSHOT_QA1_DIAGNOSTIC_MARKER } from "@/lib/logging/screenshotQa1Diagnostic";
 import { extractMarketIntentEvidence } from "./marketIntentEvidence";
@@ -685,15 +685,25 @@ test("parseBetSlipMessage (Ollama fallback): the enriched Ollama payload still p
 // ---------------------------------------------------------------------
 // Stage 14.4A — mode-based parser timeout + maxRetries: 0.
 //
-// The exact production timeout values (8000ms CHAT, 15000ms OCR) are not
-// re-verified here by literally waiting them out — that would make this
-// suite slow and flaky for no real benefit. Instead, the injectable
-// timeoutMsOverride (test-only, never used by any production call site)
-// lets these tests prove the *real* thing that matters fast and
-// deterministically: OCR mode actually applies whatever timeout it's
-// given, using a value tiny enough (20ms) that a handler which never
-// resolves reliably times out almost instantly.
+// Sector 1 TEXT-timeout correction (ADR-0002) — production CHAT timeout is
+// now 12000ms (was 8000ms), raised from real production evidence (5
+// measured Telegram requests: median 4997ms, max 7969ms). OCR stays
+// 15000ms, untouched by this correction.
+//
+// The exact production timeout values are not re-verified here by
+// literally waiting them out — that would make this suite slow and flaky
+// for no real benefit. Instead, the injectable timeoutMsOverride
+// (test-only, never used by any production call site) lets these tests
+// prove the *real* thing that matters fast and deterministically: OCR mode
+// actually applies whatever timeout it's given, using a value tiny enough
+// (20ms) that a handler which never resolves reliably times out almost
+// instantly. The exported CLAUDE_TIMEOUT_MS constant itself (below) proves
+// the actual production default is 12000, without waiting a real ~12s.
 // ---------------------------------------------------------------------
+
+test("betParser: production CLAUDE_TIMEOUT_MS (CHAT default) is exactly 12000ms — Sector 1 TEXT-timeout correction, ADR-0002", () => {
+  assert.equal(CLAUDE_TIMEOUT_MS, 12000);
+});
 
 // The Anthropic SDK's own fetchWithTimeout starts a real setTimeout tied to
 // the requested `timeout` option and aborts its internal AbortController

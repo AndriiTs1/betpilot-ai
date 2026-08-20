@@ -18,7 +18,22 @@ const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "llama3.2";
 const OLLAMA_TIMEOUT_MS = 8000;
 
 const CLAUDE_MODEL = "claude-sonnet-4-6";
-const CLAUDE_TIMEOUT_MS = 8000;
+// Sector 1 TEXT-timeout correction (ADR-0002) — was 8000ms. Raised based on
+// real production evidence gathered via the parser_succeeded/parser_timed_out
+// observability added alongside this change (lib/logging/structuredLog.ts):
+// 5 real Telegram CHAT/EXPRESS requests measured median 4997ms, max 7969ms —
+// within 31ms of the old 8000ms ceiling. 12000ms gives real margin above the
+// observed max while still leaving ~3000ms of the client's own
+// REQUEST_TIMEOUT_MS=15000 budget (components/miniapp/betPreviewApi.ts) for
+// everything after parsing — real downstream odds-verification cost on the
+// same 5 requests fit comfortably even in the tightest observed case
+// (7031ms remaining). REQUEST_TIMEOUT_MS, ODDS_API_TIMEOUT_MS
+// (lib/odds/oddsVerifier.ts), maxRetries, model, prompts, and max_tokens are
+// deliberately untouched by this correction.
+// Exported (same precedent as MAX_DECIMAL_ODDS above) so a regression test
+// can assert on the real production default directly, instead of waiting
+// out a real ~12s timeout to prove it indirectly.
+export const CLAUDE_TIMEOUT_MS = 12000;
 
 // Shared across every odds field this file validates (SINGLE, EXPRESS legs,
 // both CHAT and OCR mode) — a single ceiling, not a per-schema guess. Real
@@ -401,7 +416,8 @@ export type BetSlipParseMode = "CHAT" | "OCR";
 // Stage 14.4A — OCR mode gets its own, larger timeout. ocrPrompt is ~5x
 // chatPrompt by size and OCR-mode input (transcribed screen text) is
 // typically both longer and noisier than a short chat message, so the
-// original single 8000ms budget (still used for CHAT below) was sized for
+// original single 8000ms budget (CHAT's own budget at the time, now 12000ms
+// — see CLAUDE_TIMEOUT_MS's own comment, Sector 1 ADR-0002) was sized for
 // a case OCR-mode never actually is.
 //
 // 15000ms is an INITIAL OPERATIONAL VALUE, not a permanent architectural
