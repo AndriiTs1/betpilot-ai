@@ -18,7 +18,6 @@ import {
 import { hasPendingBet } from "@/components/miniapp/hasPendingBet";
 import { useLocale } from "@/components/miniapp/LocaleProvider";
 import LanguageSwitcher from "@/components/miniapp/LanguageSwitcher";
-import { Zap } from "lucide-react";
 
 // Phase 1 — investor-demo end-to-end flow: while the player has at least
 // one PENDING bet, poll for the operator's confirm/reject decision every
@@ -538,21 +537,14 @@ function DataScreen({
       {/* Global Mini App header — brand/status stay visible across all tabs,
           while the language control remains an application-wide setting. */}
       <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 flex-col items-start">
-          <span className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-white">
-            <Zap size={14} strokeWidth={2} style={{ color: "#60E84A" }} aria-hidden="true" />
-            BetPilot AI
-          </span>
+        <div className="flex min-w-0 items-center">
           <span
-            className="mt-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide"
-            style={{ color: "#60E84A" }}
-          >
-            <span
-              className="h-1.5 w-1.5 rounded-full"
-              style={{ background: "#60E84A" }}
-              aria-hidden="true"
-            />
-            {t("home.aiOnline")}
+            className="mr-2 h-2 w-2 shrink-0 rounded-full"
+            style={{ background: "#60E84A" }}
+            aria-hidden="true"
+          />
+          <span className="text-sm font-semibold uppercase tracking-wide text-white">
+            BetPilot AI
           </span>
         </div>
 
