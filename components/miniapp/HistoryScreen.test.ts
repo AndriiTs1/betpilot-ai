@@ -127,12 +127,14 @@ test("HistoryScreen: CONFIRMED/PENDING regression — still excluded from Histor
   assert.deepEqual(historyBets(bets), []);
 });
 
-test("HistoryScreen: title/empty-state are translated via t(), never hardcoded literals — StatusBadge itself (shared with the operator dashboard) is untouched", () => {
+test("HistoryScreen: title, empty state, express count, and terminal statuses are localized", () => {
   const source = readFileSync(fileURLToPath(new URL("./HistoryScreen.tsx", import.meta.url)), "utf8");
 
   assert.match(source, /import \{ useLocale \} from "\.\/LocaleProvider";/);
   assert.match(source, /\{t\("history\.title"\)\}/);
   assert.match(source, /\{t\("history\.emptyState"\)\}/);
+  assert.match(source, /t\("history\.selectionsCount"\)/);
+  assert.match(source, /HISTORY_STATUS_KEYS/);
   assert.equal(source.includes('>История<'), false);
-  assert.match(source, /<StatusBadge status=\{bet\.status\} \/>/);
+  assert.equal(source.includes("<StatusBadge"), false);
 });

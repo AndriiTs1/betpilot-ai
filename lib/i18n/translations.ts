@@ -108,6 +108,7 @@ export interface TranslationDict {
   history: {
     title: string;
     emptyState: string;
+    selectionsCount: string;
   };
   balance: {
     available: string;
@@ -328,6 +329,7 @@ const en: TranslationDict = {
   history: {
     title: "History",
     emptyState: "Finished bets will appear here.",
+    selectionsCount: "{count} selections",
   },
   balance: {
     available: "Available",
@@ -526,6 +528,7 @@ const ru: TranslationDict = {
   history: {
     title: "История",
     emptyState: "Здесь будут отображаться завершённые ставки.",
+    selectionsCount: "{count} события",
   },
   balance: {
     available: "Доступно",
