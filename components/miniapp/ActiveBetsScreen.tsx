@@ -1,4 +1,3 @@
-import { Check } from "lucide-react";
 import StatusBadge from "@/components/bets/StatusBadge";
 import BetSelectionsList from "./BetSelectionsList";
 import { formatBetDate } from "./formatBetDate";
@@ -33,11 +32,11 @@ function ActiveStatus({ status, confirmedLabel }: { status: string; confirmedLab
   }
 
   return (
-    <span
-      className="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-xs font-medium"
-      style={{ background: "rgba(96,165,250,0.14)", color: "#93c5fd" }}
-    >
-      <Check size={11} strokeWidth={2.5} aria-hidden="true" />
+    <span className="inline-flex shrink-0 items-center gap-1.5 text-xs font-medium text-blue-300">
+      <span
+        className="h-1.5 w-1.5 rounded-full bg-blue-400"
+        aria-hidden="true"
+      />
       {confirmedLabel}
     </span>
   );
@@ -79,63 +78,58 @@ export default function ActiveBetsScreen({ recentBets }: ActiveBetsScreenProps) 
               // identical y-positions across the whole list.
               <div
                 key={bet.id}
-                className="grid min-h-[124px] grid-cols-[76px_minmax(0,1fr)] overflow-hidden rounded-xl border border-slate-800"
+                className="rounded-2xl border border-white/[0.07] bg-white/[0.025] px-3.5 py-3.5"
               >
-                <div
-                  className="flex items-center justify-center border-r border-white/5"
-                  style={{ background: "rgba(59,130,246,0.14)" }}
-                >
-                  {/* EXPRESS can span multiple sports — a single sport icon
-                      would misrepresent it, so it gets its own dedicated
-                      icon instead of e.g. always showing football. */}
-                  {isExpress ? (
-                    <ExpressIcon size={56} className="text-slate-200" />
-                  ) : (
-                    <SportIcon sport={bet.sport} size={56} className="text-slate-200" />
-                  )}
-                </div>
+                <div className="flex items-start gap-3">
+                  <div
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/[0.06]"
+                    style={{ background: "rgba(59,130,246,0.08)" }}
+                  >
+                    {isExpress ? (
+                      <ExpressIcon size={28} className="text-slate-300" />
+                    ) : (
+                      <SportIcon sport={bet.sport} size={28} className="text-slate-300" />
+                    )}
+                  </div>
 
-                {/* content-between (align-content: space-between) pins row 1
-                    to the top and row 3 to the bottom, with row 2 centered
-                    between them — a CSS Grid stand-in for the old flex
-                    justify-between, which let element position drift with
-                    content length instead of guaranteeing it. */}
-                <div className="grid content-between gap-y-1.5 px-3 py-3">
-                  {/* Row 1: event title, plus an optional secondary line
-                      (competition · kickoff time) — only rendered when the
-                      odds provider resolved this event, so an older bet
-                      created before this metadata existed keeps its exact
-                      original single-line height. */}
-                  <div>
-                    <p className="truncate text-[15px] font-semibold text-white">{display.displayTitle}</p>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[15px] font-semibold leading-5 text-white">
+                      {display.displayTitle}
+                    </p>
+
                     {(display.displayCompetition || display.displayEventTime) && (
-                      <p className="truncate text-xs text-slate-500">
+                      <p className="mt-0.5 truncate text-xs text-slate-500">
                         {display.displayCompetition}
                         {display.displayCompetition && display.displayEventTime ? " · " : ""}
                         {display.displayEventTime}
                       </p>
                     )}
-                  </div>
 
-                  {/* Row 2: outcome / odds / stake, each its own fixed
-                      column so every card's odds and stake land at the same
-                      x-position no matter how long the outcome text is. */}
-                  <div className="grid grid-cols-[minmax(0,1fr)_56px_48px] items-center gap-2 text-sm">
-                    <span className="min-w-0 truncate text-slate-500">{display.displaySubtitle}</span>
-                    <span className="text-center font-medium tabular-nums text-blue-300">{oddsValue}</span>
-                    <span className="text-right tabular-nums text-slate-200">{bet.stake}</span>
+                    <div className="mt-2 grid grid-cols-[minmax(0,1fr)_52px_44px] items-center gap-2 text-sm">
+                      <span className="min-w-0 truncate text-slate-400">
+                        {display.displaySubtitle}
+                      </span>
+                      <span className="text-center font-semibold tabular-nums text-blue-300">
+                        {oddsValue}
+                      </span>
+                      <span className="text-right font-medium tabular-nums text-slate-200">
+                        {bet.stake}
+                      </span>
+                    </div>
                   </div>
+                </div>
 
-                  <BetSelectionsList selections={bet.selections} />
-
-                  {/* Row 3: Confirmed centered across the whole content
-                      width (1fr/auto/1fr — not just "between its
-                      neighbors"), date pinned to the right edge. */}
-                  <div className="grid grid-cols-[1fr_auto_1fr] items-center text-sm">
-                    <span />
-                    <ActiveStatus status={bet.status} confirmedLabel={t("active.confirmedBadge")} />
-                    <span className="justify-self-end text-slate-400">{formatBetDate(bet.createdAt)}</span>
+                {isExpress && (
+                  <div className="mt-3 border-t border-white/[0.05] pt-2.5">
+                    <BetSelectionsList selections={bet.selections} />
                   </div>
+                )}
+
+                <div className="mt-3 flex items-center justify-between border-t border-white/[0.05] pt-2.5">
+                  <ActiveStatus status={bet.status} confirmedLabel={t("active.confirmedBadge")} />
+                  <span className="text-xs tabular-nums text-slate-500">
+                    {formatBetDate(bet.createdAt)}
+                  </span>
                 </div>
               </div>
             );
