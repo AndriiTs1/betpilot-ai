@@ -61,7 +61,7 @@ export default function BetSelectionsList({ selections }: BetSelectionsListProps
   const normalized = normalizeSelectionsForDisplay(selections);
 
   return (
-    <div className="mt-1.5">
+    <div className="mt-1">
       <SelectionList selections={normalized} mode="list" showStatus={false} />
     </div>
   );

@@ -107,7 +107,12 @@ export default function ActiveBetsScreen({ recentBets }: ActiveBetsScreenProps) 
 
                     <div className="mt-2 grid grid-cols-[minmax(0,1fr)_52px_44px] items-center gap-2 text-sm">
                       <span className="min-w-0 truncate text-slate-400">
-                        {display.displaySubtitle}
+                        {isExpress
+                          ? t("active.selectionsCount").replace(
+                              "{count}",
+                              String(bet.selections?.length ?? 0),
+                            )
+                          : display.displaySubtitle}
                       </span>
                       <span className="text-center font-semibold tabular-nums text-blue-300">
                         {oddsValue}

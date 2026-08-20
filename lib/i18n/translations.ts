@@ -103,6 +103,7 @@ export interface TranslationDict {
     title: string;
     emptyState: string;
     confirmedBadge: string;
+    selectionsCount: string;
   };
   history: {
     title: string;
@@ -322,6 +323,7 @@ const en: TranslationDict = {
     title: "Active",
     emptyState: "Bets that haven't settled yet will appear here.",
     confirmedBadge: "Confirmed",
+    selectionsCount: "{count} selections",
   },
   history: {
     title: "History",
@@ -519,6 +521,7 @@ const ru: TranslationDict = {
     title: "Активные",
     emptyState: "Здесь будут отображаться ставки, которые ещё не рассчитаны.",
     confirmedBadge: "Подтверждено",
+    selectionsCount: "{count} события",
   },
   history: {
     title: "История",
