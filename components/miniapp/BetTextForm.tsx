@@ -48,6 +48,13 @@ function triggerHaptic(kind: "success" | "error" | "warning-light"): void {
 
 type FormPhase = "editing" | "previewing" | "ready" | "confirming";
 
+// Purely visual bet-type selector for the top of the "Place a bet" screen.
+// Not read by handlePreviewSubmit or sent to the API — actual SINGLE/EXPRESS
+// type is still decided entirely by the AI parser server-side
+// (preview.preview.type). Wiring this to the request is a separate,
+// out-of-scope change.
+type BetTypeTab = "single" | "express";
+
 // "Place a bet" screen: free-text message -> POST /api/miniapp/bets/text/preview
 // -> read-only preview + odds status -> POST .../confirm -> a real Bet
 // (Stage 4.4B). `phase` is the single source of truth for which block is
@@ -55,6 +62,7 @@ type FormPhase = "editing" | "previewing" | "ready" | "confirming";
 // still-usable previewToken exists (never duplicated elsewhere).
 export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
   const [message, setMessage] = useState("");
+  const [betTypeTab, setBetTypeTab] = useState<BetTypeTab>("single");
   const [phase, setPhase] = useState<FormPhase>("editing");
   // preview.previewToken (Stage 4.3) lives here in memory only — never
   // rendered, decoded, logged, or persisted to storage. Cleared on confirm
@@ -287,7 +295,42 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
       </button>
 
       <p className="mt-3 text-xl font-bold text-white">Place a bet</p>
-      <p className="mt-1 text-sm text-slate-400">Describe your bet in one message — odds aren&apos;t required, we&apos;ll verify them for you</p>
+
+      <div
+        role="tablist"
+        aria-label="Bet type"
+        className="mt-3 flex items-center gap-1 rounded-2xl p-1"
+        style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={betTypeTab === "single"}
+          onClick={() => setBetTypeTab("single")}
+          className="min-h-9 flex-1 rounded-xl text-sm font-semibold transition-colors active:opacity-80"
+          style={
+            betTypeTab === "single"
+              ? { background: "#60E84A", color: "#04170C" }
+              : { background: "transparent", color: "#94A3B8" }
+          }
+        >
+          Ординар
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={betTypeTab === "express"}
+          onClick={() => setBetTypeTab("express")}
+          className="min-h-9 flex-1 rounded-xl text-sm font-semibold transition-colors active:opacity-80"
+          style={
+            betTypeTab === "express"
+              ? { background: "#60E84A", color: "#04170C" }
+              : { background: "transparent", color: "#94A3B8" }
+          }
+        >
+          Экспресс
+        </button>
+      </div>
 
       {showEditingBlock && (
         <div className="mt-4">

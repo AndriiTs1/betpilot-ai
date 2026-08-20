@@ -70,3 +70,32 @@ test("source: the action-area gap above Confirm bet/Edit message was tightened (
   assert.match(source, /aria-label="Confirm bet"\s*className="mt-2\.5 min-h-11 w-full/);
   assert.match(source, /aria-label="Edit message"\s*className="mt-2\.5 min-h-11 w-full/);
 });
+
+// Clean top-of-screen pass: removes the secondary helper line under "Place a
+// bet" and replaces it with a purely visual Ординар/Экспресс segmented
+// control. Deliberately source-based, same as every other test in this file
+// (no DOM-rendering infra — see this file's header comment).
+test("BetTextForm: the removed 'Describe your bet...' helper line is gone and not replaced by other explanatory copy", () => {
+  assert.equal(source.includes("Describe your bet in one message"), false);
+  assert.equal(source.includes("odds aren&apos;t required"), false);
+});
+
+test("BetTextForm: both bet-type segments (Ординар, Экспресс) render as a tablist right under the Place a bet title", () => {
+  assert.match(
+    source,
+    /<p className="mt-3 text-xl font-bold text-white">Place a bet<\/p>\s*<div\s+role="tablist"[\s\S]{0,800}Ординар[\s\S]{0,800}Экспресс/,
+  );
+});
+
+test("BetTextForm: bet-type tab state exists, defaults to 'single', and both buttons toggle it via aria-selected", () => {
+  assert.match(source, /const \[betTypeTab, setBetTypeTab\] = useState<BetTypeTab>\("single"\)/);
+  assert.match(source, /aria-selected=\{betTypeTab === "single"\}[\s\S]{0,120}onClick=\{\(\) => setBetTypeTab\("single"\)\}/);
+  assert.match(source, /aria-selected=\{betTypeTab === "express"\}[\s\S]{0,120}onClick=\{\(\) => setBetTypeTab\("express"\)\}/);
+});
+
+test("BetTextForm: the bet-type tab is purely visual — never read by the preview submit flow or sent to the API", () => {
+  const submitFnMatch = source.match(/async function handlePreviewSubmit\(\) \{([\s\S]*?)\n  \}/);
+  assert.ok(submitFnMatch, "expected handlePreviewSubmit to be found");
+  assert.equal(/betTypeTab/.test(submitFnMatch![1]), false);
+  assert.match(submitFnMatch![1], /fetchBetPreview\(tg\.initData, message\.trim\(\)\)/);
+});
