@@ -46,7 +46,7 @@ test("page.tsx: LanguageSwitcher renders in the shared DataScreen shell, before 
 test("page.tsx: global header renders BetPilot AI status indicator on the left with LanguageSwitcher on the right, without WelcomeBanner or AI Online text", () => {
   assert.match(
     pageSource,
-    /<div className="flex items-start justify-between gap-3">[\s\S]*?BetPilot AI[\s\S]*?<LanguageSwitcher \/>[\s\S]*?<\/div>/,
+    /<div className="flex h-8 items-center justify-between gap-3">[\s\S]*?BetPilot AI[\s\S]*?<LanguageSwitcher \/>[\s\S]*?<\/div>/,
   );
   assert.equal(pageSource.includes("<WelcomeBanner"), false);
   assert.equal(pageSource.includes('t("home.aiOnline")'), false);

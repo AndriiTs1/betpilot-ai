@@ -536,14 +536,14 @@ function DataScreen({
     <div className="min-h-screen px-4 py-6 pb-24">
       {/* Global Mini App header — brand/status stay visible across all tabs,
           while the language control remains an application-wide setting. */}
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 items-center">
+      <div className="flex h-8 items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
           <span
-            className="mr-2 h-2 w-2 shrink-0 rounded-full"
+            className="h-1.5 w-1.5 shrink-0 rounded-full"
             style={{ background: "#60E84A" }}
             aria-hidden="true"
           />
-          <span className="text-sm font-semibold uppercase tracking-wide text-white">
+          <span className="text-sm font-semibold tracking-[-0.01em] text-white">
             BetPilot AI
           </span>
         </div>
@@ -551,7 +551,7 @@ function DataScreen({
         <LanguageSwitcher />
       </div>
 
-      <div className="mt-4">
+      <div className="mt-2">
         {activeTab === "bet" && (
           <BetScreen
             playerName={data.player.name}
