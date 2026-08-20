@@ -177,7 +177,7 @@ export default function BetScreen({
         onClick={() => setSheetOpen(true)}
         aria-haspopup="dialog"
         aria-label={t("home.sendBetAriaLabel")}
-        className="mt-5 flex w-full flex-col items-center rounded-3xl px-6 py-7 text-center"
+        className="mt-5 flex w-full flex-col items-center rounded-3xl px-6 py-6 text-center"
         style={{
           background: "linear-gradient(160deg, rgba(96,232,74,0.10), rgba(20,30,48,0.6))",
           border: "1px solid rgba(96,232,74,0.20)",
@@ -185,13 +185,13 @@ export default function BetScreen({
         }}
       >
         <div
-          className="flex h-14 w-14 items-center justify-center rounded-full"
+          className="flex h-12 w-12 items-center justify-center rounded-full"
           style={{ background: "rgba(96,232,74,0.14)", boxShadow: "0 0 24px 4px rgba(96,232,74,0.20)" }}
         >
-          <ScanLine size={28} strokeWidth={2} color="#60E84A" />
+          <ScanLine size={24} strokeWidth={2} color="#60E84A" />
         </div>
 
-        <p className="mt-3 text-xl font-bold text-white">{t("home.sendBet")}</p>
+        <p className="mt-2.5 text-xl font-bold text-white">{t("home.sendBet")}</p>
         <p className="mt-1 text-sm text-slate-300">{t("home.screenshotOrText")}</p>
       </button>
 
@@ -209,7 +209,7 @@ export default function BetScreen({
 
       {/* Last activity — at most two rows, full history lives in its own tab */}
       <div className="mt-5">
-        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+        <p className="text-sm font-medium text-slate-400">
           {t("home.lastActivity")}
         </p>
 
@@ -248,7 +248,7 @@ export default function BetScreen({
               return (
                 <div
                   key={bet.id}
-                  className="flex items-center gap-3 rounded-xl px-3 py-2.5"
+                  className="flex items-center gap-3 rounded-xl px-3 py-3"
                   style={{ background: "rgba(255,255,255,0.03)" }}
                 >
                   <span
@@ -295,7 +295,7 @@ function SummaryItem({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex flex-1 flex-col items-center px-1">
       <p className="text-[11px] text-slate-400">{label}</p>
-      <p className="mt-0.5 text-sm font-semibold text-white">{value}</p>
+      <p className="mt-0.5 text-sm font-bold text-white">{value}</p>
     </div>
   );
 }
