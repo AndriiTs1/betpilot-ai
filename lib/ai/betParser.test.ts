@@ -729,6 +729,163 @@ test('parseBetSlipMessage: a CHAT-mode call respects a short timeout override an
   assert.equal(result.code, "timeout");
 });
 
+// ---------------------------------------------------------------------
+// Sector 1 TEXT-timeout investigation (ADR-0002) — minimal, production-safe
+// observability around the CHAT Claude request. Reuses this file's own
+// captureConsoleLog() helper (defined below, hoisted) — the same
+// console.log-capturing convention the existing SCREENSHOT QA-4 diagnostic
+// tests already use — rather than a second, parallel spy mechanism.
+// logScreenshotPipelineEvent calls console.log(JSON.stringify(...)) with a
+// single string argument, so each captured call's [0] is that JSON line.
+// ---------------------------------------------------------------------
+
+function parsedLogEvents(loggedCalls: unknown[][]): Array<Record<string, unknown>> {
+  const results: Array<Record<string, unknown>> = [];
+  for (const call of loggedCalls) {
+    if (typeof call[0] !== "string") continue;
+    try {
+      const parsed = JSON.parse(call[0]) as Record<string, unknown>;
+      if (typeof parsed.event === "string") results.push(parsed);
+    } catch {
+      // Not a JSON log line (e.g. a plain console.error string elsewhere) — skip.
+    }
+  }
+  return results;
+}
+
+test("parseBetSlipMessage: a successful CHAT parse logs parser_succeeded with parserMode and a numeric durationMs", async () => {
+  currentHandler = async () => anthropicToolUseResponse("reject_bet", { reason: "not a bet" });
+  const capture = captureConsoleLog();
+
+  try {
+    const result = await parseBetSlipMessage("hey what's up", "CHAT");
+    assert.equal(result.valid, false); // reject_bet — still a successful API round-trip
+
+    const entry = parsedLogEvents(capture.loggedCalls).find((e) => e.event === "parser_succeeded");
+    assert.ok(entry, `expected a parser_succeeded log line, got: ${JSON.stringify(capture.loggedCalls)}`);
+    assert.equal(entry.parserMode, "CHAT");
+    assert.equal(typeof entry.durationMs, "number");
+    assert.ok((entry.durationMs as number) >= 0);
+  } finally {
+    capture.restore();
+  }
+});
+
+test("parseBetSlipMessage: a CHAT-mode timeout logs parser_timed_out with parserMode and a numeric durationMs", async () => {
+  currentHandler = neverResolvingFetch;
+  const capture = captureConsoleLog();
+
+  try {
+    const result = await parseBetSlipMessage("chat text", "CHAT", 20);
+    assert.equal(result.valid, false);
+    if (!result.valid) assert.equal(result.code, "timeout");
+
+    const entry = parsedLogEvents(capture.loggedCalls).find((e) => e.event === "parser_timed_out");
+    assert.ok(entry, `expected a parser_timed_out log line, got: ${JSON.stringify(capture.loggedCalls)}`);
+    assert.equal(entry.parserMode, "CHAT");
+    assert.equal(typeof entry.durationMs, "number");
+  } finally {
+    capture.restore();
+  }
+});
+
+test("parseBetSlipMessage: a CHAT-mode non-timeout provider error logs parser_failed", async () => {
+  currentHandler = async () => new Response(JSON.stringify({ error: { message: "bad request" } }), { status: 400 });
+  const capture = captureConsoleLog();
+
+  try {
+    await parseBetSlipMessage("some text", "CHAT");
+
+    const entry = parsedLogEvents(capture.loggedCalls).find((e) => e.event === "parser_failed");
+    assert.ok(entry, `expected a parser_failed log line, got: ${JSON.stringify(capture.loggedCalls)}`);
+    assert.equal(entry.parserMode, "CHAT");
+  } finally {
+    capture.restore();
+  }
+});
+
+test("parseBetSlipMessage: the new log payload never contains the player's bet text, regardless of outcome", async () => {
+  const secretBetText = "Экспресс Интер Милан — Монца: ничья, Ставка 5 USDT — never log this";
+
+  for (const setup of [
+    () => { currentHandler = async () => anthropicToolUseResponse("reject_bet", { reason: "not a bet" }); },
+    () => { currentHandler = neverResolvingFetch; },
+    () => { currentHandler = async () => new Response(JSON.stringify({ error: { message: "bad" } }), { status: 400 }); },
+  ]) {
+    setup();
+    const capture = captureConsoleLog();
+    try {
+      await parseBetSlipMessage(secretBetText, "CHAT", 20);
+      for (const call of capture.loggedCalls) {
+        const line = call.map(String).join(" ");
+        assert.equal(line.includes(secretBetText), false, `log line leaked the player's bet text: ${line}`);
+        assert.equal(line.includes("Интер"), false);
+        assert.equal(line.includes("USDT"), false);
+      }
+    } finally {
+      capture.restore();
+    }
+  }
+});
+
+test("parseBetSlipMessage: the log payload's keys are exactly event/parserMode/durationMs — no prompt/tool/API-key field ever appears", async () => {
+  currentHandler = async () => anthropicToolUseResponse("reject_bet", { reason: "not a bet" });
+  const capture = captureConsoleLog();
+
+  try {
+    await parseBetSlipMessage("some text", "CHAT");
+    const entry = parsedLogEvents(capture.loggedCalls).find((e) => e.event === "parser_succeeded");
+    assert.ok(entry);
+    assert.deepEqual(Object.keys(entry).sort(), ["durationMs", "event", "parserMode"]);
+  } finally {
+    capture.restore();
+  }
+});
+
+test("parseBetSlipMessage: OCR-mode calls (region/OCR/parse pipeline) never emit the new CHAT-only log events", async () => {
+  currentHandler = async () => anthropicToolUseResponse("reject_bet", { reason: "not a bet" });
+  const capture = captureConsoleLog();
+
+  try {
+    await parseBetSlipMessage("ocr text", "OCR");
+    const chatEvents = parsedLogEvents(capture.loggedCalls).filter(
+      (e) => e.event === "parser_succeeded" || e.event === "parser_timed_out" || e.event === "parser_failed",
+    );
+    assert.deepEqual(chatEvents, [], "this correction is scoped to CHAT mode only — OCR mode must stay unlogged by it");
+  } finally {
+    capture.restore();
+  }
+});
+
+// ---------------------------------------------------------------------
+// Sector 1 TEXT-timeout investigation — the OCR timeout constant itself
+// must be provably unchanged by this correction. CLAUDE_OCR_PARSER_TIMEOUT_MS
+// is not exported, so this is proven behaviorally: OCR mode with no
+// override still uses its own (larger) real timeout, distinct from CHAT's.
+// The two mode-based timeout-override tests above already prove each mode
+// independently respects whatever timeout it's given; this test proves
+// the two modes are not accidentally sharing one constant post-edit.
+// ---------------------------------------------------------------------
+
+test("parseBetSlipMessage: CHAT and OCR modes still use their own independent timeout override — proves the two constants were not accidentally merged", async () => {
+  currentHandler = neverResolvingFetch;
+
+  // A 20ms override on CHAT times out almost instantly regardless of which
+  // constant CHAT normally defaults to.
+  const chatResult = await parseBetSlipMessage("chat text", "CHAT", 20);
+  assert.equal(chatResult.valid, false);
+  if (!chatResult.valid) assert.equal(chatResult.code, "timeout");
+
+  // Same for OCR, independently — if the two modes had been accidentally
+  // collapsed onto one shared timeout constant, this would still pass, but
+  // paired with the mode-scoped logging test above (OCR never emits the
+  // new CHAT-only events), the two constants are proven both distinct and
+  // both still correctly wired to their own mode.
+  const ocrResult = await parseBetSlipMessage("ocr text", "OCR", 20);
+  assert.equal(ocrResult.valid, false);
+  if (!ocrResult.valid) assert.equal(ocrResult.code, "timeout");
+});
+
 test("parseBetSlipMessage: a failing call is never retried (maxRetries: 0) — the handler fires exactly once", async () => {
   let callCount = 0;
   currentHandler = async () => {

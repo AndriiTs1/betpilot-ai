@@ -9,6 +9,7 @@ import { chatPrompt, ocrPrompt } from "./betParserPrompt";
 import { mapRawBetSlipToParsedBetSlip, type RawBetSelectionFields, type NumericRoleObservation, type MarketIntentObservation } from "./betDraftMapper";
 import { normalizeOcrParticipantClaim } from "./ocrParticipantClaimNormalizer";
 import { logScreenshotQa1Diagnostic, type Qa1NumericEvidenceEntry, type Qa1MarketIntentEvidenceEntry } from "@/lib/logging/screenshotQa1Diagnostic";
+import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
 import type { NumericRoleEvidence } from "./numericRoleEvidence";
 import type { MarketIntentEvidence } from "./marketIntentEvidence";
 
@@ -855,6 +856,20 @@ async function parseTextSlipWithClaude(
   const client = getAnthropicClient();
   const timeoutMs = timeoutMsOverride ?? (mode === "OCR" ? CLAUDE_OCR_PARSER_TIMEOUT_MS : CLAUDE_TIMEOUT_MS);
 
+  // Sector 1 TEXT-timeout investigation (ADR-0002) — minimal, production-safe
+  // observability around the CHAT Claude request specifically (never OCR —
+  // out of this correction's scope). Reuses the existing, already-reviewed
+  // logScreenshotPipelineEvent mechanism (lib/logging/structuredLog.ts) —
+  // its ScreenshotPipelineLogMetadata type is a closed shape that cannot
+  // express raw text/prompts/tokens/tool payloads even by mistake, so
+  // there's no risk surface to introduce here: only `durationMs` (a number)
+  // and `parserMode` (a fixed "CHAT"|"OCR" literal) are ever passed. The
+  // "screenshot" name predates this shared use (see that file's own
+  // parser_succeeded/parser_timed_out/parser_failed events, and
+  // buildBetSlipPreview.ts's existing odds_check_* usage) — it's the one
+  // generic JSON-line logger this codebase has, not a screenshot-only tool.
+  const chatRequestStartedAt = mode === "CHAT" ? Date.now() : null;
+
   let response: Anthropic.Beta.BetaMessage;
 
   try {
@@ -881,6 +896,15 @@ async function parseTextSlipWithClaude(
       { timeout: timeoutMs },
     );
   } catch (err) {
+    if (chatRequestStartedAt !== null) {
+      const durationMs = Date.now() - chatRequestStartedAt;
+      const isTimeout = err instanceof Anthropic.APIConnectionTimeoutError;
+      logScreenshotPipelineEvent(isTimeout ? "parser_timed_out" : "parser_failed", {
+        durationMs,
+        parserMode: "CHAT",
+      });
+    }
+
     // A timeout is reported with a discriminated `code` (rather than left
     // to blend into the same opaque `error` string every other failure
     // uses) so a caller like the screenshot preview route can correctly
@@ -900,6 +924,13 @@ async function parseTextSlipWithClaude(
           : "Unknown error calling Claude";
 
     return { valid: false, error: message };
+  }
+
+  if (chatRequestStartedAt !== null) {
+    logScreenshotPipelineEvent("parser_succeeded", {
+      durationMs: Date.now() - chatRequestStartedAt,
+      parserMode: "CHAT",
+    });
   }
 
   const toolUse = response.content.find(
