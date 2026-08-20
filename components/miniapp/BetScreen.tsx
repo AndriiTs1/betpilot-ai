@@ -193,13 +193,12 @@ export default function BetScreen({
 
         <p className="mt-3 text-xl font-bold text-white">{t("home.sendBet")}</p>
         <p className="mt-1 text-sm text-slate-300">{t("home.screenshotOrText")}</p>
-        <p className="mt-2 text-xs text-slate-500">{t("home.aiWillCheck")}</p>
       </button>
 
       {/* Compact summary — one bar, not three separate cards */}
       <div
-        className="mt-5 flex items-stretch justify-between rounded-2xl px-2 py-3"
-        style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
+        className="mt-4 flex items-stretch justify-between rounded-2xl px-2 py-2.5"
+        style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.05)" }}
       >
         <SummaryItem label={t("home.available")} value={availableCredit} />
         <div className="w-px self-stretch" style={{ background: "rgba(255,255,255,0.08)" }} />
@@ -256,10 +255,6 @@ export default function BetScreen({
           </div>
         )}
       </div>
-
-      <p className="mt-5 text-center text-xs text-slate-500">
-        {t("home.aiChecksNote")}
-      </p>
 
       <BetActionSheet
         open={isSheetOpen}
