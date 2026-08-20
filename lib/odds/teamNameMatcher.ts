@@ -31,6 +31,15 @@ const TEAM_ALIASES: Record<string, string> = {
   милан: "ac milan",
   интер: "inter milan",
   псж: "paris saint germain",
+  // Diagnosed production gap (2026-08-19): both names transliterate
+  // letter-by-letter to something the provider's own Latin spelling
+  // doesn't match, and both fall under FUZZY_WORD_MIN_LENGTH (6) once
+  // transliterated, so no fuzzy tolerance ever applies to bridge the
+  // gap. "комо" -> "komo" (к -> k) vs provider "Como" (c). "дженоа" ->
+  // "dzhenoa" (дж -> dzh, the standard Russian rendering of the soft-G
+  // sound) vs provider "Genoa" (g).
+  комо: "como",
+  дженоа: "genoa",
 };
 
 const DIACRITIC_REGEX = /[̀-ͯ]/g;
@@ -82,6 +91,32 @@ function transliterateCyrillic(raw: string): string {
 // separators" and "keep only [a-z0-9\s]" in a single pass) -> collapse
 // whitespace.
 //
+// TEAM_ALIASES lookup tries the FULL trimmed input first (unchanged
+// behavior for a caller that already isolated a single team name, e.g.
+// findMatchingEvent()'s splitEventTeams() output, or a multi-word alias
+// key like "реал мадрид"/"манчестер юнайтед" matched as a whole phrase).
+// Only when that whole-string lookup misses does it fall back to aliasing
+// PER WORD — diagnosed production gap (2026-08-20): a free-text selection
+// like "победа Комо" is never just the bare team name, so a whole-string-only
+// lookup can never fire for it even though "комо" is a real alias key. The
+// per-word fallback re-checks each individual word against the same table,
+// leaving every word without an alias entry untouched (verbatim) for the
+// transliteration step below — it can only ever fill in words that already
+// have an explicit TEAM_ALIASES entry, never invent one.
+//
+// Per-word substitution only fires for a word whose alias VALUE is itself a
+// single word (e.g. "комо" -> "como"). A handful of existing single-word
+// keys expand to a MULTI-word value (short club nicknames like "интер" ->
+// "inter milan", "милан" -> "ac milan", "бавария" -> "bayern munich" — for
+// when a player writes only the nickname). Applying those per-word inside an
+// already-complete official name like "Интер Милан" would inject extra,
+// unrelated words ("inter milan" + "milan" -> "inter milan ac milan") and
+// break a name that already transliterates correctly on its own — a real
+// regression caught by this stage's own test suite before shipping. Multi-
+// word-VALUE aliases therefore still only ever apply via the whole-string
+// branch above (the case they were originally designed for: the input IS
+// just the nickname, nothing else).
+//
 // No second TEAM_ALIASES lookup after transliteration: every alias key is
 // itself a lowercase Cyrillic string, checked against the raw (still
 // Cyrillic) input above — by definition it can never match Latin
@@ -89,7 +124,15 @@ function transliterateCyrillic(raw: string): string {
 // ever be dead code, not an additional safety net.
 export function normalizeTeamName(raw: string): string {
   const lower = raw.toLowerCase().trim();
-  const aliased = TEAM_ALIASES[lower] ?? lower;
+  const aliased =
+    TEAM_ALIASES[lower] ??
+    lower
+      .split(" ")
+      .map((word) => {
+        const wordAlias = TEAM_ALIASES[word];
+        return wordAlias && !wordAlias.includes(" ") ? wordAlias : word;
+      })
+      .join(" ");
   const transliterated = transliterateCyrillic(aliased);
 
   return transliterated

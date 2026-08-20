@@ -17,6 +17,61 @@ test("normalizeTeamName: smoke check — extraction preserved behavior", () => {
   assert.equal(normalizeTeamName(""), "");
 });
 
+/* ============================================================================
+ * Diagnosed production gap (2026-08-20) — per-word TEAM_ALIASES fallback.
+ * "победа Комо" is never just the bare alias key "комо", so the pre-existing
+ * whole-string-only lookup could never fire for it. normalizeTeamName() now
+ * falls back to a per-word alias lookup only when the whole trimmed input
+ * isn't itself a key.
+ * ============================================================================ */
+
+test("normalizeTeamName: bare short-name aliases resolve via the whole-string lookup (unchanged path)", () => {
+  assert.equal(normalizeTeamName("Комо"), "como");
+  assert.equal(normalizeTeamName("Дженоа"), "genoa");
+});
+
+test("normalizeTeamName: new per-word fallback — an alias word embedded in a longer free-text selection still resolves", () => {
+  assert.equal(normalizeTeamName("победа Комо"), "pobeda como");
+  assert.equal(normalizeTeamName("победа Дженоа"), "pobeda genoa");
+});
+
+test("normalizeTeamName: per-word fallback leaves words without an alias entry untouched (verbatim transliteration)", () => {
+  // "юнайтед" alone is not a TEAM_ALIASES key (only the combined phrase
+  // "манчестер юнайтед" is) — the fallback must not invent a match for it.
+  assert.equal(normalizeTeamName("клуб юнайтед"), "klub yunaited");
+});
+
+test("normalizeTeamName: pre-existing multi-word alias phrases still resolve exactly as before via the whole-string branch (regression)", () => {
+  assert.equal(normalizeTeamName("Реал Мадрид"), "real madrid");
+  assert.equal(normalizeTeamName("Манчестер Юнайтед"), "manchester united");
+  assert.equal(normalizeTeamName("Боруссия Дортмунд"), "borussia dortmund");
+});
+
+test("normalizeTeamName: a multi-word alias phrase does NOT fire through the per-word fallback when combined with extra words (documented, narrower scope — matches only exact single-word alias keys)", () => {
+  // "реал" and "мадрид" are each not standalone TEAM_ALIASES keys (only the
+  // 2-word phrase "реал мадрид" is), so per-word substitution correctly does
+  // nothing here — this is not a regression, since plain letter-by-letter
+  // transliteration already produces the right result for this pair anyway.
+  assert.equal(normalizeTeamName("победа Реал Мадрид"), "pobeda real madrid");
+});
+
+test("normalizeTeamName: REGRESSION GUARD — a single-word alias whose VALUE is multi-word (e.g. 'интер' -> 'inter milan') must not fire per-word inside an already-complete official name, or it injects extra words and corrupts it", () => {
+  // Caught during implementation: naive unconditional per-word substitution
+  // turned "Интер Милан" into "inter milan ac milan" ("интер" -> "inter
+  // milan" AND "милан" -> "ac milan", both firing on the same two-word
+  // input), which dropped the real event-matching score for Inter Milan
+  // below EVENT_MATCH_THRESHOLD in oddsVerifier.test.ts. Fixed by only
+  // letting per-word substitution fire for single-word -> single-word
+  // aliases (see normalizeTeamName's own comment).
+  assert.equal(normalizeTeamName("Интер Милан"), "inter milan");
+  assert.equal(normalizeTeamName("Бавария Мюнхен"), "bavariya myunhen");
+  // The bare nicknames still resolve exactly as before — unaffected, since
+  // that case is handled by the whole-string branch, not the per-word one.
+  assert.equal(normalizeTeamName("Интер"), "inter milan");
+  assert.equal(normalizeTeamName("Милан"), "ac milan");
+  assert.equal(normalizeTeamName("Бавария"), "bayern munich");
+});
+
 // ---------------------------------------------------------------------
 // compareTeamNames
 // ---------------------------------------------------------------------

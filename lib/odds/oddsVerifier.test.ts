@@ -1104,6 +1104,68 @@ test("verifyOdds: pre-existing Cyrillic TEAM_ALIASES entries still match the pro
 });
 
 /* -------------------------------------------------------------------------- */
+/* Diagnosed production gap (2026-08-19) — Udinese/Como and Genoa/Napoli      */
+/* -------------------------------------------------------------------------- */
+// Real production EXPRESS: "Интер Милан — Монца: ничья / Удинезе — Комо:
+// победа Комо / Дженоа — Наполи: победа Дженоа" resolved leg 1 (a fixed
+// DRAW token, needs no team-name resolution) but NOT_FOUND legs 2 and 3.
+// Root cause traced to extractOutcomePrice()'s fuzzy fallback: "Комо" and
+// "Дженоа" transliterate to "komo"/"dzhenoa", both under
+// FUZZY_WORD_MIN_LENGTH (6), so no fuzzy tolerance ever bridges the gap to
+// the provider's own "Como"/"Genoa" spelling. Fixed via two new
+// TEAM_ALIASES entries only — no threshold, matching-logic, or provider
+// code changed. These tests go through the real production path
+// (verifyOdds -> resolveMatchedEvent -> extractOutcomePrice), not just the
+// alias map in isolation, so they prove the fix actually reaches a player
+// bet, not merely that the dictionary lookup itself works.
+
+test("verifyOdds: diagnosed gap fix — 'победа Комо' resolves to the provider's Como outcome (Udinese vs Como)", async () => {
+  mockEvents([h2hEvent("Udinese", "Como", standardOutcomes("Udinese", "Como", 4.4, 1.77, 3.4))]);
+
+  const result = await verifyOdds(
+    bet({ sport: "serie a", event: "Удинезе — Комо", selection: "победа Комо", odds: 1.77 }),
+  );
+
+  assert.equal(result.matched, true, `expected 'победа Комо' to resolve to the Como outcome; note: ${result.note}`);
+  assert.equal(result.sourceOdds, 1.77);
+});
+
+test("verifyOdds: diagnosed gap fix — 'победа Дженоа' resolves to the provider's Genoa outcome (Genoa vs Napoli)", async () => {
+  mockEvents([h2hEvent("Genoa", "Napoli", standardOutcomes("Genoa", "Napoli", 4.5, 1.8, 3.3))]);
+
+  const result = await verifyOdds(
+    bet({ sport: "serie a", event: "Дженоа — Наполи", selection: "победа Дженоа", odds: 4.5 }),
+  );
+
+  assert.equal(result.matched, true, `expected 'победа Дженоа' to resolve to the Genoa outcome; note: ${result.note}`);
+  assert.equal(result.sourceOdds, 4.5);
+});
+
+test("verifyOdds: diagnosed gap fix — control case 'ничья' (Draw) is unaffected, still resolves via the fixed-token path, not team-name matching (Inter Milan vs Monza)", async () => {
+  mockEvents([h2hEvent("Inter Milan", "Monza", standardOutcomes("Inter Milan", "Monza", 1.17, 14.0, 6.5))]);
+
+  const result = await verifyOdds(
+    bet({ sport: "serie a", event: "Интер Милан — Монца", selection: "ничья", odds: 6.5 }),
+  );
+
+  assert.equal(result.matched, true, `expected 'ничья' to resolve to the Draw outcome; note: ${result.note}`);
+  assert.equal(result.sourceOdds, 6.5);
+});
+
+test("verifyOdds: diagnosed gap fix — new aliases do not broaden matching to genuinely unrelated teams (no false positive)", async () => {
+  mockEvents([h2hEvent("Udinese", "Cagliari", standardOutcomes("Udinese", "Cagliari", 2.1, 3.5, 3.2))]);
+
+  // "Комо" should not spuriously match "Cagliari" just because a new alias
+  // was added for a different fixture — thresholds/matching logic are
+  // unchanged, so an unrelated selection must still fail honestly.
+  const result = await verifyOdds(
+    bet({ sport: "serie a", event: "Удинезе — Кальяри", selection: "победа Комо", odds: 1.77 }),
+  );
+
+  assert.equal(result.matched, false, `expected 'победа Комо' to NOT match an unrelated Cagliari outcome; note: ${result.note}`);
+});
+
+/* -------------------------------------------------------------------------- */
 /* Production bugfix regression — single-team event matching                  */
 /* -------------------------------------------------------------------------- */
 // Root cause: findMatchingEvent()'s no-explicit-opponent branch used to score
