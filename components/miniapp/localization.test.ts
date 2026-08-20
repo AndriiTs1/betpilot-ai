@@ -43,11 +43,12 @@ test("page.tsx: LanguageSwitcher renders in the shared DataScreen shell, before 
   assert.equal((body.match(/<LanguageSwitcher/g) ?? []).length, 1);
 });
 
-test("page.tsx: the language control does not add a new full-width header row — it shares WelcomeBanner's existing top row via one flex container", () => {
+test("page.tsx: global header renders BetPilot AI and AI Online on the left with LanguageSwitcher on the right, without WelcomeBanner", () => {
   assert.match(
     pageSource,
-    /<div className="flex items-start justify-between gap-3">\s*<div className="min-w-0 flex-1">\s*<WelcomeBanner[\s\S]*?<\/div>\s*<LanguageSwitcher \/>\s*<\/div>/,
+    /<div className="flex items-start justify-between gap-3">[\s\S]*?BetPilot AI[\s\S]*?t\("home\.aiOnline"\)[\s\S]*?<LanguageSwitcher \/>[\s\S]*?<\/div>/,
   );
+  assert.equal(pageSource.includes("<WelcomeBanner"), false);
 });
 
 test("page.tsx: Telegram's own initDataUnsafe.user.language_code is read exactly once, inside handleScriptReady (the one place tg readiness is actually known), and passed to applyTelegramLanguageCode", () => {

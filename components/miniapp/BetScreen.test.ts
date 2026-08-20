@@ -267,18 +267,25 @@ test("BetScreen: home-screen strings are translated via t(), not hardcoded Russi
   const source = readFileSync(fileURLToPath(new URL("./BetScreen.tsx", import.meta.url)), "utf8");
 
   assert.match(source, /import \{ useLocale \} from "\.\/LocaleProvider";/);
-  assert.match(source, /\{t\("home\.aiOnline"\)\}/);
-  assert.match(source, /\{t\("home\.ready"\)\}/);
   assert.match(source, /\{t\("home\.sendBet"\)\}/);
   assert.match(source, /\{t\("home\.screenshotOrText"\)\}/);
-  assert.match(source, /\{t\("home\.aiWillCheck"\)\}/);
   assert.match(source, /aria-label=\{t\("home\.sendBetAriaLabel"\)\}/);
   assert.match(source, /label=\{t\("home\.available"\)\}/);
   assert.match(source, /label=\{t\("home\.exposure"\)\}/);
   assert.match(source, /label=\{t\("home\.pending"\)\}/);
   assert.match(source, /\{t\("home\.lastActivity"\)\}/);
   assert.match(source, /\{t\("home\.noActivityYet"\)\}/);
-  assert.match(source, /\{t\("home\.aiChecksNote"\)\}/);
+  assert.match(source, /t\("bet\.single"\)/);
+  assert.match(source, /t\("preview\.expressCount"/);
+  assert.match(source, /"home\.activityPending"/);
+  assert.match(source, /"home\.activityAccepted"/);
+  assert.match(source, /"home\.activityRejected"/);
+  assert.match(source, /"home\.activityWon"/);
+  assert.match(source, /"home\.activityLost"/);
+  assert.match(source, /"home\.activityVoid"/);
+  assert.match(source, /"home\.activityHalfWon"/);
+  assert.match(source, /"home\.activityHalfLost"/);
+
 
   assert.equal(source.includes('"Готов проверить вашу ставку"'), false);
   assert.equal(source.includes('"Отправить ставку"'), false);

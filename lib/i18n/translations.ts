@@ -53,6 +53,14 @@ export interface TranslationDict {
     pending: string;
     lastActivity: string;
     noActivityYet: string;
+    activityPending: string;
+    activityAccepted: string;
+    activityRejected: string;
+    activityWon: string;
+    activityLost: string;
+    activityVoid: string;
+    activityHalfWon: string;
+    activityHalfLost: string;
     aiChecksNote: string;
     // Localization completion pass — Stage 5G.3-equivalent: the player
     // "not registered" screen was still hardcoded Russian even in English
@@ -271,6 +279,14 @@ const en: TranslationDict = {
     pending: "Pending",
     lastActivity: "Recent activity",
     noActivityYet: "Your recent bets will show up here",
+    activityPending: "Pending",
+    activityAccepted: "Accepted",
+    activityRejected: "Rejected",
+    activityWon: "Won",
+    activityLost: "Lost",
+    activityVoid: "Void",
+    activityHalfWon: "Half won",
+    activityHalfLost: "Half lost",
     aiChecksNote: "AI checks the odds before confirming",
     notRegistered: "You are not yet registered. Please contact your operator.",
   },
@@ -460,6 +476,14 @@ const ru: TranslationDict = {
     pending: "Ожидает",
     lastActivity: "Последняя активность",
     noActivityYet: "Здесь появятся ваши последние ставки",
+    activityPending: "Ожидает",
+    activityAccepted: "Принята",
+    activityRejected: "Отклонена",
+    activityWon: "Выиграла",
+    activityLost: "Проиграла",
+    activityVoid: "Возврат",
+    activityHalfWon: "Частичный выигрыш",
+    activityHalfLost: "Частичный проигрыш",
     aiChecksNote: "AI проверяет коэффициенты перед подтверждением",
     notRegistered: "Вы ещё не зарегистрированы. Обратитесь к оператору.",
   },

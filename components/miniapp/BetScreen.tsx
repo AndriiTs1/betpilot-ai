@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { ScanLine } from "lucide-react";
-import StatusBadge from "@/components/bets/StatusBadge";
+import { STATUS_BADGES } from "@/components/bets/StatusBadge";
 import BetActionSheet from "./BetActionSheet";
 import BetTextForm from "./BetTextForm";
 import BetScreenshotForm from "./BetScreenshotForm";
@@ -223,32 +223,57 @@ export default function BetScreen({
               // legacy zero-selection row) — see lib/bets/mapBetForDisplay.ts.
               const display = mapBetForDisplay(bet);
               const isExpress = display.selectionCount > 1;
+              const betTypeLabel = isExpress
+                ? t("preview.expressCount", { count: String(display.selectionCount) })
+                : t("bet.single");
+
+              const activityStatusKey = {
+                PENDING: "home.activityPending",
+                CONFIRMED: "home.activityAccepted",
+                REJECTED: "home.activityRejected",
+                SETTLED_WIN: "home.activityWon",
+                SETTLED_LOSS: "home.activityLost",
+                VOID: "home.activityVoid",
+                SETTLED_HALF_WIN: "home.activityHalfWon",
+                SETTLED_HALF_LOSS: "home.activityHalfLost",
+              } as const;
+
+              const statusKey = activityStatusKey[bet.status as keyof typeof activityStatusKey];
+              const statusLabel = statusKey ? t(statusKey) : bet.status;
+              const statusBadge = STATUS_BADGES[bet.status] ?? {
+                dot: "bg-slate-500",
+                text: "text-slate-400",
+              };
 
               return (
                 <div
                   key={bet.id}
-                  className="flex items-center justify-between gap-3 rounded-xl px-3 py-2.5"
+                  className="flex items-center gap-3 rounded-xl px-3 py-2.5"
                   style={{ background: "rgba(255,255,255,0.03)" }}
                 >
-                  <div className="flex min-w-0 flex-1 items-center gap-2">
-                    <span
-                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
-                      style={{ background: "rgba(59,130,246,0.14)" }}
-                    >
-                      {/* EXPRESS can span multiple sports — a single sport
-                          icon would misrepresent it. */}
-                      {isExpress ? (
-                        <ExpressIcon size={28} className="text-slate-200" />
-                      ) : (
-                        <SportIcon sport={bet.sport} size={28} className="text-slate-200" />
-                      )}
-                    </span>
-                    <p className="min-w-0 truncate text-sm font-medium text-white">{display.displayTitle}</p>
-                  </div>
-                  <span className="shrink-0 text-xs text-slate-400">
-                    {(bet.selections && bet.selections.length > 1 ? bet.totalOdds : bet.odds) ?? "—"}
+                  <span
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
+                    style={{ background: "rgba(59,130,246,0.14)" }}
+                  >
+                    {isExpress ? (
+                      <ExpressIcon size={26} className="text-slate-200" />
+                    ) : (
+                      <SportIcon sport={bet.sport} size={26} className="text-slate-200" />
+                    )}
                   </span>
-                  <StatusBadge status={bet.status} />
+
+                  <span className="min-w-0 flex-1 truncate text-sm font-semibold text-white">
+                    {betTypeLabel}
+                  </span>
+
+                  <span className="shrink-0 text-sm font-medium text-slate-300">
+                    {(isExpress ? bet.totalOdds : bet.odds) ?? "—"}
+                  </span>
+
+                  <span className="inline-flex shrink-0 items-center gap-1.5 text-xs">
+                    <span className={`h-2 w-2 rounded-full ${statusBadge.dot}`} />
+                    <span className={statusBadge.text}>{statusLabel}</span>
+                  </span>
                 </div>
               );
             })}

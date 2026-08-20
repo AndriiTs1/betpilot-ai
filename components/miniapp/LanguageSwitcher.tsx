@@ -5,6 +5,11 @@ import { ChevronDown } from "lucide-react";
 import { useLocale } from "./LocaleProvider";
 import type { Locale } from "@/lib/i18n/locale";
 
+const ALTERNATE_LOCALE: Record<Locale, Locale> = {
+  ru: "en",
+  en: "ru",
+};
+
 // Compact, anchored language control for the two supported locales.
 // The collapsed pill shows the current locale ("RU" / "EN"); opening it
 // reveals only the alternate locale directly underneath at the same width.
@@ -42,7 +47,7 @@ export default function LanguageSwitcher() {
     setOpen(false);
   }
 
-  const alternateLocale: Locale = locale === "ru" ? "en" : "ru";
+  const alternateLocale = ALTERNATE_LOCALE[locale];
 
   return (
     <div ref={containerRef} className="relative w-[62px] shrink-0">
