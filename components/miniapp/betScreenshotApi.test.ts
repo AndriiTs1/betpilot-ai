@@ -152,3 +152,21 @@ test("fetchBetScreenshotPreview: a non-string detail field is treated as absent,
   if (result.failure.kind !== "http") return;
   assert.equal(result.failure.detail, null);
 });
+
+// Localization completion pass — same "locale defaults to en" convention
+// as betPreviewApi.ts/betConfirmApi.ts; the OCR/parser failure codes
+// themselves are completely untouched, only the returned display text.
+test("getBetScreenshotErrorMessage: locale='ru' returns Russian text, distinct from the default English", () => {
+  const en = getBetScreenshotErrorMessage({ kind: "http", code: "UNSUPPORTED_FILE_TYPE" });
+  const ru = getBetScreenshotErrorMessage({ kind: "http", code: "UNSUPPORTED_FILE_TYPE" }, "ru");
+  assert.notEqual(ru, en);
+  assert.equal(ru, "Неподдерживаемый тип файла. Используйте JPEG, PNG или WEBP.");
+});
+
+test("getBetScreenshotErrorMessage: the IMAGE_NOT_RECOGNIZED numeric_mismatch/market_mismatch detail branches are still selected by `detail`, in either locale", () => {
+  const ruNumeric = getBetScreenshotErrorMessage({ kind: "http", code: "IMAGE_NOT_RECOGNIZED", detail: "numeric_mismatch" }, "ru");
+  const ruMarket = getBetScreenshotErrorMessage({ kind: "http", code: "IMAGE_NOT_RECOGNIZED", detail: "market_mismatch" }, "ru");
+  assert.notEqual(ruNumeric, ruMarket);
+  assert.ok(ruNumeric.length > 0);
+  assert.ok(ruMarket.length > 0);
+});

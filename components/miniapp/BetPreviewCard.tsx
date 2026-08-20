@@ -1,28 +1,27 @@
 import type { ReactNode } from "react";
 import type { BetPreview, BetSelectionOddsStatus } from "./betPreviewApi";
 import SelectionRow from "@/components/bets/SelectionRow";
+import { getOddsStatusBadge } from "@/lib/bets/oddsStatusBadge";
 import type { DisplaySelection } from "@/lib/bets/mapBetForDisplay";
 import { formatAmount } from "@/lib/bets/formatAmount";
 import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
 import { formatFullEventName } from "@/lib/bets/formatFullEventName";
 import { formatEventDateTime } from "@/lib/bets/formatEventDateTime";
 import { hasUnverifiedOddsStatus, isSingleSelectionOddsUnavailable, isRecoverableLeg } from "./canConfirmBetSlip";
+import { useLocale } from "./LocaleProvider";
+import { translate } from "@/lib/i18n/translations";
+import type { Locale } from "@/lib/i18n/locale";
 
-// Shown whenever the odds provider could not positively confirm a
-// selection's exact event/market (NOT_FOUND) or couldn't verify anything
-// right now (the reserved-but-unreachable PENDING) — the same condition
-// canConfirmBetSlip.ts's hasUnverifiedOddsStatus disables the Confirm
-// button for. Deliberately does not invite the player to "submit for
-// operator review" — a bet the provider never confirmed must never reach
-// the operator queue at all, so this message only explains why
-// confirmation is blocked, never implies a submit-anyway path exists.
-// UNAVAILABLE specifically is handled separately below (see
-// PROVIDER_UNAVAILABLE_TITLE/MESSAGE) — this message must never be shown
-// for a provider-technical failure, since it reads as "we looked and
-// couldn't find this," which is not what happened.
-const ODDS_UNVERIFIED_MESSAGE =
-  "We couldn't verify this event or market with the odds provider. Please check the bet details or try again later.";
-
+// Localization completion pass — these module-level constants keep their
+// EXACT original names/exports (nothing importing them breaks), but are now
+// derived via translate(..., "en") so their value is byte-for-byte
+// identical to before this pass. The actually-rendered copy in this file's
+// own components now goes through useLocale()'s t() instead of these
+// constants directly — kept only for any external consumer that still
+// imports them by name (confirmed via a repo-wide check: nothing outside
+// this file does today, but they stay exported since they're part of this
+// module's existing public surface).
+//
 // Stage M4.5 — CLEAN UNAVAILABLE-ODDS UX. Replaces every previous SINGLE
 // "could not be verified" / "provider unavailable" / "odds unavailable"
 // warning box with one compact, visually secondary line — the player
@@ -30,7 +29,7 @@ const ODDS_UNVERIFIED_MESSAGE =
 // server/log-side only, see Stage M4.4's diagnosticCode), only that they
 // aren't. See OddsStatus below for the one condition that triggers it.
 // Stage M4.6 — shortened further, same meaning, no added explanation.
-export const ODDS_UNAVAILABLE_NOTICE = "Odds for this selection are currently unavailable.";
+export const ODDS_UNAVAILABLE_NOTICE = translate("en", "preview.oddsUnavailableNotice");
 
 // Provider-level technical failure (timeout, rate limit, quota exhausted,
 // auth failure, generic outage — see lib/odds/verification.ts's
@@ -40,8 +39,8 @@ export const ODDS_UNAVAILABLE_NOTICE = "Odds for this selection are currently un
 // that the player entered the bet incorrectly — those are genuinely
 // different situations (NOT_FOUND), with their own, different message
 // above.
-export const PROVIDER_UNAVAILABLE_TITLE = "Live odds are temporarily unavailable";
-export const PROVIDER_UNAVAILABLE_MESSAGE = "We couldn't verify this bet right now. Please try again later.";
+export const PROVIDER_UNAVAILABLE_TITLE = translate("en", "preview.providerUnavailableTitle");
+export const PROVIDER_UNAVAILABLE_MESSAGE = translate("en", "preview.providerUnavailableMessage");
 
 // Exported so this exact decision is unit-testable without this project's
 // deliberately absent DOM-rendering test infra (see e.g.
@@ -60,8 +59,8 @@ export function isProviderUnavailable(oddsStatus: BetSelectionOddsStatus): boole
 // upstream) — this just appends the unit, never recomputes the value.
 // Exported so the requirement ("Potential win must include the currency")
 // is unit-testable without this project's absent DOM-rendering test infra.
-export function formatPotentialWin(potentialWin: number | null): string {
-  return potentialWin !== null ? `${formatAmount(potentialWin)} USDC` : "Not available";
+export function formatPotentialWin(potentialWin: number | null, locale: Locale = "en"): string {
+  return potentialWin !== null ? `${formatAmount(potentialWin)} USDC` : translate(locale, "preview.notAvailable");
 }
 
 // M4.1 — CLEAN PLAYER ODDS UX. The single "Odds" value a SINGLE preview
@@ -76,8 +75,8 @@ export function formatPotentialWin(potentialWin: number | null): string {
 // screenshot/typed number as a real offer. Exported so this is
 // unit-testable without this project's absent DOM-rendering test infra
 // (same pattern as formatPotentialWin above).
-export function formatSingleOdds(currentOdds: number | null): string {
-  return currentOdds !== null ? formatAmount(currentOdds) : "Not available";
+export function formatSingleOdds(currentOdds: number | null, locale: Locale = "en"): string {
+  return currentOdds !== null ? formatAmount(currentOdds) : translate(locale, "preview.notAvailable");
 }
 
 // Shared preview display — used by both BetTextForm (text flow) and
@@ -118,6 +117,8 @@ export function PreviewCard({
   onExcludeLeg?: (legIndex: number) => void;
   excludingLegIndex?: number | null;
 }) {
+  const { locale, t } = useLocale();
+
   if (preview.type === "SINGLE") {
     const selection = preview.selections[0];
     const fullEventName = formatFullEventName(selection.event, selection.homeTeamName, selection.awayTeamName);
@@ -141,13 +142,13 @@ export function PreviewCard({
         className="rounded-2xl p-4"
         style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
       >
-        <h3 className="mb-3 text-base font-bold text-white">Single</h3>
-        <PreviewRow label="Sport" value={selection.sport} />
-        <PreviewRow label="Event" value={fullEventName} wrap />
-        {selection.competitionName && <PreviewRow label="Competition" value={selection.competitionName} wrap />}
-        {eventDateTime && <PreviewRow label="Date" value={eventDateTime} />}
+        <h3 className="mb-3 text-base font-bold text-white">{t("bet.single")}</h3>
+        <PreviewRow label={t("preview.sport")} value={selection.sport} />
+        <PreviewRow label={t("preview.event")} value={fullEventName} wrap />
+        {selection.competitionName && <PreviewRow label={t("preview.competition")} value={selection.competitionName} wrap />}
+        {eventDateTime && <PreviewRow label={t("preview.date")} value={eventDateTime} />}
         <PreviewRow
-          label="Selection"
+          label={t("preview.selection")}
           value={normalizeSelectionToEnglish({
             selection: selection.selection,
             sport: selection.sport,
@@ -159,17 +160,17 @@ export function PreviewCard({
           })}
           wrap
         />
-        <PreviewRow label="Stake" value={formatAmount(preview.stake)} />
+        <PreviewRow label={t("preview.stake")} value={formatAmount(preview.stake)} />
         <PreviewRow
-          label="Odds"
-          value={formatSingleOdds(selection.currentOdds)}
+          label={t("preview.odds")}
+          value={formatSingleOdds(selection.currentOdds, locale)}
           emphasis="prominent"
           last={!oddsAvailable}
         />
         {oddsAvailable && (
           <PreviewRow
-            label="Potential win"
-            value={formatPotentialWin(preview.potentialWin)}
+            label={t("preview.potentialWin")}
+            value={formatPotentialWin(preview.potentialWin, locale)}
             emphasis="hero"
             last
           />
@@ -209,19 +210,32 @@ export function PreviewCard({
       className="rounded-2xl p-4"
       style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
     >
-      <h3 className="mb-2 text-base font-bold text-white">Express ×{preview.selections.length}</h3>
+      <h3 className="mb-2 text-base font-bold text-white">
+        {t("preview.expressCount", { count: String(preview.selections.length) })}
+      </h3>
 
       {/* Decision context (the player is about to confirm) — every
           selection is always shown, never truncated, regardless of count.
           Sector 1 (ADR-0002) — no longer delegated to SelectionList (a
           shared component also used by Dashboard/History surfaces this
           sector must not touch): mapped here directly, still through the
-          exact same unmodified SelectionRow, so a per-leg Remove
-          affordance can be attached only in this preview context. */}
+          exact same SelectionRow (its own display logic/decisions
+          unmodified — only the localization closure pass added optional,
+          plain-string oddsLabel/statusBadgeLabel presentation overrides),
+          so a per-leg Remove affordance can be attached only in this
+          preview context. oddsLabel/statusBadgeLabel are resolved here,
+          via the Mini App's own i18n layer — SelectionRow itself still
+          imports no localization mechanism, so the operator dashboard's
+          own (unrelated) callers are completely unaffected. */}
       <div className="space-y-1.5">
         {preview.selections.map((selection, index) => (
           <div key={selections[index].id}>
-            <SelectionRow selection={selections[index]} showStatus />
+            <SelectionRow
+              selection={selections[index]}
+              showStatus
+              oddsLabel={t("preview.odds")}
+              statusBadgeLabel={getOddsStatusBadge(selection.oddsStatus, locale).label}
+            />
             {onExcludeLeg && isRecoverableLeg(selection) && (
               <button
                 type="button"
@@ -234,7 +248,7 @@ export function PreviewCard({
                   border: "1px solid rgba(248,113,113,0.18)",
                 }}
               >
-                {excludingLegIndex === index ? "Removing…" : "Remove and recalculate"}
+                {excludingLegIndex === index ? t("preview.removing") : t("preview.removeAndRecalculate")}
               </button>
             )}
           </div>
@@ -245,15 +259,15 @@ export function PreviewCard({
         className="mt-3 rounded-xl p-2.5"
         style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
       >
-        <PreviewRow label="Stake" value={formatAmount(preview.stake)} />
+        <PreviewRow label={t("preview.stake")} value={formatAmount(preview.stake)} />
         <PreviewRow
-          label="Total odds"
-          value={preview.totalOdds !== null ? formatAmount(preview.totalOdds) : "Not available"}
+          label={t("preview.totalOdds")}
+          value={preview.totalOdds !== null ? formatAmount(preview.totalOdds) : t("preview.notAvailable")}
           emphasis="prominent"
         />
         <PreviewRow
-          label="Potential win"
-          value={formatPotentialWin(preview.potentialWin)}
+          label={t("preview.potentialWin")}
+          value={formatPotentialWin(preview.potentialWin, locale)}
           emphasis="hero"
           last
         />
@@ -317,6 +331,8 @@ function PreviewRow({
 // instead of one box per leg (each leg's own badge is already shown in
 // PreviewCard above).
 export function OddsStatus({ preview }: { preview: BetPreview }) {
+  const { t } = useLocale();
+
   if (preview.type === "EXPRESS") {
     return <ExpressOddsSummary preview={preview} />;
   }
@@ -324,7 +340,7 @@ export function OddsStatus({ preview }: { preview: BetPreview }) {
   const selection = preview.selections[0];
 
   if (isSingleSelectionOddsUnavailable(selection)) {
-    return <p className="mt-2 text-xs leading-relaxed text-slate-400">{ODDS_UNAVAILABLE_NOTICE}</p>;
+    return <p className="mt-2 text-xs leading-relaxed text-slate-400">{t("preview.oddsUnavailableNotice")}</p>;
   }
 
   // VERIFIED and ODDS_CHANGED are both a normal, confirmable selection —
@@ -334,6 +350,8 @@ export function OddsStatus({ preview }: { preview: BetPreview }) {
 }
 
 function ExpressOddsSummary({ preview }: { preview: BetPreview }) {
+  const { t } = useLocale();
+
   // A blocking status on any leg (NOT_FOUND/UNAVAILABLE/PENDING) blocks the
   // whole slip — mirrors canConfirmBetSlip.ts's hasUnverifiedOddsStatus
   // exactly, and the backend's own verifyPreviewFreshness.ts priority order
@@ -344,11 +362,11 @@ function ExpressOddsSummary({ preview }: { preview: BetPreview }) {
   // generic "could not be verified" wording, which reads as a matching
   // failure rather than an outage.
   if (preview.selections.some((selection) => isProviderUnavailable(selection.oddsStatus))) {
-    return <StatusBox tone="warning" label={PROVIDER_UNAVAILABLE_TITLE} description={PROVIDER_UNAVAILABLE_MESSAGE} />;
+    return <StatusBox tone="warning" label={t("preview.providerUnavailableTitle")} description={t("preview.providerUnavailableMessage")} />;
   }
 
   if (hasUnverifiedOddsStatus(preview.selections)) {
-    return <StatusBox tone="warning" label="Odds could not be verified" description={ODDS_UNVERIFIED_MESSAGE} />;
+    return <StatusBox tone="warning" label={t("preview.oddsUnverifiedTitle")} description={t("preview.oddsUnverifiedMessage")} />;
   }
 
   // M4.1 — every leg is VERIFIED/ODDS_CHANGED (both real, confirmable,

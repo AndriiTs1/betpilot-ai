@@ -17,6 +17,7 @@ import {
 } from "./betConfirmApi";
 import { OddsStatus, PreviewCard } from "./BetPreviewCard";
 import { canConfirmBetSlip, getConfirmButtonLabel, isOddsUnavailableForConfirm } from "./canConfirmBetSlip";
+import { useLocale } from "./LocaleProvider";
 
 interface BetTextFormProps {
   onBack: () => void;
@@ -67,6 +68,7 @@ type BetTypeTab = "single" | "express";
 // rendered; `preview !== null` is the single source of truth for whether a
 // still-usable previewToken exists (never duplicated elsewhere).
 export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
+  const { t, locale } = useLocale();
   const [message, setMessage] = useState("");
   const [betTypeTab, setBetTypeTab] = useState<BetTypeTab>("single");
   const [phase, setPhase] = useState<FormPhase>("editing");
@@ -178,7 +180,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
       // protection every other preview attempt already has.
       setPhase("editing");
       setIsTimeoutError(isAiTimeoutFailure(result.failure));
-      setError(getBetPreviewErrorMessage(result.failure));
+      setError(getBetPreviewErrorMessage(result.failure, locale));
       triggerHaptic("error");
       return;
     }
@@ -211,7 +213,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
       tg = window.Telegram?.WebApp;
       initDataValue = tg?.initData ?? "";
     } catch {
-      setError("Telegram WebApp is unavailable.");
+      setError(t("error.telegramUnavailable"));
       return;
     }
     if (!tg) return;
@@ -235,7 +237,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     setExcludingLegIndex(null);
 
     if (!result.ok) {
-      setError(getBetPreviewErrorMessage(result.failure));
+      setError(getBetPreviewErrorMessage(result.failure, locale));
       triggerHaptic("error");
 
       // The current preview's token is genuinely no longer usable — same
@@ -285,7 +287,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
       tg = window.Telegram?.WebApp;
       initDataValue = tg?.initData ?? "";
     } catch {
-      setError("Telegram WebApp is unavailable.");
+      setError(t("error.telegramUnavailable"));
       return;
     }
 
@@ -311,7 +313,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
       inFlightRef.current = false;
       confirmControllerRef.current = null;
       setPhase("ready");
-      setError("Something went wrong. Please try again.");
+      setError(t("error.generic"));
       return;
     }
 
@@ -353,7 +355,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
         setPhase("ready");
       }
 
-      setError(getBetConfirmErrorMessage(result.failure));
+      setError(getBetConfirmErrorMessage(result.failure, locale));
       triggerHaptic("error");
       return;
     }
@@ -372,16 +374,16 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
         type="button"
         onClick={onBack}
         className="text-sm font-medium text-slate-400"
-        aria-label="Back"
+        aria-label={t("bet.back")}
       >
-        ‹ Back
+        ‹ {t("bet.back")}
       </button>
 
-      <p className="mt-3 text-xl font-bold text-white">Place a bet</p>
+      <p className="mt-3 text-xl font-bold text-white">{t("bet.placeBet")}</p>
 
       <div
         role="tablist"
-        aria-label="Bet type"
+        aria-label={t("bet.typeAriaLabel")}
         className="mt-3 flex items-center gap-1 rounded-2xl p-1"
         style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}
       >
@@ -397,7 +399,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
               : { background: "transparent", color: "#94A3B8" }
           }
         >
-          Ординар
+          {t("bet.single")}
         </button>
         <button
           type="button"
@@ -411,7 +413,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
               : { background: "transparent", color: "#94A3B8" }
           }
         >
-          Экспресс
+          {t("bet.express")}
         </button>
       </div>
 
@@ -421,8 +423,8 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
             value={message}
             onChange={(event) => handleMessageChange(event.target.value)}
             maxLength={MESSAGE_MAX_LENGTH}
-            placeholder="Команда, исход, ставка"
-            aria-label="Bet message"
+            placeholder={t("bet.placeholder")}
+            aria-label={t("bet.messageAriaLabel")}
             disabled={phase === "previewing"}
             className="w-full resize-none rounded-2xl p-3 text-base text-white placeholder:text-slate-500"
             style={{
@@ -440,14 +442,14 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
             type="button"
             onClick={handlePreviewSubmit}
             disabled={!canSubmitPreview}
-            aria-label={isTimeoutError ? "Try again" : "Preview bet"}
+            aria-label={isTimeoutError ? t("bet.tryAgain") : t("bet.preview")}
             className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
             style={{
               background: "#60E84A",
               color: "#04170C",
             }}
           >
-            {phase === "previewing" ? "Checking bet..." : isTimeoutError ? "Try again" : "Preview bet"}
+            {phase === "previewing" ? t("bet.checking") : isTimeoutError ? t("bet.tryAgain") : t("bet.preview")}
           </button>
 
           {/* Step 15J.3 — a dedicated, non-alarming block for AI_TIMEOUT:
@@ -463,10 +465,10 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
               style={{ background: "rgba(255,255,255,0.03)", border: "1px solid #E8B84A33" }}
             >
               <p className="text-sm font-semibold" style={{ color: "#E8B84A" }}>
-                AI service timed out
+                {t("bet.timeoutTitle")}
               </p>
               <p className="mt-1 text-xs leading-relaxed text-slate-400">
-                Your bet was not rejected. The analysis took too long. Please try again.
+                {t("bet.timeoutBody")}
               </p>
             </div>
           ) : (
@@ -500,14 +502,14 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
               type="button"
               onClick={handleConfirm}
               disabled={!canConfirm}
-              aria-label="Confirm bet"
+              aria-label={t("confirm.confirmBet")}
               className="mt-2.5 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
               style={{
                 background: "#60E84A",
                 color: "#04170C",
               }}
             >
-              {getConfirmButtonLabel(phase === "confirming", preview)}
+              {getConfirmButtonLabel(phase === "confirming", preview, locale)}
             </button>
           )}
 
@@ -515,11 +517,11 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
             type="button"
             onClick={handleEditMessage}
             disabled={phase === "confirming"}
-            aria-label="Edit message"
+            aria-label={t("bet.editMessage")}
             className="mt-2.5 min-h-11 w-full rounded-2xl text-[15px] font-medium text-slate-400 disabled:opacity-50"
             style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
           >
-            Edit message
+            {t("bet.editMessage")}
           </button>
         </div>
       )}

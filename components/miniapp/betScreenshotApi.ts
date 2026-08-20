@@ -1,6 +1,8 @@
 import { isBetPreviewSuccess, type BetPreviewSuccess } from "./betPreviewApi";
 
 import { isTelegramAuthErrorReason, getTelegramAuthErrorMessage } from "./telegramAuthError";
+import { translate } from "@/lib/i18n/translations";
+import type { Locale } from "@/lib/i18n/locale";
 
 // Full-screen-screenshot support — the server-side pipeline this timeout
 // bounds can now involve up to four sequential Claude-backed stages for a
@@ -135,40 +137,46 @@ export async function fetchBetScreenshotPreview(
   return { ok: true, data: body };
 }
 
-export function getBetScreenshotErrorMessage(failure: BetScreenshotFailure): string {
-  if (failure.kind === "network") return "Unable to connect. Check your internet connection.";
-  if (failure.kind === "timeout") return "The request took too long. Please try again.";
-  if (failure.kind === "invalid_response") return "Something went wrong. Please try again.";
+// Localization completion pass — same "locale defaults to en" convention as
+// getBetPreviewErrorMessage (betPreviewApi.ts) — zero behavior change for
+// any pre-existing call site/test that doesn't pass a locale; every UI call
+// site now explicitly passes the player's real current locale. Every
+// failure code, and the OCR/parser pipeline that produces it, is completely
+// untouched — this is presentation text for an already-computed code only.
+export function getBetScreenshotErrorMessage(failure: BetScreenshotFailure, locale: Locale = "en"): string {
+  if (failure.kind === "network") return translate(locale, "error.network");
+  if (failure.kind === "timeout") return translate(locale, "error.timeout");
+  if (failure.kind === "invalid_response") return translate(locale, "error.generic");
 
   if (isTelegramAuthErrorReason(failure.code)) {
-    return getTelegramAuthErrorMessage(failure.code);
+    return getTelegramAuthErrorMessage(failure.code, locale);
   }
 
   switch (failure.code) {
     case "PLAYER_NOT_FOUND":
-      return "Your player account was not found.";
+      return translate(locale, "error.playerNotFound");
     case "MISSING_FILE":
-      return "Please choose an image first.";
+      return translate(locale, "error.missingFile");
     case "EMPTY_FILE":
-      return "That file is empty. Please choose a different image.";
+      return translate(locale, "error.emptyFile");
     case "FILE_TOO_LARGE":
-      return "That image is too large (max 10 MB). Please choose a smaller file.";
+      return translate(locale, "error.fileTooLarge");
     case "UNSUPPORTED_FILE_TYPE":
-      return "Unsupported file type. Please use a JPEG, PNG, or WEBP image.";
+      return translate(locale, "error.unsupportedFileType");
     case "INVALID_IMAGE_SIGNATURE":
-      return "That file doesn't look like a valid image. Please choose a different file.";
+      return translate(locale, "error.invalidImageSignature");
     case "IMAGE_TOO_LARGE":
-      return "That image's resolution is too large. Please crop it to the bet slip and try again.";
+      return translate(locale, "error.imageTooLarge");
     case "AI_TIMEOUT":
-      return "Recognition took too long. Please try again.";
+      return translate(locale, "error.aiTimeoutScreenshot");
     case "AI_UNAVAILABLE":
     case "AI_NOT_CONFIGURED":
-      return "Bet recognition is temporarily unavailable. Please try again later.";
+      return translate(locale, "error.aiUnavailable");
     // SCREENSHOT QA-CORE S3 — OCR genuinely found no legible text at all
     // (distinct from IMAGE_NOT_RECOGNIZED below, where OCR succeeded but the
     // bet itself couldn't be confidently extracted).
     case "OCR_NO_TEXT":
-      return "We couldn't read enough text from this image. Try a clearer screenshot.";
+      return translate(locale, "error.ocrNoText");
     case "IMAGE_NOT_RECOGNIZED":
       // SCREENSHOT QA-CORE S3 — `detail` (when present) is the parser's own
       // already-safe rejection code (numeric_mismatch/market_mismatch),
@@ -177,14 +185,14 @@ export function getBetScreenshotErrorMessage(failure: BetScreenshotFailure): str
       // slip, or a schema/tool-call failure with no finer-grained code)
       // keeps today's existing, still-accurate message.
       if (failure.detail === "numeric_mismatch") {
-        return "We spotted more than one possible stake or odds value on this screenshot. Please make sure only your actual bet is visible, or enter it manually.";
+        return translate(locale, "error.numericMismatch");
       }
       if (failure.detail === "market_mismatch") {
-        return "We couldn't confidently match the selection on this screenshot. Please try a clearer screenshot or enter the bet manually.";
+        return translate(locale, "error.marketMismatch");
       }
-      return "We couldn't recognize a bet slip in this image. Please try a clearer screenshot.";
+      return translate(locale, "error.imageNotRecognized");
     case "INCOMPLETE_BET_DATA":
-      return "We could only partially read this bet slip. Please try a clearer screenshot.";
+      return translate(locale, "error.incompleteBetData");
     case "INVALID_BET_SLIP":
       // SCREENSHOT QA-CORE S3 — confirmed production defect (QA-2): every
       // BetSlipValidationErrorCode used to share this one message, even
@@ -192,11 +200,11 @@ export function getBetScreenshotErrorMessage(failure: BetScreenshotFailure): str
       // count. `detail` already carried the real code — see route.ts — it
       // was simply never read here until now.
       if (failure.detail === "MARKET_INTENT_UNRECONCILED") {
-        return "We couldn't confirm which team or match your selection refers to. Please try again or enter the bet manually.";
+        return translate(locale, "error.marketIntentUnreconciled");
       }
-      return "This bet doesn't have a valid number of selections. Please try again.";
+      return translate(locale, "error.invalidBetSlip");
     case "INTERNAL_ERROR":
     default:
-      return "Something went wrong. Please try again.";
+      return translate(locale, "error.generic");
   }
 }

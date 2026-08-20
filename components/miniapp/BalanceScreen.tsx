@@ -1,3 +1,5 @@
+import { useLocale } from "./LocaleProvider";
+
 interface BalanceScreenProps {
   creditLimit: string;
   availableCredit: string;
@@ -23,12 +25,14 @@ export default function BalanceScreen({
   exposure,
   pendingExposure,
 }: BalanceScreenProps) {
+  const { t } = useLocale();
+
   return (
     <div className="grid grid-cols-2 gap-3">
-      <MiniStat label="Доступно" value={availableCredit} />
-      <MiniStat label="Лимит" value={creditLimit} />
-      <MiniStat label="В игре" value={exposure} />
-      <MiniStat label="В ожидании" value={pendingExposure} />
+      <MiniStat label={t("balance.available")} value={availableCredit} />
+      <MiniStat label={t("balance.limit")} value={creditLimit} />
+      <MiniStat label={t("balance.exposure")} value={exposure} />
+      <MiniStat label={t("balance.pending")} value={pendingExposure} />
     </div>
   );
 }

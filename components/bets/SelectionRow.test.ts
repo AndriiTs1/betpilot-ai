@@ -76,3 +76,45 @@ test("source: the odds-row gap was tightened (mt-1.5 -> mt-1) for all three odds
   assert.equal((source.match(/mt-1 (flex items-baseline gap-1\.5|text-xs text-slate-500)/g) ?? []).length, 3);
   assert.equal(source.includes("mt-1.5"), false, "old, looser odds-row gap must be gone");
 });
+
+// ---------------------------------------------------------------------
+// Localization closure pass — SelectionRow stays a generic/shared
+// component (Mini App Preview AND the operator dashboard's Pending
+// Queue/Active Bets/History all render through it) and imports no
+// localization mechanism itself. oddsLabel/statusBadgeLabel are optional,
+// plain-string presentation overrides only the Mini App's own
+// BetPreviewCard.tsx supplies (via lib/i18n); every other caller —
+// including every operator/dashboard surface — omits them and keeps this
+// row's exact original English presentation, unchanged, with no code
+// changes required on their part.
+// ---------------------------------------------------------------------
+
+test("source: SelectionRow imports no localization mechanism — no LocaleProvider/useLocale/translate", () => {
+  assert.equal(source.includes("LocaleProvider"), false);
+  assert.equal(source.includes("useLocale"), false);
+  assert.equal(/from ".*i18n/.test(source), false);
+});
+
+test("source: oddsLabel/statusBadgeLabel are optional props defaulting to the original English presentation — no default-behavior change for any existing (dashboard-included) caller", () => {
+  assert.match(source, /oddsLabel\?: string/);
+  assert.match(source, /statusBadgeLabel\?: string/);
+  assert.match(source, /oddsLabel = "Odds"/);
+});
+
+test("source: the odds row's three branches (prominent/unavailable/plain) all render the oddsLabel prop, never a hardcoded 'Odds' literal", () => {
+  assert.match(source, /<span className="text-xs text-slate-500">\{oddsLabel\}<\/span>/);
+  assert.match(source, /<div className="mt-1 text-xs text-slate-500">\{oddsLabel\}: —<\/div>/);
+  assert.match(source, /\{oddsLabel\}: \{presentation\.odds !== null \? formatAmount\(presentation\.odds\) : "—"\}/);
+  assert.equal(source.includes(">Odds<"), false);
+  assert.equal(source.includes(">Odds: —<"), false);
+});
+
+test("source: statusBadgeLabel only ever overrides the badge's .label — color still comes from getOddsStatusBadge, and whether a badge shows at all is still gated by showStatus/isConfirmableStatus, both completely unchanged", () => {
+  assert.match(
+    source,
+    /const statusBadge =\s*showStatus && !isConfirmableStatus\s*\? \{ \.\.\.getOddsStatusBadge\(selection\.oddsStatus\), \.\.\.\(statusBadgeLabel \? \{ label: statusBadgeLabel \} : \{\}\) \}\s*: null;/,
+  );
+  // getOddsStatusBadge is still called with no locale argument — defaults
+  // to "en" exactly as before this pass, for every caller.
+  assert.match(source, /getOddsStatusBadge\(selection\.oddsStatus\)/);
+});

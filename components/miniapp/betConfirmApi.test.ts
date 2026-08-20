@@ -390,3 +390,22 @@ test("getBetConfirmErrorMessage: odds_changed has a defensive fallback message e
   assert.equal(typeof message, "string");
   assert.ok(message.length > 0);
 });
+
+// Localization completion pass — same "locale defaults to en" convention
+// proven throughout this file's own existing (locale-less) calls above;
+// passing "ru" explicitly returns real Russian text for the same failure.
+test("getBetConfirmErrorMessage: locale='ru' returns Russian text, distinct from the default English", () => {
+  const en = getBetConfirmErrorMessage({ kind: "network" });
+  const ru = getBetConfirmErrorMessage({ kind: "network" }, "ru");
+  assert.notEqual(ru, en);
+  assert.equal(ru, "Не удалось подключиться. Проверьте интернет-соединение.");
+
+  const enPlayerNotFound = getBetConfirmErrorMessage({ kind: "http", code: "PLAYER_NOT_FOUND" });
+  const ruPlayerNotFound = getBetConfirmErrorMessage({ kind: "http", code: "PLAYER_NOT_FOUND" }, "ru");
+  assert.notEqual(ruPlayerNotFound, enPlayerNotFound);
+  assert.equal(ruPlayerNotFound, "Не удалось найти ваш игровой аккаунт.");
+});
+
+test("getBetConfirmErrorMessage: aborted stays the empty string regardless of locale — never a translated placeholder", () => {
+  assert.equal(getBetConfirmErrorMessage({ kind: "aborted" }, "ru"), "");
+});

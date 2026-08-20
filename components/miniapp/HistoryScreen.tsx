@@ -4,6 +4,7 @@ import { SportIcon, ExpressIcon } from "./sportIcons";
 import { formatBetDate } from "./formatBetDate";
 import type { RecentBet } from "./types";
 import { mapBetForDisplay } from "@/lib/bets/mapBetForDisplay";
+import { useLocale } from "./LocaleProvider";
 
 interface HistoryScreenProps {
   recentBets: RecentBet[];
@@ -32,15 +33,16 @@ export const FINAL_STATUSES = new Set([
 ]);
 
 export default function HistoryScreen({ recentBets }: HistoryScreenProps) {
+  const { t } = useLocale();
   const finishedBets = recentBets.filter((bet) => FINAL_STATUSES.has(bet.status));
 
   return (
     <div>
-      <h2 className="text-center text-xl font-semibold">История</h2>
+      <h2 className="text-center text-xl font-semibold">{t("history.title")}</h2>
 
       {finishedBets.length === 0 ? (
         <p className="mt-3 text-center text-sm text-slate-400">
-          Здесь будут отображаться завершённые ставки.
+          {t("history.emptyState")}
         </p>
       ) : (
         <div className="mt-4 space-y-3.5">

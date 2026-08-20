@@ -255,3 +255,32 @@ test("source: BetTicket itself is imported and invoked exactly as before — no 
   );
   assert.ok(betTicketCall, "expected BetTicket to still be called with exactly ticket/onDone/onViewHistory, nothing added or removed");
 });
+
+// ---------------------------------------------------------------------
+// Localization foundation — home screen strings must come from the
+// centralized translation dictionary (lib/i18n/translations.ts) via
+// useLocale()'s t(), never a hardcoded literal, so a locale switch is
+// reflected immediately with no per-string cache to invalidate.
+// ---------------------------------------------------------------------
+
+test("BetScreen: home-screen strings are translated via t(), not hardcoded Russian literals", () => {
+  const source = readFileSync(fileURLToPath(new URL("./BetScreen.tsx", import.meta.url)), "utf8");
+
+  assert.match(source, /import \{ useLocale \} from "\.\/LocaleProvider";/);
+  assert.match(source, /\{t\("home\.aiOnline"\)\}/);
+  assert.match(source, /\{t\("home\.ready"\)\}/);
+  assert.match(source, /\{t\("home\.sendBet"\)\}/);
+  assert.match(source, /\{t\("home\.screenshotOrText"\)\}/);
+  assert.match(source, /\{t\("home\.aiWillCheck"\)\}/);
+  assert.match(source, /aria-label=\{t\("home\.sendBetAriaLabel"\)\}/);
+  assert.match(source, /label=\{t\("home\.available"\)\}/);
+  assert.match(source, /label=\{t\("home\.exposure"\)\}/);
+  assert.match(source, /label=\{t\("home\.pending"\)\}/);
+  assert.match(source, /\{t\("home\.lastActivity"\)\}/);
+  assert.match(source, /\{t\("home\.noActivityYet"\)\}/);
+  assert.match(source, /\{t\("home\.aiChecksNote"\)\}/);
+
+  assert.equal(source.includes('"Готов проверить вашу ставку"'), false);
+  assert.equal(source.includes('"Отправить ставку"'), false);
+  assert.equal(source.includes('"Доступно"'), false);
+});

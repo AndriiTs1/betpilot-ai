@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ScanLine, MessageSquareText } from "lucide-react";
+import { useLocale } from "./LocaleProvider";
 
 interface BetActionSheetProps {
   open: boolean;
@@ -21,6 +22,7 @@ export default function BetActionSheet({
   onSelectScreenshot,
   onSelectText,
 }: BetActionSheetProps) {
+  const { t } = useLocale();
   const [entered, setEntered] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -74,7 +76,7 @@ export default function BetActionSheet({
         ref={panelRef}
         role="dialog"
         aria-modal="true"
-        aria-label="Способ отправки ставки"
+        aria-label={t("sheet.ariaLabel")}
         tabIndex={-1}
         className={`relative w-full max-w-md rounded-t-3xl transition-transform duration-200 ease-out motion-reduce:transition-none ${
           entered ? "translate-y-0" : "translate-y-full"
@@ -89,7 +91,7 @@ export default function BetActionSheet({
       >
         <div className="mx-auto mt-3 h-1 w-10 rounded-full bg-slate-700" aria-hidden="true" />
 
-        <p className="px-5 pt-4 text-sm font-semibold text-white">Как отправить ставку?</p>
+        <p className="px-5 pt-4 text-sm font-semibold text-white">{t("sheet.title")}</p>
 
         <div className="mt-3 space-y-2 px-4">
           <button
@@ -99,7 +101,7 @@ export default function BetActionSheet({
             style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(145,190,220,0.10)" }}
           >
             <ScanLine size={22} strokeWidth={2} color="#60E84A" />
-            <span className="text-[15px] font-medium text-white">Отправить скриншот</span>
+            <span className="text-[15px] font-medium text-white">{t("sheet.sendScreenshot")}</span>
           </button>
 
           <button
@@ -109,7 +111,7 @@ export default function BetActionSheet({
             style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(145,190,220,0.10)" }}
           >
             <MessageSquareText size={22} strokeWidth={2} color="#60E84A" />
-            <span className="text-[15px] font-medium text-white">Написать ставку</span>
+            <span className="text-[15px] font-medium text-white">{t("sheet.sendText")}</span>
           </button>
         </div>
 
@@ -120,7 +122,7 @@ export default function BetActionSheet({
             className="w-full rounded-2xl py-3 text-center text-[15px] font-medium text-slate-400"
             style={{ background: "rgba(255,255,255,0.03)" }}
           >
-            Отмена
+            {t("sheet.cancel")}
           </button>
         </div>
       </div>

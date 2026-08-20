@@ -6,6 +6,9 @@ import { getOddsStatusBadge } from "@/lib/bets/oddsStatusBadge";
 import { formatAmount } from "@/lib/bets/formatAmount";
 import { getOddsPresentation } from "@/components/bets/SelectionRow";
 import { formatPotentialWin } from "./BetPreviewCard";
+import { useLocale } from "./LocaleProvider";
+import { translate, type TranslationDict } from "@/lib/i18n/translations";
+import type { Locale } from "@/lib/i18n/locale";
 
 // The signature post-submission screen (Stage 4.5G) — replaces the plain
 // BetConfirmedCard that used to live inline in BetScreen.tsx. Deliberately
@@ -151,6 +154,32 @@ export const STATUS_CONFIG: Record<
   },
 };
 
+// Localization completion pass — STATUS_CONFIG above stays exactly as it
+// was (canonical English badgeLabel/detail, still the icon/color source and
+// still what every pre-existing test asserts against). The actually
+// rendered text now comes from this parallel, locale-aware lookup instead —
+// same keys, translated. Kept as a separate function (not folded into
+// STATUS_CONFIG itself) specifically so STATUS_CONFIG's own contract/tests
+// never had to change.
+type TicketNamespaceKey = keyof TranslationDict["ticket"];
+
+const TICKET_STATUS_LABEL_KEYS: Record<BetTicketStatus, { badgeLabel: TicketNamespaceKey; detail: TicketNamespaceKey }> = {
+  submitted: { badgeLabel: "submittedLabel", detail: "submittedDetail" },
+  confirmed: { badgeLabel: "confirmedLabel", detail: "confirmedDetail" },
+  rejected: { badgeLabel: "rejectedLabel", detail: "rejectedDetail" },
+  settled_won: { badgeLabel: "wonLabel", detail: "wonDetail" },
+  settled_lost: { badgeLabel: "lostLabel", detail: "lostDetail" },
+  void: { badgeLabel: "voidLabel", detail: "voidDetail" },
+};
+
+export function getTicketStatusLabels(status: BetTicketStatus, locale: Locale): { badgeLabel: string; detail: string } {
+  const keys = TICKET_STATUS_LABEL_KEYS[status];
+  return {
+    badgeLabel: translate(locale, `ticket.${keys.badgeLabel}` as `ticket.${TicketNamespaceKey}`),
+    detail: translate(locale, `ticket.${keys.detail}` as `ticket.${TicketNamespaceKey}`),
+  };
+}
+
 // Row stagger is capped at 10 steps (25ms each = 250ms) so a future
 // many-leg PARLAY ticket can't push the total animation past the 500ms
 // budget — extra rows beyond the cap simply animate in together at the
@@ -207,7 +236,12 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
   { ticket, onDone, onViewHistory },
   ref,
 ) {
+  const { locale, t } = useLocale();
   const status = STATUS_CONFIG[ticket.status];
+  // Localization completion pass — STATUS_CONFIG (icon/color, and its own
+  // exact-tested English badgeLabel/detail) is unchanged; `labels` is the
+  // parallel, locale-aware text actually rendered below.
+  const labels = getTicketStatusLabels(ticket.status, locale);
   const StatusIcon = status.icon;
   const isParlay = ticket.selections.length > 1;
   const potentialWin = computeTicketPotentialWin(ticket.stake, ticket.totalOdds);
@@ -223,7 +257,7 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
       <div
         ref={ref}
         role="group"
-        aria-label={`Digital bet ticket, status: ${status.badgeLabel}`}
+        aria-label={t("ticket.digitalTicketAriaLabel", { status: labels.badgeLabel })}
         className="ticket-animate-in relative overflow-hidden rounded-3xl"
         style={{
           background: "linear-gradient(180deg, #0B121D 0%, #060A11 100%)",
@@ -254,9 +288,9 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
           <div className="ticket-check-animate flex items-center gap-1.5">
             <StatusIcon size={18} strokeWidth={2.5} color={status.color} aria-hidden="true" />
             <span className="text-[15px] font-bold" style={{ color: status.color }}>
-              {status.badgeLabel}
+              {labels.badgeLabel}
             </span>
-            <span className="text-[15px] text-slate-500">· {status.detail}</span>
+            <span className="text-[15px] text-slate-500">· {labels.detail}</span>
           </div>
 
           <p className="ticket-row-animate text-xs text-slate-500" style={{ animationDelay: ticketRowDelay(0) }}>
@@ -298,7 +332,7 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
                 <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                   {isParlay && (
                     <>
-                      <span>Leg {index + 1}</span>
+                      <span>{t("ticket.leg", { n: String(index + 1) })}</span>
                       <span aria-hidden="true">·</span>
                     </>
                   )}
@@ -316,7 +350,7 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
                 </p>
                 {statusBadge && (
                   <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
-                    <OddsStatusPill status={statusBadge} />
+                    <OddsStatusPill status={statusBadge} locale={locale} />
                   </div>
                 )}
               </div>
@@ -341,22 +375,22 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
             padding tightened (py-5 -> py-4), same reasoning as the Event
             section above. Stage M5.6: tightened again (py-4 -> py-3). */}
         <div className="px-5 py-3">
-          <FinancialRow label="Stake" value={formatAmount(ticket.stake)} delay={ticketRowDelay(financialRowStart)} />
+          <FinancialRow label={t("preview.stake")} value={formatAmount(ticket.stake)} delay={ticketRowDelay(financialRowStart)} />
           <FinancialRow
-            label={isParlay ? "Combined odds" : "Odds"}
-            value={ticket.totalOdds !== null ? formatAmount(ticket.totalOdds) : "Not provided"}
+            label={isParlay ? t("ticket.combinedOdds") : t("preview.odds")}
+            value={ticket.totalOdds !== null ? formatAmount(ticket.totalOdds) : t("preview.notProvided")}
             delay={ticketRowDelay(financialRowStart + 1)}
           />
           <FinancialRow
-            label="Potential win"
-            value={formatPotentialWin(potentialWin)}
+            label={t("preview.potentialWin")}
+            value={formatPotentialWin(potentialWin, locale)}
             delay={ticketRowDelay(financialRowStart + 2)}
             emphasize
             last={ticket.availableCredit == null}
           />
           {ticket.availableCredit != null && (
             <FinancialRow
-              label="Available credit"
+              label={t("ticket.availableCredit")}
               value={ticket.availableCredit}
               delay={ticketRowDelay(financialRowStart + 3)}
               muted
@@ -383,7 +417,7 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
           <TicketBarcode seed={ticket.id} />
           <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-slate-500">
             <Barcode size={12} strokeWidth={2} aria-hidden="true" />
-            Verified by BetPilot AI
+            {t("ticket.verifiedByBetPilot")}
           </p>
         </div>
       </div>
@@ -400,16 +434,16 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
         <button
           type="button"
           onClick={onDone}
-          aria-label="Done"
+          aria-label={t("ticket.done")}
           className="min-h-11 w-full rounded-2xl text-[15px] font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
           style={{ background: "#60E84A", color: "#04170C", outlineColor: "#60E84A" }}
         >
-          Done
+          {t("ticket.done")}
         </button>
         <button
           type="button"
           onClick={onViewHistory}
-          aria-label="View history"
+          aria-label={t("ticket.viewHistory")}
           className="min-h-11 w-full rounded-2xl text-[15px] font-medium text-slate-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
           style={{
             background: "rgba(255,255,255,0.03)",
@@ -417,7 +451,7 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
             outlineColor: "rgba(255,255,255,0.4)",
           }}
         >
-          View History
+          {t("ticket.viewHistory")}
         </button>
       </div>
     </div>
@@ -500,8 +534,8 @@ function FinancialRow({
 // odds-verification palette (lib/bets/oddsStatusBadge.ts), previously a
 // local copy duplicating BetPreviewCard.tsx's own STATUS_BADGE
 // byte-for-byte. Wording/colors are unchanged, only the definition moved.
-function OddsStatusPill({ status }: { status: string }) {
-  const { label, color } = getOddsStatusBadge(status);
+function OddsStatusPill({ status, locale }: { status: string; locale: Locale }) {
+  const { label, color } = getOddsStatusBadge(status, locale);
   return (
     <span
       className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium"

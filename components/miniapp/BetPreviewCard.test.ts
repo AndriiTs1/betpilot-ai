@@ -132,7 +132,7 @@ test("ODDS_UNAVAILABLE_NOTICE: never contains any of the old verbose warning cop
 // scrolling. No selection, label, or figure was removed — only the gaps
 // between them shrank.
 test("source: the EXPRESS heading-to-selection-list gap was tightened (h3 mb-3 -> mb-2, wrapper mt-4 removed)", () => {
-  assert.match(source, /<h3 className="mb-2 text-base font-bold text-white">Express ×\{preview\.selections\.length\}<\/h3>/);
+  assert.match(source, /<h3 className="mb-2 text-base font-bold text-white">\s*\{t\("preview\.expressCount", \{ count: String\(preview\.selections\.length\) \}\)\}\s*<\/h3>/);
 });
 
 test("source: the EXPRESS financial block's gap and internal padding were tightened (mt-4 -> mt-3, p-3 -> p-2.5)", () => {
@@ -142,4 +142,44 @@ test("source: the EXPRESS financial block's gap and internal padding were tighte
 
 test("source: PreviewRow's inter-row gap was tightened (mb-2 -> mb-1.5) — applies to both SINGLE and EXPRESS, since both share PreviewRow", () => {
   assert.match(source, /\$\{last \? "" : "mb-1\.5"\}`/);
+});
+
+// ---------------------------------------------------------------------
+// Localization closure pass — the EXPRESS branch's SelectionRow now
+// receives translated oddsLabel/statusBadgeLabel, resolved here via the
+// Mini App's own i18n layer (useLocale()'s t()/getOddsStatusBadge), so a
+// player's EXPRESS leg row is never left showing hardcoded English
+// ("Odds"/status badge) inside an otherwise-translated RU preview.
+// SelectionRow itself stays untouched/generic — see SelectionRow.test.ts's
+// own "imports no localization mechanism" proof.
+// ---------------------------------------------------------------------
+
+test("BetPreviewCard: EXPRESS SelectionRow rows receive oddsLabel from t(\"preview.odds\") and statusBadgeLabel from getOddsStatusBadge(..., locale)", () => {
+  assert.match(source, /import \{ getOddsStatusBadge \} from "@\/lib\/bets\/oddsStatusBadge";/);
+  assert.match(
+    source,
+    /<SelectionRow\s*\n\s*selection=\{selections\[index\]\}\s*\n\s*showStatus\s*\n\s*oddsLabel=\{t\("preview\.odds"\)\}\s*\n\s*statusBadgeLabel=\{getOddsStatusBadge\(selection\.oddsStatus, locale\)\.label\}\s*\n\s*\/>/,
+  );
+});
+
+// Behavioral proof (not just source-regex) of the actual required result:
+// RU renders "Коэффициент" + a translated status label; EN renders "Odds"
+// + the original English status label — exercising the exact same two
+// calls (translate("preview.odds", locale) via t(), getOddsStatusBadge(...,
+// locale)) BetPreviewCard.tsx's EXPRESS branch makes for each leg.
+test("BetPreviewCard EXPRESS leg localization: RU resolves 'Коэффициент' + translated status; EN resolves 'Odds' + the original English status", async () => {
+  const { translate } = await import("../../lib/i18n/translations");
+  const { getOddsStatusBadge } = await import("../../lib/bets/oddsStatusBadge");
+
+  assert.equal(translate("en", "preview.odds"), "Odds");
+  assert.equal(translate("ru", "preview.odds"), "Коэффициент");
+
+  const enBadge = getOddsStatusBadge("NOT_FOUND", "en");
+  const ruBadge = getOddsStatusBadge("NOT_FOUND", "ru");
+  assert.equal(enBadge.label, "Not found");
+  assert.equal(ruBadge.label, "Не найдено");
+  // Color must never depend on locale — same proof as
+  // localization.test.ts's own getOddsStatusBadge coverage, repeated here
+  // in the exact context this component actually calls it from.
+  assert.equal(enBadge.color, ruBadge.color);
 });

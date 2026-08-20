@@ -11,6 +11,7 @@ import type { AnyConfirmedBet } from "./betConfirmApi";
 import type { RecentBet } from "./types";
 import { SportIcon, ExpressIcon } from "./sportIcons";
 import { mapBetForDisplay } from "@/lib/bets/mapBetForDisplay";
+import { useLocale } from "./LocaleProvider";
 
 interface BetScreenProps {
   playerName: string;
@@ -95,6 +96,7 @@ export default function BetScreen({
   onBetConfirmed,
   onNavigateToHistory,
 }: BetScreenProps) {
+  const { t } = useLocale();
   const [isSheetOpen, setSheetOpen] = useState(false);
   const [isTextFormOpen, setTextFormOpen] = useState(false);
   const [isScreenshotFormOpen, setScreenshotFormOpen] = useState(false);
@@ -180,17 +182,17 @@ export default function BetScreen({
           style={{ color: "#60E84A" }}
         >
           <span className="h-1.5 w-1.5 rounded-full" style={{ background: "#60E84A" }} />
-          AI Online
+          {t("home.aiOnline")}
         </span>
       </div>
-      <p className="mt-1 text-sm text-slate-400">Готов проверить вашу ставку</p>
+      <p className="mt-1 text-sm text-slate-400">{t("home.ready")}</p>
 
       {/* Main action zone — the single primary CTA on this screen */}
       <button
         type="button"
         onClick={() => setSheetOpen(true)}
         aria-haspopup="dialog"
-        aria-label="Отправить ставку — скриншот или текст"
+        aria-label={t("home.sendBetAriaLabel")}
         className="mt-5 flex w-full flex-col items-center rounded-3xl px-6 py-7 text-center"
         style={{
           background: "linear-gradient(160deg, rgba(96,232,74,0.10), rgba(20,30,48,0.6))",
@@ -205,9 +207,9 @@ export default function BetScreen({
           <ScanLine size={28} strokeWidth={2} color="#60E84A" />
         </div>
 
-        <p className="mt-3 text-xl font-bold text-white">Отправить ставку</p>
-        <p className="mt-1 text-sm text-slate-300">Скриншот или текст</p>
-        <p className="mt-2 text-xs text-slate-500">AI проверит события, коэффициенты и сумму</p>
+        <p className="mt-3 text-xl font-bold text-white">{t("home.sendBet")}</p>
+        <p className="mt-1 text-sm text-slate-300">{t("home.screenshotOrText")}</p>
+        <p className="mt-2 text-xs text-slate-500">{t("home.aiWillCheck")}</p>
       </button>
 
       {/* Compact summary — one bar, not three separate cards */}
@@ -215,21 +217,21 @@ export default function BetScreen({
         className="mt-5 flex items-stretch justify-between rounded-2xl px-2 py-3"
         style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
       >
-        <SummaryItem label="Доступно" value={availableCredit} />
+        <SummaryItem label={t("home.available")} value={availableCredit} />
         <div className="w-px self-stretch" style={{ background: "rgba(255,255,255,0.08)" }} />
-        <SummaryItem label="В игре" value={exposure} />
+        <SummaryItem label={t("home.exposure")} value={exposure} />
         <div className="w-px self-stretch" style={{ background: "rgba(255,255,255,0.08)" }} />
-        <SummaryItem label="Ожидает" value={pendingExposure} />
+        <SummaryItem label={t("home.pending")} value={pendingExposure} />
       </div>
 
       {/* Last activity — at most two rows, full history lives in its own tab */}
       <div className="mt-5">
         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-          Последняя активность
+          {t("home.lastActivity")}
         </p>
 
         {recentActivity.length === 0 ? (
-          <p className="mt-2 text-sm text-slate-500">Здесь появятся ваши последние ставки</p>
+          <p className="mt-2 text-sm text-slate-500">{t("home.noActivityYet")}</p>
         ) : (
           <div className="mt-2 space-y-2">
             {recentActivity.map((bet) => {
@@ -272,7 +274,7 @@ export default function BetScreen({
       </div>
 
       <p className="mt-5 text-center text-xs text-slate-500">
-        AI проверяет коэффициенты перед подтверждением
+        {t("home.aiChecksNote")}
       </p>
 
       <BetActionSheet

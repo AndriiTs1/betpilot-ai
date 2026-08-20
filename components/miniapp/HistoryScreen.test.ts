@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { FINAL_STATUSES } from "./HistoryScreen";
 import { ACTIVE_STATUSES } from "./ActiveBetsScreen";
 import type { RecentBet } from "./types";
@@ -123,4 +125,14 @@ test("HistoryScreen: WIN/LOSS/VOID/REJECTED regression — still classified as f
 test("HistoryScreen: CONFIRMED/PENDING regression — still excluded from History, unchanged", () => {
   const bets = [bet({ id: "1", status: "PENDING" }), bet({ id: "2", status: "CONFIRMED" })];
   assert.deepEqual(historyBets(bets), []);
+});
+
+test("HistoryScreen: title/empty-state are translated via t(), never hardcoded literals — StatusBadge itself (shared with the operator dashboard) is untouched", () => {
+  const source = readFileSync(fileURLToPath(new URL("./HistoryScreen.tsx", import.meta.url)), "utf8");
+
+  assert.match(source, /import \{ useLocale \} from "\.\/LocaleProvider";/);
+  assert.match(source, /\{t\("history\.title"\)\}/);
+  assert.match(source, /\{t\("history\.emptyState"\)\}/);
+  assert.equal(source.includes('>История<'), false);
+  assert.match(source, /<StatusBadge status=\{bet\.status\} \/>/);
 });

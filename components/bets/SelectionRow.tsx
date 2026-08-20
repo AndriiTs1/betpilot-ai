@@ -33,6 +33,22 @@ interface SelectionRowProps {
   selection: DisplaySelection;
   legLabel?: string;
   showStatus?: boolean;
+  // Localization presentation overrides — deliberately plain strings, not
+  // a locale/translation-system prop. This component stays generic/shared
+  // (Mini App Preview/Ticket AND the operator dashboard's Pending Queue/
+  // Active Bets/History all render through it), so it never imports any
+  // localization mechanism itself — the caller (e.g. BetPreviewCard.tsx,
+  // via the Mini App's own i18n layer) resolves the real text and passes
+  // it down as data. Both default to this row's original English text, so
+  // every existing caller (dashboard included) that never passes them
+  // renders byte-for-byte exactly as before.
+  oddsLabel?: string;
+  // Overrides only the DISPLAYED TEXT of the status badge this row already
+  // decides (on its own, unchanged) whether to show at all — never the
+  // decision of whether one appears, and never its color (still sourced
+  // from getOddsStatusBadge below). Ignored when this row isn't showing a
+  // badge in the first place.
+  statusBadgeLabel?: string;
 }
 
 function toNumber(value: string | number | null | undefined): number | null {
@@ -79,7 +95,13 @@ export function getOddsPresentation(
   return { mode: "unavailable" };
 }
 
-export default function SelectionRow({ selection, legLabel, showStatus = true }: SelectionRowProps) {
+export default function SelectionRow({
+  selection,
+  legLabel,
+  showStatus = true,
+  oddsLabel = "Odds",
+  statusBadgeLabel,
+}: SelectionRowProps) {
   const odds = toNumber(selection.odds);
   const currentOdds = showStatus ? toNumber(selection.currentOdds) : null;
   // M4.1 — VERIFIED/ODDS_CHANGED are both the normal "ready to confirm"
@@ -89,7 +111,14 @@ export default function SelectionRow({ selection, legLabel, showStatus = true }:
   // (NOT_FOUND/UNAVAILABLE/PENDING) still shows a badge, explaining why
   // Confirm is disabled.
   const isConfirmableStatus = selection.oddsStatus === "VERIFIED" || selection.oddsStatus === "ODDS_CHANGED";
-  const statusBadge = showStatus && !isConfirmableStatus ? getOddsStatusBadge(selection.oddsStatus) : null;
+  // getOddsStatusBadge itself is still called with no locale (defaults to
+  // "en", same as before this change) — the color always comes from there;
+  // statusBadgeLabel (if supplied) only ever overrides the .label text on
+  // top of it, never whether a badge shows or what color it is.
+  const statusBadge =
+    showStatus && !isConfirmableStatus
+      ? { ...getOddsStatusBadge(selection.oddsStatus), ...(statusBadgeLabel ? { label: statusBadgeLabel } : {}) }
+      : null;
   const eventDateTime = formatEventDateTime(selection.eventStartTime);
 
   // Reuses statusBadge.color computed above (one source of truth for status
@@ -149,19 +178,19 @@ export default function SelectionRow({ selection, legLabel, showStatus = true }:
             // The one and only value a player sees: BetPilot's current
             // offer for this leg. No comparison, no second number.
             <div className="mt-1 flex items-baseline gap-1.5">
-              <span className="text-xs text-slate-500">Odds</span>
+              <span className="text-xs text-slate-500">{oddsLabel}</span>
               <span className="text-base font-bold" style={{ color: statusColor }}>
                 {formatAmount(presentation.value)}
               </span>
             </div>
           ) : presentation.mode === "unavailable" ? (
-            <div className="mt-1 text-xs text-slate-500">Odds: —</div>
+            <div className="mt-1 text-xs text-slate-500">{oddsLabel}: —</div>
           ) : (
             // Review-context only (showStatus=false) — the bet's own final,
             // already-accepted odds; unrelated to the preview/confirm-time
             // concerns above.
             <div className="mt-1 text-xs text-slate-500">
-              Odds: {presentation.odds !== null ? formatAmount(presentation.odds) : "—"}
+              {oddsLabel}: {presentation.odds !== null ? formatAmount(presentation.odds) : "—"}
             </div>
           )}
         </div>

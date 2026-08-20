@@ -17,6 +17,8 @@ import {
   getTelegramAuthErrorMessage,
 } from "@/components/miniapp/telegramAuthError";
 import { hasPendingBet } from "@/components/miniapp/hasPendingBet";
+import { useLocale } from "@/components/miniapp/LocaleProvider";
+import LanguageSwitcher from "@/components/miniapp/LanguageSwitcher";
 
 // Phase 1 — investor-demo end-to-end flow: while the player has at least
 // one PENDING bet, poll for the operator's confirm/reject decision every
@@ -27,6 +29,12 @@ const PENDING_BET_POLL_INTERVAL_MS = 5000;
 
 interface TelegramWebApp {
   initData: string;
+  // Localization foundation — Telegram's own already-parsed, UNVERIFIED
+  // convenience object (distinct from the raw `initData` string used for
+  // real HMAC auth verification, which this never touches). Read only for
+  // a first-visit UI-language default (see LocaleProvider.tsx's
+  // applyTelegramLanguageCode) — never for auth, never for bet parsing.
+  initDataUnsafe?: { user?: { language_code?: string } };
   viewportStableHeight: number;
   ready: () => void;
   expand: () => void;
@@ -82,6 +90,7 @@ type FetchState =
   | { status: "ready"; data: MeResponse };
 
 export default function MiniAppPage() {
+  const { applyTelegramLanguageCode } = useLocale();
   const [scriptReady, setScriptReady] = useState(false);
   const [screen, setScreen] = useState<"banner" | "data">("banner");
   const [fetchState, setFetchState] = useState<FetchState>({
@@ -251,6 +260,12 @@ export default function MiniAppPage() {
     tg.ready();
     tg.expand();
 
+    // Localization foundation — the one place tg.initDataUnsafe is actually
+    // populated by the time it's read (see LocaleProvider.tsx's own header
+    // for why LocaleProvider can't read this itself at mount time). A no-op
+    // if the player already has an explicit stored language choice.
+    applyTelegramLanguageCode(tg.initDataUnsafe?.user?.language_code);
+
     // setParams sets text+colors in one atomic native call — more reliable
     // across Telegram client versions than assigning .color/.textColor
     // directly (which didn't visibly take effect on a real device).
@@ -288,7 +303,7 @@ export default function MiniAppPage() {
 
     setScriptReady(true);
     loadData();
-  }, [loadData]);
+  }, [loadData, applyTelegramLanguageCode]);
 
   // Detach the MainButton and viewportChanged handlers on unmount — mirrors
   // the interval/fetch cleanup pattern used elsewhere in this app (e.g.
@@ -391,6 +406,8 @@ function BannerScreen({
   ready: boolean;
   viewportHeight: number | null;
 }) {
+  const { t } = useLocale();
+
   // Fallback to 100dvh when the Telegram SDK hasn't reported a height yet
   // (or reports 0) — e.g. opened outside Telegram, or before onReady fires.
   const containerHeight =
@@ -436,16 +453,16 @@ function BannerScreen({
           break in the rhythm instead of three evenly-spaced blocks. */}
       <div className="mt-7 flex flex-col items-center px-4 text-center">
         <h2 className="text-[26px] font-bold leading-[1.15] tracking-[-0.01em] text-white">
-          Ваш AI-ассистент
+          {t("banner.headlineLine1")}
           <br />
-          для ставок на спорт
+          {t("banner.headlineLine2")}
         </h2>
 
         <div className="mt-8 flex flex-wrap items-center justify-center gap-2">
           {[
-            { icon: "📷", label: "Отправьте купон или текст" },
-            { icon: "🔍", label: "Проверка коэффициентов" },
-            { icon: "✅", label: "Быстрое подтверждение" },
+            { icon: "📷", label: t("banner.feature1") },
+            { icon: "🔍", label: t("banner.feature2") },
+            { icon: "✅", label: t("banner.feature3") },
           ].map(({ icon, label }) => (
             <span
               key={label}
@@ -458,7 +475,7 @@ function BannerScreen({
         </div>
       </div>
 
-      {!ready && <p className="mt-8 text-sm text-slate-500">Загрузка...</p>}
+      {!ready && <p className="mt-8 text-sm text-slate-500">{t("banner.loading")}</p>}
     </div>
   );
 }
@@ -472,16 +489,17 @@ function DataScreen({
   onRetry: () => void;
   onBetConfirmed: (bet: AnyConfirmedBet) => void;
 }) {
+  const { t, locale } = useLocale();
   const [activeTab, setActiveTab] = useState<MiniAppTab>("bet");
 
   if (state.status === "loading") {
-    return <CenteredMessage text="Загрузка..." />;
+    return <CenteredMessage text={t("home.loading")} />;
   }
 
   if (state.status === "error") {
     if (state.reason === "not_registered") {
       return (
-        <CenteredMessage text="Вы ещё не зарегистрированы. Обратитесь к оператору." />
+        <CenteredMessage text={t("home.notRegistered")} />
       );
     }
 
@@ -490,24 +508,24 @@ function DataScreen({
     // components/miniapp/telegramAuthError.ts), only reopening through the
     // bot can.
     if (state.reason === "expired") {
-      return <CenteredMessage text={getTelegramAuthErrorMessage("expired")} />;
+      return <CenteredMessage text={getTelegramAuthErrorMessage("expired", locale)} />;
     }
 
     if (state.reason === "auth_invalid") {
       return (
-        <CenteredMessage text={getTelegramAuthErrorMessage("malformed")} />
+        <CenteredMessage text={getTelegramAuthErrorMessage("malformed", locale)} />
       );
     }
 
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-4 px-6 text-center">
-        <p className="text-slate-400">Не удалось загрузить данные.</p>
+        <p className="text-slate-400">{t("home.failedToLoad")}</p>
         <button
           type="button"
           onClick={onRetry}
           className="rounded-xl bg-blue-500 px-5 py-2 font-semibold text-white"
         >
-          Повторить
+          {t("home.retry")}
         </button>
       </div>
     );
@@ -517,7 +535,19 @@ function DataScreen({
 
   return (
     <div className="min-h-screen px-4 py-6 pb-24">
-      <WelcomeBanner playerName={data.player.name} />
+      {/* Global shell header — the language control sits here (not inside
+          BetScreen, near "AI Online") specifically because it's an
+          application-wide setting, not a bet-screen status: this row is
+          the one part of DataScreen shared by all four bottom-nav tabs, so
+          it stays visible and stable across tab switches instead of
+          disappearing on Active/History/Balance. Shares WelcomeBanner's own
+          existing top row height — no new full-width header band added. */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <WelcomeBanner playerName={data.player.name} />
+        </div>
+        <LanguageSwitcher />
+      </div>
 
       <div className="mt-4">
         {activeTab === "bet" && (

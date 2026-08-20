@@ -59,7 +59,7 @@ test("BetTextForm: an odds_changed confirm failure still stages the refreshed pr
 });
 
 test("BetTextForm: Confirm bet is gated ONLY on the Stage M4.5 unavailable-odds check, never on any odds-changed flag", () => {
-  assert.match(source, /\{!oddsUnavailable && \(\s*<button[\s\S]{0,300}aria-label="Confirm bet"/);
+  assert.match(source, /\{!oddsUnavailable && \(\s*<button[\s\S]{0,300}aria-label=\{t\("confirm\.confirmBet"\)\}/);
 });
 
 // Stage M5.4 — SINGLE-SCREEN CORE BET FLOW. Same action-area tightening as
@@ -67,8 +67,8 @@ test("BetTextForm: Confirm bet is gated ONLY on the Stage M4.5 unavailable-odds 
 // submission flows (both share this exact preview/Confirm/Edit structure).
 test("source: the action-area gap above Confirm bet/Edit message was tightened (mt-4 -> mt-3 wrapper, mt-3 -> mt-2.5 buttons)", () => {
   assert.match(source, /\{showPreviewBlock && preview && \(\s*<div className="mt-3">/);
-  assert.match(source, /aria-label="Confirm bet"\s*className="mt-2\.5 min-h-11 w-full/);
-  assert.match(source, /aria-label="Edit message"\s*className="mt-2\.5 min-h-11 w-full/);
+  assert.match(source, /aria-label=\{t\("confirm\.confirmBet"\)\}\s*className="mt-2\.5 min-h-11 w-full/);
+  assert.match(source, /aria-label=\{t\("bet\.editMessage"\)\}\s*className="mt-2\.5 min-h-11 w-full/);
 });
 
 // Clean top-of-screen pass: removes the secondary helper line under "Place a
@@ -80,10 +80,10 @@ test("BetTextForm: the removed 'Describe your bet...' helper line is gone and no
   assert.equal(source.includes("odds aren&apos;t required"), false);
 });
 
-test("BetTextForm: both bet-type segments (Ординар, Экспресс) render as a tablist right under the Place a bet title", () => {
+test("BetTextForm: both bet-type segments render as a tablist right under the Place a bet title (now localized, see the translation-keys test below for exact copy)", () => {
   assert.match(
     source,
-    /<p className="mt-3 text-xl font-bold text-white">Place a bet<\/p>\s*<div\s+role="tablist"[\s\S]{0,800}Ординар[\s\S]{0,800}Экспресс/,
+    /<p className="mt-3 text-xl font-bold text-white">\{t\("bet\.placeBet"\)\}<\/p>\s*<div\s+role="tablist"[\s\S]{0,800}\{t\("bet\.single"\)\}[\s\S]{0,800}\{t\("bet\.express"\)\}/,
   );
 });
 
@@ -98,4 +98,63 @@ test("BetTextForm: the bet-type tab is purely visual — never read by the previ
   assert.ok(submitFnMatch, "expected handlePreviewSubmit to be found");
   assert.equal(/betTypeTab/.test(submitFnMatch![1]), false);
   assert.match(submitFnMatch![1], /fetchBetPreview\(tg\.initData, message\.trim\(\)\)/);
+});
+
+// ---------------------------------------------------------------------
+// Localization foundation
+// ---------------------------------------------------------------------
+
+// Requirement 6 — bet-form labels update immediately on a locale switch:
+// proven by showing every one of the five named product strings is read
+// through t(), not a hardcoded literal, so re-render with a new `locale`
+// always reflects the current language (no per-string cache to invalidate).
+test("BetTextForm: Place a bet / bet-type labels / placeholder / Preview bet all come from centralized translation keys, never hardcoded literals", () => {
+  assert.match(source, /import \{ useLocale \} from "\.\/LocaleProvider";/);
+  assert.match(source, /const \{ t, locale \} = useLocale\(\);/);
+  assert.match(source, /\{t\("bet\.placeBet"\)\}/);
+  assert.match(source, /aria-label=\{t\("bet\.typeAriaLabel"\)\}/);
+  assert.match(source, /\{t\("bet\.single"\)\}/);
+  assert.match(source, /\{t\("bet\.express"\)\}/);
+  assert.match(source, /placeholder=\{t\("bet\.placeholder"\)\}/);
+  assert.match(source, /: t\("bet\.preview"\)/);
+
+  // "Place a bet" legitimately still appears in this file's own prose
+  // comments (naming the screen) — only the actual rendered JSX text node
+  // is checked, not the whole file.
+  assert.equal(source.includes('>Place a bet<'), false);
+  assert.equal(source.includes(">Ординар<"), false);
+  assert.equal(source.includes(">Экспресс<"), false);
+  assert.equal(source.includes('placeholder="Команда'), false);
+});
+
+// Requirement 12 — the player's own typed text must remain byte-for-byte
+// unchanged when the UI locale switches: `message`/`setMessage` (the only
+// state backing the textarea's value) is never read or written by t()/
+// useLocale, and the textarea's `value` prop stays bound to `message`
+// alone — only its `placeholder` (shown when message is empty) is
+// locale-driven.
+test("BetTextForm: switching UI locale can never rewrite/translate the player's typed message — message state is fully independent of t()/locale", () => {
+  assert.match(source, /<textarea\s*\n\s*value=\{message\}/);
+  assert.match(source, /onChange=\{\(event\) => handleMessageChange\(event\.target\.value\)\}/);
+
+  const handleMessageChangeMatch = source.match(/function handleMessageChange\(value: string\) \{([\s\S]*?)\n {2}\}/);
+  assert.ok(handleMessageChangeMatch, "expected handleMessageChange to be found");
+  assert.equal(/\bt\(|useLocale|locale/.test(handleMessageChangeMatch![1]), false);
+});
+
+// Requirement 13 — the parser/fetch payload carries the player's original
+// text verbatim; UI locale is never part of it. Already partly proven by
+// the "purely visual" test above (fetchBetPreview(tg.initData,
+// message.trim())) — this asserts the complementary fact that the
+// fetchBetPreview call ITSELF is never called with any t()/locale-derived
+// argument (handlePreviewSubmit's body legitimately references `locale`
+// elsewhere now, to localize the resulting error message on failure — that
+// is correct localization behavior, not a violation of this invariant).
+test("BetTextForm: the preview request payload is exactly (initData, trimmed message) — never mixed with the UI locale", () => {
+  const submitFnMatch = source.match(/async function handlePreviewSubmit\(\) \{([\s\S]*?)\n  \}/);
+  assert.ok(submitFnMatch, "expected handlePreviewSubmit to be found");
+  const fetchCallMatch = submitFnMatch![1].match(/const result = await fetchBetPreview\(tg\.initData, message\.trim\(\)\);/);
+  assert.ok(fetchCallMatch, "expected the fetchBetPreview call to be found");
+  assert.equal(/\bt\(|locale/.test(fetchCallMatch![0]), false);
+  assert.match(fetchCallMatch![0], /fetchBetPreview\(tg\.initData, message\.trim\(\)\)/);
 });

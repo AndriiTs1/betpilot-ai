@@ -308,3 +308,38 @@ test("fetchExpressLegExclusionPreview: a valid success body round-trips through 
     global.fetch = originalFetch;
   }
 });
+
+// ---------------------------------------------------------------------
+// Localization completion pass — `locale` defaults to "en" (every test
+// above passes none, and still asserts the exact original English text —
+// zero behavior change for any pre-existing caller). Passing "ru"
+// explicitly now returns real Russian text for the same failure code,
+// covering a representative sample across the network/timeout/generic and
+// per-code branches. The failure CODE (never the returned string) is what
+// selects the branch — locale only ever changes which language it's
+// rendered in.
+// ---------------------------------------------------------------------
+
+test("getBetPreviewErrorMessage: locale='ru' returns Russian text for network/timeout/generic failures", () => {
+  assert.equal(
+    getBetPreviewErrorMessage({ kind: "network" }, "ru"),
+    "Не удалось подключиться. Проверьте интернет-соединение.",
+  );
+  assert.equal(getBetPreviewErrorMessage({ kind: "timeout" }, "ru"), "Запрос выполнялся слишком долго. Попробуйте снова.");
+  assert.equal(getBetPreviewErrorMessage({ kind: "invalid_response" }, "ru"), "Что-то пошло не так. Попробуйте снова.");
+});
+
+test("getBetPreviewErrorMessage: locale='ru' returns Russian text for a specific http code (EVENT_NOT_FOUND)", () => {
+  const en = getBetPreviewErrorMessage({ kind: "http", code: "EVENT_NOT_FOUND" });
+  const ru = getBetPreviewErrorMessage({ kind: "http", code: "EVENT_NOT_FOUND" }, "ru");
+  assert.notEqual(ru, en);
+  assert.equal(ru, "Не удалось найти эту команду или матч. Проверьте написание и попробуйте снова.");
+});
+
+test("getBetPreviewErrorMessage: RATE_LIMITED interpolation works in both locales — the same retryAfterSeconds value, not translated as a number", () => {
+  const en = getBetPreviewErrorMessage({ kind: "http", code: "RATE_LIMITED", retryAfterSeconds: 42 });
+  const ru = getBetPreviewErrorMessage({ kind: "http", code: "RATE_LIMITED", retryAfterSeconds: 42 }, "ru");
+  assert.match(en, /42/);
+  assert.match(ru, /42/);
+  assert.notEqual(en, ru);
+});

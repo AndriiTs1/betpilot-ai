@@ -1,4 +1,6 @@
 import type { BetPreviewSelection, BetPreviewSuccess } from "./betPreviewApi";
+import { translate } from "@/lib/i18n/translations";
+import type { Locale } from "@/lib/i18n/locale";
 
 // Stage 12, Phase 4, Step 5 — extracted out of BetTextForm.tsx and
 // BetScreenshotForm.tsx, which had this exact condition duplicated
@@ -151,8 +153,13 @@ export function isOddsUnavailableForConfirm(preview: BetPreviewSuccess | null): 
 // in either form. `isConfirming` takes priority over the odds check so an
 // in-flight confirm request (started before, e.g., a 409 reconfirm changed
 // what's staged) never has its "Confirming..." label overwritten.
-export function getConfirmButtonLabel(isConfirming: boolean, preview: BetPreviewSuccess | null): string {
-  if (isConfirming) return "Confirming...";
-  if (hasUnresolvedSingleOdds(preview)) return "Odds unavailable";
-  return "Confirm bet";
+// Localization completion pass — `locale` defaults to "en" so every
+// pre-existing call site/test that doesn't pass one keeps getting the exact
+// same English label as before this pass; BetTextForm.tsx/
+// BetScreenshotForm.tsx now explicitly pass the player's real current
+// locale.
+export function getConfirmButtonLabel(isConfirming: boolean, preview: BetPreviewSuccess | null, locale: Locale = "en"): string {
+  if (isConfirming) return translate(locale, "confirm.confirming");
+  if (hasUnresolvedSingleOdds(preview)) return translate(locale, "confirm.oddsUnavailable");
+  return translate(locale, "confirm.confirmBet");
 }

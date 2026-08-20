@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Zap } from "lucide-react";
+import { useLocale } from "./LocaleProvider";
 
 interface WelcomeBannerProps {
   playerName: string;
@@ -17,6 +18,7 @@ type Phase = "visible" | "exiting" | "gone";
 // the parent without remounting this component or resetting its phase —
 // it never reappears from a tab switch, only from a fresh Mini App open.
 export default function WelcomeBanner({ playerName }: WelcomeBannerProps) {
+  const { t } = useLocale();
   const [phase, setPhase] = useState<Phase>("visible");
 
   useEffect(() => {
@@ -81,12 +83,12 @@ export default function WelcomeBanner({ playerName }: WelcomeBannerProps) {
               className="text-[10px] font-semibold uppercase tracking-wide"
               style={{ color: "rgba(96,232,74,0.65)" }}
             >
-              Online
+              {t("home.online")}
             </span>
           </div>
 
           <p className="mt-0.5 truncate text-[15px] font-semibold" style={{ color: "#F7F9FC" }}>
-            Добро пожаловать, {playerName}
+            {t("home.welcome", { name: playerName })}
           </p>
         </div>
       </div>

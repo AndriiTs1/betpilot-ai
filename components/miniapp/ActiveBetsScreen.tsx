@@ -5,6 +5,7 @@ import { formatBetDate } from "./formatBetDate";
 import { SportIcon, ExpressIcon } from "./sportIcons";
 import type { RecentBet } from "./types";
 import { mapBetForDisplay } from "@/lib/bets/mapBetForDisplay";
+import { useLocale } from "./LocaleProvider";
 
 interface ActiveBetsScreenProps {
   recentBets: RecentBet[];
@@ -26,7 +27,7 @@ export const ACTIVE_STATUSES = new Set(["PENDING", "CONFIRMED"]);
 // restyle. Sized to land at the same ~20px row height StatusBadge's plain
 // text already had (text-xs line-height 1rem + py-0.5's 0.25rem of
 // padding), so the row doesn't grow.
-function ActiveStatus({ status }: { status: string }) {
+function ActiveStatus({ status, confirmedLabel }: { status: string; confirmedLabel: string }) {
   if (status !== "CONFIRMED") {
     return <StatusBadge status={status} />;
   }
@@ -37,21 +38,22 @@ function ActiveStatus({ status }: { status: string }) {
       style={{ background: "rgba(96,165,250,0.14)", color: "#93c5fd" }}
     >
       <Check size={11} strokeWidth={2.5} aria-hidden="true" />
-      Confirmed
+      {confirmedLabel}
     </span>
   );
 }
 
 export default function ActiveBetsScreen({ recentBets }: ActiveBetsScreenProps) {
+  const { t } = useLocale();
   const activeBets = recentBets.filter((bet) => ACTIVE_STATUSES.has(bet.status));
 
   return (
     <div>
-      <h2 className="text-center text-xl font-semibold">Активные</h2>
+      <h2 className="text-center text-xl font-semibold">{t("active.title")}</h2>
 
       {activeBets.length === 0 ? (
         <p className="mt-3 text-center text-sm text-slate-400">
-          Здесь будут отображаться ставки, которые ещё не рассчитаны.
+          {t("active.emptyState")}
         </p>
       ) : (
         // space-y-3 -> space-y-3.5: +2px between cards, the low end of the
@@ -131,7 +133,7 @@ export default function ActiveBetsScreen({ recentBets }: ActiveBetsScreenProps) 
                       neighbors"), date pinned to the right edge. */}
                   <div className="grid grid-cols-[1fr_auto_1fr] items-center text-sm">
                     <span />
-                    <ActiveStatus status={bet.status} />
+                    <ActiveStatus status={bet.status} confirmedLabel={t("active.confirmedBadge")} />
                     <span className="justify-self-end text-slate-400">{formatBetDate(bet.createdAt)}</span>
                   </div>
                 </div>

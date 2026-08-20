@@ -2,18 +2,20 @@
 
 import { Activity, History, ScanText, Wallet, type LucideIcon } from "lucide-react";
 import type { MiniAppTab } from "./types";
+import { useLocale } from "./LocaleProvider";
+import type { TranslationKey } from "@/lib/i18n/translations";
 
 interface NavTab {
   key: MiniAppTab;
-  label: string;
+  labelKey: TranslationKey;
   icon: LucideIcon;
 }
 
 const TABS: NavTab[] = [
-  { key: "bet", label: "Новая ставка", icon: ScanText },
-  { key: "active", label: "Активные", icon: Activity },
-  { key: "history", label: "История", icon: History },
-  { key: "balance", label: "Баланс", icon: Wallet },
+  { key: "bet", labelKey: "nav.newBet", icon: ScanText },
+  { key: "active", labelKey: "nav.active", icon: Activity },
+  { key: "history", labelKey: "nav.history", icon: History },
+  { key: "balance", labelKey: "nav.balance", icon: Wallet },
 ];
 
 const ACTIVE_COLOR = "#78C85A";
@@ -30,6 +32,8 @@ interface BottomNavProps {
 // Visual scaffolding only — selecting a tab does not trigger any business
 // logic or data fetching by itself; the parent decides what that means.
 export default function BottomNav({ activeTab, onTabChange }: BottomNavProps) {
+  const { t } = useLocale();
+
   return (
     <nav
       className="fixed inset-x-0 bottom-0 z-10 flex"
@@ -57,7 +61,7 @@ export default function BottomNav({ activeTab, onTabChange }: BottomNavProps) {
           >
             <Icon size={22} strokeWidth={2} color={color} />
             <span className="text-[11px] font-medium" style={{ color }}>
-              {tab.label}
+              {t(tab.labelKey)}
             </span>
           </button>
         );

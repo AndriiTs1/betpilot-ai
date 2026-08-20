@@ -220,9 +220,9 @@ test("source: EXPRESS leg rendering (event/selection/market/odds/badge) is uncha
 // behavioral tests below), so this now checks the call site + the
 // function's own untouched formula, instead of the old inline expression.
 test("source: Stake / Combined odds / Potential win rows and their computation are unchanged", () => {
-  assert.match(source, /label="Stake"/);
-  assert.match(source, /isParlay \? "Combined odds" : "Odds"/);
-  assert.match(source, /label="Potential win"/);
+  assert.match(source, /label=\{t\("preview\.stake"\)\}/);
+  assert.match(source, /isParlay \? t\("ticket\.combinedOdds"\) : t\("preview\.odds"\)/);
+  assert.match(source, /label=\{t\("preview\.potentialWin"\)\}/);
   assert.match(source, /computeTicketPotentialWin\(ticket\.stake, ticket\.totalOdds\)/);
   assert.match(source, /stake \* totalOdds/);
 });
@@ -230,9 +230,9 @@ test("source: Stake / Combined odds / Potential win rows and their computation a
 // Requirement 12 — Done / View History remain present and wired to the
 // same handlers.
 test("source: Done / View History buttons are unchanged", () => {
-  assert.match(source, /aria-label="Done"/);
+  assert.match(source, /aria-label=\{t\("ticket\.done"\)\}/);
   assert.match(source, /onClick=\{onDone\}/);
-  assert.match(source, /aria-label="View history"/);
+  assert.match(source, /aria-label=\{t\("ticket\.viewHistory"\)\}/);
   assert.match(source, /onClick=\{onViewHistory\}/);
 });
 
@@ -240,7 +240,7 @@ test("source: Done / View History buttons are unchanged", () => {
 // communicates status to assistive tech) is unchanged.
 test("source: the ticket's own accessible group role/label is unchanged", () => {
   assert.match(source, /role="group"/);
-  assert.match(source, /aria-label=\{`Digital bet ticket, status: \$\{status\.badgeLabel\}`\}/);
+  assert.match(source, /aria-label=\{t\("ticket\.digitalTicketAriaLabel", \{ status: labels\.badgeLabel \}\)\}/);
 });
 
 /* -------------------------------------------------------------------------- */
@@ -288,20 +288,20 @@ test("formatPotentialWin: a null potential win still falls back to 'Not availabl
 // preview's own established convention (BetPreviewCard.tsx's Stake row
 // also has no currency suffix) — inspected before deciding, not invented.
 test("source: Stake keeps its exact pre-M5.2 bare (no-currency) formatting — matches the pre-confirm preview's own established convention", () => {
-  assert.match(source, /label="Stake" value=\{formatAmount\(ticket\.stake\)\}/);
+  assert.match(source, /label=\{t\("preview\.stake"\)\} value=\{formatAmount\(ticket\.stake\)\}/);
 });
 
 // Requirement D — Combined odds (EXPRESS) unchanged: no badge, no
 // explanatory text, no provider info, no submitted/current comparison,
 // same totalOdds source.
 test("source: Combined odds (EXPRESS) is unchanged — bare totalOdds value only, no badge or comparison text", () => {
-  assert.match(source, /ticket\.totalOdds !== null \? formatAmount\(ticket\.totalOdds\) : "Not provided"/);
+  assert.match(source, /ticket\.totalOdds !== null \? formatAmount\(ticket\.totalOdds\) : t\("preview\.notProvided"\)/);
 });
 
 // Requirement E — SINGLE's "Odds" label (the same row, non-parlay branch)
 // is unchanged.
 test("source: SINGLE's 'Odds' label is unchanged — same row/branch as Combined odds, just isParlay ? ... : \"Odds\"", () => {
-  assert.match(source, /isParlay \? "Combined odds" : "Odds"/);
+  assert.match(source, /isParlay \? t\("ticket\.combinedOdds"\) : t\("preview\.odds"\)/);
 });
 
 // Requirement F — Available credit's value/source (ticket.availableCredit,
@@ -321,7 +321,7 @@ test("source: Available credit's value/source is unchanged (ticket.availableCred
 // relative to Stake/Combined odds, on top of already being secondary to
 // Potential win.
 test("source: Available credit now renders with the new muted tier", () => {
-  assert.match(source, /label="Available credit"[\s\S]{0,120}muted/);
+  assert.match(source, /label=\{t\("ticket\.availableCredit"\)\}[\s\S]{0,120}muted/);
 });
 
 test("FinancialRow: the new muted tier is additive — emphasize (Potential win) and the default tier (Stake/Combined odds) are untouched by its addition", () => {
@@ -335,7 +335,7 @@ test("FinancialRow: the new muted tier is additive — emphasize (Potential win)
 // Requirement G — the M5.1 compact header remains fully intact; this
 // stage touched only the financial block below it.
 test("source: the M5.1 compact header/status/meta block remains fully intact", () => {
-  assert.match(source, /· \{status\.detail\}/);
+  assert.match(source, /· \{labels\.detail\}/);
   assert.match(source, /shortTicketId\(ticket\.id\)/);
   assert.match(source, /\{ticket\.player\}/);
   assert.equal(source.includes("Digital Bet Ticket"), false);
@@ -417,8 +417,8 @@ test("M5.3 regression guard: the M5.1 compact header/status/meta block is untouc
 // Potential win) remains fully intact.
 test("M5.3 regression guard: the M5.2 financial summary, including Potential win's USDC formatting, is untouched", () => {
   assert.equal(formatPotentialWin(computeTicketPotentialWin(5, 6.82)), "34.10 USDC");
-  assert.match(source, /label="Stake" value=\{formatAmount\(ticket\.stake\)\}/);
-  assert.match(source, /label="Available credit"[\s\S]{0,120}muted/);
+  assert.match(source, /label=\{t\("preview\.stake"\)\} value=\{formatAmount\(ticket\.stake\)\}/);
+  assert.match(source, /label=\{t\("ticket\.availableCredit"\)\}[\s\S]{0,120}muted/);
 });
 
 // Requirement F — M4.9's EXPRESS current-odds rendering remains intact
@@ -433,23 +433,23 @@ test("M5.3 regression guard: M4.9 EXPRESS current-odds behavior is untouched", (
 // passes straight through, "Odds" label) remains correct.
 test("M5.3 regression guard: SINGLE ticket rendering is untouched", () => {
   assert.equal(resolveTicketSelectionOdds(selection({ odds: 2.04, currentOdds: null, oddsStatus: null })), 2.04);
-  assert.match(source, /isParlay \? "Combined odds" : "Odds"/);
+  assert.match(source, /isParlay \? t\("ticket\.combinedOdds"\) : t\("preview\.odds"\)/);
 });
 
 // Requirement H — EXPRESS ticket rendering (leg list + "Combined odds"
 // label + financial summary) remains correct.
 test("M5.3 regression guard: EXPRESS ticket rendering is untouched", () => {
   assert.match(source, /\{isParlay && \(/);
-  assert.match(source, /Leg \{index \+ 1\}/);
-  assert.match(source, /isParlay \? "Combined odds" : "Odds"/);
+  assert.match(source, /t\("ticket\.leg", \{ n: String\(index \+ 1\) \}\)/);
+  assert.match(source, /isParlay \? t\("ticket\.combinedOdds"\) : t\("preview\.odds"\)/);
 });
 
 // Requirement I — Done / View History remain unchanged, same handlers,
 // same labels, unaffected by the footer change directly above them.
 test("M5.3 regression guard: Done / View History remain unchanged", () => {
-  assert.match(source, /aria-label="Done"/);
+  assert.match(source, /aria-label=\{t\("ticket\.done"\)\}/);
   assert.match(source, /onClick=\{onDone\}/);
-  assert.match(source, /aria-label="View history"/);
+  assert.match(source, /aria-label=\{t\("ticket\.viewHistory"\)\}/);
   assert.match(source, /onClick=\{onViewHistory\}/);
 });
 
@@ -490,9 +490,9 @@ test("M5.4 regression guard: no leg/financial content was removed, only spacing"
   assert.match(source, /selection\.sport/);
   assert.match(source, /selection\.event/);
   assert.match(source, /selection\.selection/);
-  assert.match(source, /label="Stake"/);
-  assert.match(source, /label=\{isParlay \? "Combined odds" : "Odds"\}/);
-  assert.match(source, /label="Potential win"/);
+  assert.match(source, /label=\{t\("preview\.stake"\)\}/);
+  assert.match(source, /label=\{isParlay \? t\("ticket\.combinedOdds"\) : t\("preview\.odds"\)\}/);
+  assert.match(source, /label=\{t\("preview\.potentialWin"\)\}/);
 });
 
 /* -------------------------------------------------------------------------- */
@@ -513,8 +513,8 @@ test("M5.4 regression guard: no leg/financial content was removed, only spacing"
 // id, player, date/time) is all still present, just in a tighter container.
 test("source: header/status content is fully present, in a tighter container (pt-5 pb-4 gap-2 -> pt-4 pb-3 gap-1.5)", () => {
   assert.match(source, /BetPilot AI/);
-  assert.match(source, /status\.badgeLabel/);
-  assert.match(source, /· \{status\.detail\}/);
+  assert.match(source, /labels\.badgeLabel/);
+  assert.match(source, /· \{labels\.detail\}/);
   assert.match(source, /shortTicketId\(ticket\.id\)/);
   assert.match(source, /\{ticket\.player\}/);
   assert.match(source, /formatDate\(ticket\.createdAt\)/);
@@ -529,7 +529,7 @@ test("source: header/status content is fully present, in a tighter container (pt
 test("source: both legs' sport/Leg-N metadata is combined onto one line — both values are still shown, neither removed", () => {
   assert.match(
     source,
-    /<div className="flex items-center gap-1\.5 text-\[11px\] font-semibold uppercase tracking-wide text-slate-500">\s*\{isParlay && \(\s*<>\s*<span>Leg \{index \+ 1\}<\/span>\s*<span aria-hidden="true">·<\/span>\s*<\/>\s*\)\}\s*<SportIcon sport=\{selection\.sport\} size=\{13\} \/>\s*<span>\s*\{selection\.sport\}/,
+    /<div className="flex items-center gap-1\.5 text-\[11px\] font-semibold uppercase tracking-wide text-slate-500">\s*\{isParlay && \(\s*<>\s*<span>\{t\("ticket\.leg", \{ n: String\(index \+ 1\) \}\)\}<\/span>\s*<span aria-hidden="true">·<\/span>\s*<\/>\s*\)\}\s*<SportIcon sport=\{selection\.sport\} size=\{13\} \/>\s*<span>\s*\{selection\.sport\}/,
   );
   assert.equal(source.includes('<p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">'), false, "the old separate Leg-N-only line must be gone");
   assert.equal(source.includes('<div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-slate-500">'), false, "the old separate sport-only line must be gone");
@@ -545,11 +545,11 @@ test("source: event name, selection, and odds remain present and unchanged in th
 // Requirements 5-8 — Stake, Combined odds, Potential win (with currency),
 // and Available credit are all still present, values/labels unchanged.
 test("source: Stake, Combined odds, Potential win (with currency), and Available credit are all unchanged", () => {
-  assert.match(source, /label="Stake" value=\{formatAmount\(ticket\.stake\)\}/);
-  assert.match(source, /label=\{isParlay \? "Combined odds" : "Odds"\}/);
-  assert.match(source, /label="Potential win"\s*\n\s*value=\{formatPotentialWin\(potentialWin\)\}/);
+  assert.match(source, /label=\{t\("preview\.stake"\)\} value=\{formatAmount\(ticket\.stake\)\}/);
+  assert.match(source, /label=\{isParlay \? t\("ticket\.combinedOdds"\) : t\("preview\.odds"\)\}/);
+  assert.match(source, /label=\{t\("preview\.potentialWin"\)\}\s*\n\s*value=\{formatPotentialWin\(potentialWin, locale\)\}/);
   assert.equal(formatPotentialWin(computeTicketPotentialWin(5, 6.16)), "30.80 USDC");
-  assert.match(source, /label="Available credit"[\s\S]{0,120}muted/);
+  assert.match(source, /label=\{t\("ticket\.availableCredit"\)\}[\s\S]{0,120}muted/);
 });
 
 // Requirements 9-10 — the barcode and "Verified by BetPilot AI" both
@@ -570,9 +570,9 @@ test("source: barcode and 'Verified by BetPilot AI' remain, footer container pad
 // same labels, same accessible min-h-11 touch target; only the gaps around
 // them were tightened.
 test("source: Done and View History remain, same handlers/labels/touch-target height; only surrounding gaps were tightened (mt-4 gap-3 -> mt-3 gap-2.5)", () => {
-  assert.match(source, /aria-label="Done"/);
+  assert.match(source, /aria-label=\{t\("ticket\.done"\)\}/);
   assert.match(source, /onClick=\{onDone\}/);
-  assert.match(source, /aria-label="View history"/);
+  assert.match(source, /aria-label=\{t\("ticket\.viewHistory"\)\}/);
   assert.match(source, /onClick=\{onViewHistory\}/);
   assert.match(source, /className="mt-3 flex flex-col gap-2\.5"/);
   assert.equal(source.includes('className="mt-4 flex flex-col gap-3"'), false, "old, looser action-area spacing must be gone");
@@ -612,8 +612,8 @@ test("M5.6 regression guard: M5.1 header semantics are unchanged", () => {
 // Requirement 16 — M5.2 financial hierarchy (Potential win = emphasize,
 // Available credit = muted, Stake/Combined odds = default) unchanged.
 test("M5.6 regression guard: M5.2 financial hierarchy is unchanged", () => {
-  assert.match(source, /label="Potential win"[\s\S]{0,40}value=\{formatPotentialWin\(potentialWin\)\}[\s\S]{0,80}emphasize/);
-  assert.match(source, /label="Available credit"[\s\S]{0,120}muted/);
+  assert.match(source, /label=\{t\("preview\.potentialWin"\)\}[\s\S]{0,40}value=\{formatPotentialWin\(potentialWin, locale\)\}[\s\S]{0,80}emphasize/);
+  assert.match(source, /label=\{t\("ticket\.availableCredit"\)\}[\s\S]{0,120}muted/);
 });
 
 // Requirement 17 — M5.3 barcode semantics (still derived from ticket.id,

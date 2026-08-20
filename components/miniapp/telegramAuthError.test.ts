@@ -32,3 +32,18 @@ test("getTelegramAuthErrorMessage: malformed and invalid_signature share the sam
 test("getTelegramAuthErrorMessage: the expired message and the malformed/invalid_signature message are distinct from each other", () => {
   assert.notEqual(getTelegramAuthErrorMessage("expired"), getTelegramAuthErrorMessage("malformed"));
 });
+
+// Localization completion pass — `locale` defaults to "en" (proven by every
+// test above, none of which pass one) so every pre-existing call site is
+// completely unaffected; passing "ru" explicitly now returns real Russian
+// text instead of the English default.
+test("getTelegramAuthErrorMessage: locale='ru' returns Russian text, distinct from the default English", () => {
+  const enExpired = getTelegramAuthErrorMessage("expired");
+  const ruExpired = getTelegramAuthErrorMessage("expired", "ru");
+  assert.notEqual(ruExpired, enExpired);
+  assert.equal(ruExpired, "Сессия Telegram истекла. Закройте и снова откройте Mini App через бота.");
+
+  const ruMalformed = getTelegramAuthErrorMessage("malformed", "ru");
+  assert.equal(ruMalformed, getTelegramAuthErrorMessage("invalid_signature", "ru"));
+  assert.notEqual(ruMalformed, ruExpired);
+});

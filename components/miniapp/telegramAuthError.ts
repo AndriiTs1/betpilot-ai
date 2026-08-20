@@ -10,6 +10,9 @@
 // Mini App launch — so callers must never offer a plain "Retry" action for
 // them.
 
+import { translate } from "@/lib/i18n/translations";
+import type { Locale } from "@/lib/i18n/locale";
+
 export type TelegramAuthErrorReason = "expired" | "malformed" | "invalid_signature";
 
 const TELEGRAM_AUTH_ERROR_REASONS: ReadonlySet<string> = new Set([
@@ -22,13 +25,18 @@ export function isTelegramAuthErrorReason(code: string): code is TelegramAuthErr
   return TELEGRAM_AUTH_ERROR_REASONS.has(code);
 }
 
-export function getTelegramAuthErrorMessage(reason: TelegramAuthErrorReason): string {
+// Localization completion pass — `locale` defaults to "en" so every
+// pre-existing call site that doesn't pass one keeps returning the exact
+// same English text as before this pass (zero behavior change, zero test
+// churn for untouched callers); every UI call site now explicitly passes
+// the player's real current locale (from useLocale()).
+export function getTelegramAuthErrorMessage(reason: TelegramAuthErrorReason, locale: Locale = "en"): string {
   if (reason === "expired") {
-    return "Your Telegram session has expired. Close and reopen the Mini App through the bot.";
+    return translate(locale, "error.telegramExpired");
   }
 
   // malformed / invalid_signature — the player never needs to tell these
   // apart; the server-side route still logs/returns the precise reason for
   // diagnostics, this is only the display text.
-  return "Unable to verify your Telegram session. Close and reopen the Mini App through the bot.";
+  return translate(locale, "error.telegramInvalid");
 }

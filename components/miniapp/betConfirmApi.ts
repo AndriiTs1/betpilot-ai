@@ -1,5 +1,7 @@
 import { isTelegramAuthErrorReason, getTelegramAuthErrorMessage } from "./telegramAuthError";
 import { isBetPreview, type BetPreview, type BetPreviewSuccess } from "./betPreviewApi";
+import { translate } from "@/lib/i18n/translations";
+import type { Locale } from "@/lib/i18n/locale";
 
 const REQUEST_TIMEOUT_MS = 15000;
 
@@ -262,10 +264,15 @@ export async function fetchBetConfirm(
   return { ok: true, data: body };
 }
 
-export function getBetConfirmErrorMessage(failure: BetConfirmFailure): string {
-  if (failure.kind === "network") return "Unable to connect. Check your internet connection.";
-  if (failure.kind === "timeout") return "The request took too long. Please try again.";
-  if (failure.kind === "invalid_response") return "Something went wrong. Please try again.";
+// Localization completion pass — same "locale defaults to en" convention as
+// getBetPreviewErrorMessage (betPreviewApi.ts) and getTelegramAuthErrorMessage
+// (telegramAuthError.ts) — zero behavior change for any pre-existing call
+// site/test that doesn't pass a locale; every UI call site now explicitly
+// passes the player's real current locale.
+export function getBetConfirmErrorMessage(failure: BetConfirmFailure, locale: Locale = "en"): string {
+  if (failure.kind === "network") return translate(locale, "error.network");
+  if (failure.kind === "timeout") return translate(locale, "error.timeout");
+  if (failure.kind === "invalid_response") return translate(locale, "error.generic");
   if (failure.kind === "aborted") return "";
   // Step 15B — defensive only: BetTextForm/BetScreenshotForm intercept
   // `kind: "odds_changed"` before ever calling this function (it needs the
@@ -273,15 +280,15 @@ export function getBetConfirmErrorMessage(failure: BetConfirmFailure): string {
   // string can't carry) — see buildOddsChangedReconfirm below. This exists
   // so the function stays total or a future caller that forgets to
   // intercept it still gets a sane message instead of a crash.
-  if (failure.kind === "odds_changed") return "Odds have changed. Please review and confirm again.";
+  if (failure.kind === "odds_changed") return translate(locale, "error.oddsChanged");
 
   if (isTelegramAuthErrorReason(failure.code)) {
-    return getTelegramAuthErrorMessage(failure.code);
+    return getTelegramAuthErrorMessage(failure.code, locale);
   }
 
   switch (failure.code) {
     case "PLAYER_NOT_FOUND":
-      return "Your player account could not be found.";
+      return translate(locale, "error.playerNotFoundConfirm");
     // Stage 10 — same friendly message for every reason a previewToken can
     // no longer be confirmed (expired, signature/shape invalid, or the
     // token simply doesn't match what confirm expects). The player never
@@ -290,11 +297,11 @@ export function getBetConfirmErrorMessage(failure: BetConfirmFailure): string {
     // actually show up (see BetTextForm.tsx / BetScreenshotForm.tsx).
     case "PREVIEW_EXPIRED":
     case "PREVIEW_INVALID":
-      return "⏳ This preview has expired.\n\nOdds may have changed.\n\nPlease generate a new preview.";
+      return translate(locale, "error.previewExpired");
     case "INVALID_REQUEST":
     case "INTERNAL_ERROR":
     default:
-      return "Something went wrong. Please try again.";
+      return translate(locale, "error.generic");
   }
 }
 

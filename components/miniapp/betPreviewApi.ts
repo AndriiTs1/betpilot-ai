@@ -1,4 +1,6 @@
 import { isTelegramAuthErrorReason, getTelegramAuthErrorMessage } from "./telegramAuthError";
+import { translate } from "@/lib/i18n/translations";
+import type { Locale } from "@/lib/i18n/locale";
 
 const REQUEST_TIMEOUT_MS = 15000;
 
@@ -330,26 +332,32 @@ export function isAiTimeoutFailure(failure: BetPreviewFailure): boolean {
   return failure.kind === "http" && failure.code === "AI_TIMEOUT";
 }
 
-export function getBetPreviewErrorMessage(failure: BetPreviewFailure): string {
-  if (failure.kind === "network") return "Unable to connect. Check your internet connection.";
-  if (failure.kind === "timeout") return "The request took too long. Please try again.";
-  if (failure.kind === "invalid_response") return "Something went wrong. Please try again.";
+// Localization completion pass — `locale` defaults to "en" so every
+// pre-existing call site/test that doesn't pass one keeps getting the exact
+// same English text as before this pass; every UI call site now explicitly
+// passes the player's real current locale (from useLocale()). The failure
+// codes, their classification, and every business rule that produces them
+// are completely untouched — only the returned string is localized.
+export function getBetPreviewErrorMessage(failure: BetPreviewFailure, locale: Locale = "en"): string {
+  if (failure.kind === "network") return translate(locale, "error.network");
+  if (failure.kind === "timeout") return translate(locale, "error.timeout");
+  if (failure.kind === "invalid_response") return translate(locale, "error.generic");
 
   if (isTelegramAuthErrorReason(failure.code)) {
-    return getTelegramAuthErrorMessage(failure.code);
+    return getTelegramAuthErrorMessage(failure.code, locale);
   }
 
   switch (failure.code) {
     case "PLAYER_NOT_FOUND":
-      return "Your player account was not found.";
+      return translate(locale, "error.playerNotFound");
     case "INVALID_MESSAGE":
-      return "Enter a valid bet message.";
+      return translate(locale, "error.invalidMessage");
     case "PARSE_FAILED":
       // Odds deliberately not listed as something to add — they're never
       // required from the player, only event/selection/stake are. See
       // lib/ai/betParserPrompt.ts's chatPrompt for the matching parser-side
       // policy this message must stay consistent with.
-      return "We could not understand this bet. Try including the event, selection, and stake.";
+      return translate(locale, "error.parseFailed");
     // Step 15J.3 — fallback text only (used if this failure ever reaches a
     // caller with just a single message slot, no dedicated UI). BetTextForm
     // itself never calls this for an AI_TIMEOUT failure — it renders its own
@@ -357,30 +365,30 @@ export function getBetPreviewErrorMessage(failure: BetPreviewFailure): string {
     // this case still exists so the switch stays exhaustive-in-spirit and
     // this code never silently falls through to the generic default.
     case "AI_TIMEOUT":
-      return "Your bet was not rejected. The analysis took too long. Please try again.";
+      return translate(locale, "error.aiTimeoutPreview");
     case "INVALID_BET_SLIP":
-      return "This bet doesn't have a valid number of selections. Please try again.";
+      return translate(locale, "error.invalidBetSlip");
     // Stage 10.2 bugfix — see this union's own comment: these 5 codes were
     // already being sent by the server (Stage 10) but had no case here,
     // so they always fell through to the generic default below instead of
     // the specific, already-computed reason.
     case "EVENT_NOT_FOUND":
-      return "We couldn't find that team or match. Please check the spelling and try again.";
+      return translate(locale, "error.eventNotFound");
     case "AMBIGUOUS_EVENT":
-      return "We found more than one matching event. Please be more specific, e.g. include both team names.";
+      return translate(locale, "error.ambiguousEvent");
     case "UNSUPPORTED_SELECTION":
-      return "Only Home win, Draw, or Away win are supported for this event right now.";
+      return translate(locale, "error.unsupportedSelection");
     case "EVENT_ALREADY_STARTED":
-      return "This match has already started. Please choose a different event.";
+      return translate(locale, "error.eventAlreadyStarted");
     case "ODDS_UNAVAILABLE":
-      return "Odds for this selection aren't available right now. Please try again shortly.";
+      return translate(locale, "error.oddsUnavailable");
     // UI-E1 — see BetPreviewErrorCode's own comment: this was previously
     // unhandled and fell through to the generic default below, discarding
     // the server's already-computed retryAfterSeconds.
     case "RATE_LIMITED":
       return failure.retryAfterSeconds !== undefined
-        ? `Too many attempts. Please try again in ${failure.retryAfterSeconds} seconds.`
-        : "Too many attempts. Please try again shortly.";
+        ? translate(locale, "error.rateLimitedWithSeconds", { seconds: String(failure.retryAfterSeconds) })
+        : translate(locale, "error.rateLimited");
     // Sector 1 (ADR-0002) — ALL_LEGS_EXCLUDED is the one exclusion-error
     // code that's genuinely reachable in normal use (removing the last
     // recoverable leg alongside every other selection already gone) and
@@ -390,13 +398,13 @@ export function getBetPreviewErrorMessage(failure: BetPreviewFailure): string {
     // depth that the UI's own gating should never actually trigger, so they
     // fall through to the generic message like any other unexpected case.
     case "ALL_LEGS_EXCLUDED":
-      return "Removing this leg would leave nothing to bet on. Please cancel and start over.";
+      return translate(locale, "error.allLegsExcluded");
     // Sector 1 (ADR-0002) — same friendly message/wording as
     // betConfirmApi.ts's identical PREVIEW_EXPIRED/PREVIEW_INVALID case for
     // the exact same underlying condition (a no-longer-valid signed token).
     case "PREVIEW_EXPIRED":
     case "PREVIEW_INVALID":
-      return "⏳ This preview has expired.\n\nOdds may have changed.\n\nPlease generate a new preview.";
+      return translate(locale, "error.previewExpired");
     case "NOT_EXPRESS_TOKEN":
     case "NO_LEGS_EXCLUDED":
     case "DUPLICATE_LEG_INDEX":
@@ -405,6 +413,6 @@ export function getBetPreviewErrorMessage(failure: BetPreviewFailure): string {
     case "INVALID_JSON":
     case "INTERNAL_ERROR":
     default:
-      return "Something went wrong. Please try again.";
+      return translate(locale, "error.generic");
   }
 }

@@ -553,3 +553,25 @@ test("isRecoverableLeg: false for ODDS_CHANGED — a real, confirmed leg whose p
 test("isRecoverableLeg: false for PENDING (reserved, practically unreachable)", () => {
   assert.equal(isRecoverableLeg(singleSelection({ oddsStatus: "PENDING" })), false);
 });
+
+// Localization completion pass — `locale` defaults to "en" (every test
+// above passes none and still asserts the exact original English label —
+// zero behavior change for any pre-existing caller). The gating LOGIC
+// (isConfirming / hasUnresolvedSingleOdds) is completely untouched; only
+// the returned label text is locale-aware.
+test("getConfirmButtonLabel: locale='ru' returns Russian labels for all three states", () => {
+  assert.equal(getConfirmButtonLabel(true, previewSuccess(), "ru"), "Подтверждение...");
+
+  const unresolved = previewSuccess({
+    preview: {
+      type: "SINGLE",
+      stake: 100,
+      totalOdds: null,
+      potentialWin: null,
+      selections: [singleSelection({ submittedOdds: null })],
+    },
+  });
+  assert.equal(getConfirmButtonLabel(false, unresolved, "ru"), "Коэффициент недоступен");
+
+  assert.equal(getConfirmButtonLabel(false, previewSuccess(), "ru"), "Подтвердить ставку");
+});

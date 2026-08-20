@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { FootballIcon, BasketballIcon, TennisIcon, HockeyIcon, TrophyIcon } from "./sportIcons";
 import { getSportIconComponent } from "./sportIcons";
 import { ACTIVE_STATUSES } from "./ActiveBetsScreen";
@@ -88,4 +90,20 @@ test("ActiveBetsScreen: PENDING and CONFIRMED both count as active and get their
 test("ActiveBetsScreen: sport icon resolution is case-insensitive per card, matching getSportIconComponent's own contract", () => {
   const bets = [bet({ id: "1", sport: "FOOTBALL" }), bet({ id: "2", sport: "tennis" })];
   assert.deepEqual(activeCardIcons(bets), [FootballIcon, TennisIcon]);
+});
+
+// Localization foundation — screen title, empty state, and the local
+// "Confirmed" badge override must all come from the centralized dictionary.
+// StatusBadge.tsx itself (shared with the operator dashboard) is
+// deliberately untouched — only this file's own local ActiveStatus override
+// is translated.
+test("ActiveBetsScreen: title/empty-state/confirmed-badge are translated via t(), never hardcoded literals", () => {
+  const source = readFileSync(fileURLToPath(new URL("./ActiveBetsScreen.tsx", import.meta.url)), "utf8");
+
+  assert.match(source, /import \{ useLocale \} from "\.\/LocaleProvider";/);
+  assert.match(source, /\{t\("active\.title"\)\}/);
+  assert.match(source, /\{t\("active\.emptyState"\)\}/);
+  assert.match(source, /confirmedLabel=\{t\("active\.confirmedBadge"\)\}/);
+  assert.equal(source.includes('>Активные<'), false);
+  assert.equal(source.includes("Confirmed\n"), false);
 });

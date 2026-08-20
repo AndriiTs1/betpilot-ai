@@ -42,11 +42,11 @@ test("BetScreenshotForm: an odds_changed confirm failure still stages the refres
 });
 
 test("BetScreenshotForm: Confirm bet is gated ONLY on the Stage M4.5 unavailable-odds check, never on any odds-changed flag", () => {
-  assert.match(source, /\{!oddsUnavailable && \(\s*<button[\s\S]{0,300}aria-label="Confirm bet"/);
+  assert.match(source, /\{!oddsUnavailable && \(\s*<button[\s\S]{0,300}aria-label=\{t\("confirm\.confirmBet"\)\}/);
 });
 
 test("BetScreenshotForm: Choose different image remains rendered unconditionally alongside Confirm bet — never gated on odds-changed state", () => {
-  assert.match(source, /aria-label="Choose different image"/);
+  assert.match(source, /aria-label=\{t\("screenshot\.chooseDifferentImage"\)\}/);
 });
 
 // Stage M5.4 — SINGLE-SCREEN CORE BET FLOW. Root cause of the two
@@ -67,18 +67,18 @@ test("source: the large hero icon is shown only for the pre-recognition phases (
 });
 
 test("source: the 'choose a photo' subtitle is shown only for the pre-recognition phases — it no longer describes what's on screen once a preview is showing", () => {
-  assert.match(source, /\{showSelectionBlock && \(\s*<p className="mt-2 text-sm text-slate-400">Choose a photo from your gallery or take a new one\.<\/p>\s*\)\}/);
+  assert.match(source, /\{showSelectionBlock && \(\s*<p className="mt-2 text-sm text-slate-400">\{t\("screenshot\.uploadSubtitle"\)\}<\/p>\s*\)\}/);
 });
 
 test("source: 'Upload your bet slip' is still the heading in every phase, just compact once a preview is ready", () => {
   assert.match(source, /showSelectionBlock \? "mt-5 text-xl font-bold text-white" : "mt-3 text-lg font-bold text-white"/);
-  assert.match(source, />\s*Upload your bet slip\s*<\/p>/);
+  assert.match(source, />\s*\{t\("screenshot\.uploadTitle"\)\}\s*<\/p>/);
 });
 
 test("source: the action-area gap above Confirm bet/Choose different image was tightened (mt-4 -> mt-3 wrapper, mt-3 -> mt-2.5 buttons)", () => {
   assert.match(source, /\{showPreviewBlock && preview && \(\s*<div className="mt-3 w-full">/);
-  assert.match(source, /aria-label="Confirm bet"\s*className="mt-2\.5 min-h-11 w-full/);
-  assert.match(source, /aria-label="Choose different image"\s*className="mt-2\.5 min-h-11 w-full/);
+  assert.match(source, /aria-label=\{t\("confirm\.confirmBet"\)\}\s*className="mt-2\.5 min-h-11 w-full/);
+  assert.match(source, /aria-label=\{t\("screenshot\.chooseDifferentImage"\)\}\s*className="mt-2\.5 min-h-11 w-full/);
 });
 
 // Stage M5.5A — HIDE TECHNICAL FILE METADATA FROM PLAYER. The selected
@@ -98,16 +98,16 @@ test("source: the dead filename/size wrapper row is gone — the image preview f
 });
 
 test("source: the screenshot thumbnail/preview itself is still rendered, unchanged", () => {
-  assert.match(source, /<img\s*\n\s*src=\{previewUrl\}\s*\n\s*alt="Selected bet slip screenshot"\s*\n\s*className="max-h-64 w-full object-contain"/);
+  assert.match(source, /<img\s*\n\s*src=\{previewUrl\}\s*\n\s*alt=\{t\("screenshot\.selectedImageAlt"\)\}\s*\n\s*className="max-h-64 w-full object-contain"/);
 });
 
 test("source: the Recognizing state is unchanged", () => {
-  assert.match(source, /\{phase === "recognizing" \? "Recognizing\.\.\." : "Recognize bet"\}/);
+  assert.match(source, /\{phase === "recognizing" \? t\("screenshot\.recognizing"\) : t\("screenshot\.recognizeBet"\)\}/);
 });
 
 test("source: Remove is unchanged", () => {
   assert.match(source, /onClick=\{handleRemove\}/);
-  assert.match(source, />\s*Remove\s*<\/button>/);
+  assert.match(source, />\s*\{t\("screenshot\.remove"\)\}\s*<\/button>/);
 });
 
 // M5.4 ready-state layout (Section G root-cause fix + action-area spacing)
@@ -116,5 +116,5 @@ test("source: Remove is unchanged", () => {
 test("M5.5A regression guard: the M5.4 ready-state layout is untouched", () => {
   assert.match(source, /<div className="flex flex-1 flex-col items-center text-center">/);
   assert.match(source, /\{showPreviewBlock && preview && \(\s*<div className="mt-3 w-full">/);
-  assert.match(source, /aria-label="Confirm bet"\s*className="mt-2\.5 min-h-11 w-full/);
+  assert.match(source, /aria-label=\{t\("confirm\.confirmBet"\)\}\s*className="mt-2\.5 min-h-11 w-full/);
 });

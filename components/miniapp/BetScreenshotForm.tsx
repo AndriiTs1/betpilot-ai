@@ -21,6 +21,7 @@ import {
   type BetPreviewSuccess,
 } from "./betPreviewApi";
 import { canConfirmBetSlip, getConfirmButtonLabel, isOddsUnavailableForConfirm } from "./canConfirmBetSlip";
+import { useLocale } from "./LocaleProvider";
 
 interface BetScreenshotFormProps {
   onBack: () => void;
@@ -68,6 +69,7 @@ type FormPhase = "idle" | "selected" | "recognizing" | "ready" | "confirming";
 // already accepts). Mirrors BetTextForm's phase/guard-ref architecture
 // (Stage 4.4B) rather than inventing a new pattern.
 export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshotFormProps) {
+  const { t, locale } = useLocale();
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [phase, setPhase] = useState<FormPhase>("idle");
@@ -110,7 +112,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
   }
 
   function showClientValidationError(failure: BetScreenshotFailure) {
-    setError(getBetScreenshotErrorMessage(failure));
+    setError(getBetScreenshotErrorMessage(failure, locale));
     triggerHaptic("error");
   }
 
@@ -197,7 +199,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
       // return to "selected" so the user can retry or pick a different
       // image, never force them back to choosing from scratch.
       setPhase("selected");
-      setError(getBetScreenshotErrorMessage(result.failure));
+      setError(getBetScreenshotErrorMessage(result.failure, locale));
       triggerHaptic("error");
       return;
     }
@@ -239,7 +241,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
     setExcludingLegIndex(null);
 
     if (!result.ok) {
-      setError(getBetPreviewErrorMessage(result.failure));
+      setError(getBetPreviewErrorMessage(result.failure, locale));
       triggerHaptic("error");
 
       if (
@@ -328,7 +330,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
         setPhase("ready");
       }
 
-      setError(getBetConfirmErrorMessage(result.failure));
+      setError(getBetConfirmErrorMessage(result.failure, locale));
       triggerHaptic("error");
       return;
     }
@@ -357,9 +359,9 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
         type="button"
         onClick={onBack}
         className="text-sm font-medium text-slate-400"
-        aria-label="Back"
+        aria-label={t("bet.back")}
       >
-        ‹ Back
+        ‹ {t("bet.back")}
       </button>
 
       {/* Both inputs stay mounted (hidden) regardless of phase, so the
@@ -369,7 +371,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
         type="file"
         accept="image/jpeg,image/png,image/webp"
         onChange={handleGalleryChange}
-        aria-label="Choose image from gallery"
+        aria-label={t("screenshot.galleryAriaLabel")}
         className="hidden"
       />
       <input
@@ -378,7 +380,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
         accept="image/jpeg,image/png,image/webp"
         capture="environment"
         onChange={handleCameraChange}
-        aria-label="Take a photo"
+        aria-label={t("screenshot.cameraAriaLabel")}
         className="hidden"
       />
 
@@ -405,10 +407,10 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
           </div>
         )}
         <p className={showSelectionBlock ? "mt-5 text-xl font-bold text-white" : "mt-3 text-lg font-bold text-white"}>
-          Upload your bet slip
+          {t("screenshot.uploadTitle")}
         </p>
         {showSelectionBlock && (
-          <p className="mt-2 text-sm text-slate-400">Choose a photo from your gallery or take a new one.</p>
+          <p className="mt-2 text-sm text-slate-400">{t("screenshot.uploadSubtitle")}</p>
         )}
 
         {showSelectionBlock && (
@@ -418,7 +420,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
                 <button
                   type="button"
                   onClick={() => galleryInputRef.current?.click()}
-                  aria-label="Choose image from gallery"
+                  aria-label={t("screenshot.galleryAriaLabel")}
                   className="flex min-h-11 w-full items-center justify-center gap-2 rounded-2xl text-[15px] font-semibold"
                   style={{
                     background: "#60E84A",
@@ -426,18 +428,18 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
                   }}
                 >
                   <Images size={18} strokeWidth={2} aria-hidden="true" />
-                  Choose from gallery
+                  {t("screenshot.chooseFromGalleryLabel")}
                 </button>
 
                 <button
                   type="button"
                   onClick={() => cameraInputRef.current?.click()}
-                  aria-label="Take a photo"
+                  aria-label={t("screenshot.cameraAriaLabel")}
                   className="flex min-h-11 w-full items-center justify-center gap-2 rounded-2xl text-[15px] font-medium text-slate-400"
                   style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
                 >
                   <Camera size={18} strokeWidth={2} aria-hidden="true" />
-                  Take photo
+                  {t("screenshot.takePhotoLabel")}
                 </button>
               </div>
             )}
@@ -452,7 +454,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
                       local blob: object URL, not an optimizable remote image */}
                   <img
                     src={previewUrl}
-                    alt="Selected bet slip screenshot"
+                    alt={t("screenshot.selectedImageAlt")}
                     className="max-h-64 w-full object-contain"
                   />
                 </div>
@@ -461,25 +463,25 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
                   type="button"
                   onClick={handleRecognize}
                   disabled={!canRecognize}
-                  aria-label="Recognize bet"
+                  aria-label={t("screenshot.recognizeBet")}
                   className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
                   style={{
                     background: "#60E84A",
                     color: "#04170C",
                   }}
                 >
-                  {phase === "recognizing" ? "Recognizing..." : "Recognize bet"}
+                  {phase === "recognizing" ? t("screenshot.recognizing") : t("screenshot.recognizeBet")}
                 </button>
 
                 <button
                   type="button"
                   onClick={handleRemove}
                   disabled={phase === "recognizing"}
-                  aria-label="Remove image"
+                  aria-label={t("screenshot.removeImageAriaLabel")}
                   className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-medium text-slate-400 disabled:opacity-50"
                   style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
                 >
-                  Remove
+                  {t("screenshot.remove")}
                 </button>
               </div>
             )}
@@ -513,14 +515,14 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
                 type="button"
                 onClick={handleConfirm}
                 disabled={!canConfirm}
-                aria-label="Confirm bet"
+                aria-label={t("confirm.confirmBet")}
                 className="mt-2.5 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
                 style={{
                   background: "#60E84A",
                   color: "#04170C",
                 }}
               >
-                {getConfirmButtonLabel(phase === "confirming", preview)}
+                {getConfirmButtonLabel(phase === "confirming", preview, locale)}
               </button>
             )}
 
@@ -528,11 +530,11 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
               type="button"
               onClick={handleChooseDifferent}
               disabled={phase === "confirming"}
-              aria-label="Choose different image"
+              aria-label={t("screenshot.chooseDifferentImage")}
               className="mt-2.5 min-h-11 w-full rounded-2xl text-[15px] font-medium text-slate-400 disabled:opacity-50"
               style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
             >
-              Choose different image
+              {t("screenshot.chooseDifferentImage")}
             </button>
           </div>
         )}
