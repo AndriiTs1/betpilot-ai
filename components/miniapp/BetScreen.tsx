@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ScanLine, Zap } from "lucide-react";
+import { ScanLine } from "lucide-react";
 import StatusBadge from "@/components/bets/StatusBadge";
 import BetActionSheet from "./BetActionSheet";
 import BetTextForm from "./BetTextForm";
@@ -171,22 +171,6 @@ export default function BetScreen({
 
   return (
     <div>
-      {/* Compact top status */}
-      <div className="flex items-center justify-between">
-        <span className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-white">
-          <Zap size={14} strokeWidth={2} style={{ color: "#60E84A" }} />
-          BetPilot AI
-        </span>
-        <span
-          className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide"
-          style={{ color: "#60E84A" }}
-        >
-          <span className="h-1.5 w-1.5 rounded-full" style={{ background: "#60E84A" }} />
-          {t("home.aiOnline")}
-        </span>
-      </div>
-      <p className="mt-1 text-sm text-slate-400">{t("home.ready")}</p>
-
       {/* Main action zone — the single primary CTA on this screen */}
       <button
         type="button"

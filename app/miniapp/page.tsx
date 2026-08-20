@@ -8,7 +8,6 @@ import BetScreen from "@/components/miniapp/BetScreen";
 import ActiveBetsScreen from "@/components/miniapp/ActiveBetsScreen";
 import HistoryScreen from "@/components/miniapp/HistoryScreen";
 import BalanceScreen from "@/components/miniapp/BalanceScreen";
-import WelcomeBanner from "@/components/miniapp/WelcomeBanner";
 import type { MiniAppTab, MeResponse } from "@/components/miniapp/types";
 import type { AnyConfirmedBet } from "@/components/miniapp/betConfirmApi";
 import { applyMiniAppDataAction } from "@/components/miniapp/mergeConfirmedBet";
@@ -19,6 +18,7 @@ import {
 import { hasPendingBet } from "@/components/miniapp/hasPendingBet";
 import { useLocale } from "@/components/miniapp/LocaleProvider";
 import LanguageSwitcher from "@/components/miniapp/LanguageSwitcher";
+import { Zap } from "lucide-react";
 
 // Phase 1 — investor-demo end-to-end flow: while the player has at least
 // one PENDING bet, poll for the operator's confirm/reject decision every
@@ -535,17 +535,27 @@ function DataScreen({
 
   return (
     <div className="min-h-screen px-4 py-6 pb-24">
-      {/* Global shell header — the language control sits here (not inside
-          BetScreen, near "AI Online") specifically because it's an
-          application-wide setting, not a bet-screen status: this row is
-          the one part of DataScreen shared by all four bottom-nav tabs, so
-          it stays visible and stable across tab switches instead of
-          disappearing on Active/History/Balance. Shares WelcomeBanner's own
-          existing top row height — no new full-width header band added. */}
+      {/* Global Mini App header — brand/status stay visible across all tabs,
+          while the language control remains an application-wide setting. */}
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <WelcomeBanner playerName={data.player.name} />
+        <div className="flex min-w-0 flex-col items-start">
+          <span className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-white">
+            <Zap size={14} strokeWidth={2} style={{ color: "#60E84A" }} aria-hidden="true" />
+            BetPilot AI
+          </span>
+          <span
+            className="mt-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide"
+            style={{ color: "#60E84A" }}
+          >
+            <span
+              className="h-1.5 w-1.5 rounded-full"
+              style={{ background: "#60E84A" }}
+              aria-hidden="true"
+            />
+            {t("home.aiOnline")}
+          </span>
         </div>
+
         <LanguageSwitcher />
       </div>
 
