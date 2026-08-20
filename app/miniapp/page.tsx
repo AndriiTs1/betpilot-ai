@@ -537,7 +537,7 @@ function DataScreen({
       {/* Global Mini App header — brand/status stay visible across all tabs,
           while the language control remains an application-wide setting. */}
       <div className="flex h-8 items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
+        <div className="flex min-w-0 items-center gap-1.5">
           <span
             className="h-1.5 w-1.5 shrink-0 rounded-full"
             style={{ background: "#60E84A" }}

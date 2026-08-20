@@ -209,7 +209,7 @@ export default function BetScreen({
 
       {/* Last activity — at most two rows, full history lives in its own tab */}
       <div className="mt-5">
-        <p className="text-sm font-medium text-slate-400">
+        <p className="text-sm font-medium text-slate-300">
           {t("home.lastActivity")}
         </p>
 
