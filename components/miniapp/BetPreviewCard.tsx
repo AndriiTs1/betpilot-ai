@@ -1,12 +1,12 @@
 import type { ReactNode } from "react";
 import type { BetPreview, BetSelectionOddsStatus } from "./betPreviewApi";
-import SelectionList from "@/components/bets/SelectionList";
+import SelectionRow from "@/components/bets/SelectionRow";
 import type { DisplaySelection } from "@/lib/bets/mapBetForDisplay";
 import { formatAmount } from "@/lib/bets/formatAmount";
 import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
 import { formatFullEventName } from "@/lib/bets/formatFullEventName";
 import { formatEventDateTime } from "@/lib/bets/formatEventDateTime";
-import { hasUnverifiedOddsStatus, isSingleSelectionOddsUnavailable } from "./canConfirmBetSlip";
+import { hasUnverifiedOddsStatus, isSingleSelectionOddsUnavailable, isRecoverableLeg } from "./canConfirmBetSlip";
 
 // Shown whenever the odds provider could not positively confirm a
 // selection's exact event/market (NOT_FOUND) or couldn't verify anything
@@ -99,7 +99,25 @@ export function formatSingleOdds(currentOdds: number | null): string {
 // consistent gap rhythm instead of ad hoc mt-3 chaining, so the content
 // balances across the card's width instead of reading as top/left-heavy.
 
-export function PreviewCard({ preview }: { preview: BetPreview }) {
+// Sector 1 (ADR-0002) — onExcludeLeg/excludingLegIndex are optional so
+// every other caller of PreviewCard (none currently render EXPRESS without
+// these, but the props stay opt-in for forward compatibility) is
+// byte-for-byte unaffected when they're omitted. onExcludeLeg receives the
+// leg's index into preview.selections — the same index/id SelectionRow
+// already keys on below — never any odds/market/event data; the caller
+// (BetTextForm.tsx/BetScreenshotForm.tsx) is responsible for calling
+// fetchExpressLegExclusionPreview with it. excludingLegIndex, when
+// non-null, disables every Remove button while that leg's request is
+// in-flight — the double-click safety guard.
+export function PreviewCard({
+  preview,
+  onExcludeLeg,
+  excludingLegIndex = null,
+}: {
+  preview: BetPreview;
+  onExcludeLeg?: (legIndex: number) => void;
+  excludingLegIndex?: number | null;
+}) {
   if (preview.type === "SINGLE") {
     const selection = preview.selections[0];
     const fullEventName = formatFullEventName(selection.event, selection.homeTeamName, selection.awayTeamName);
@@ -194,9 +212,33 @@ export function PreviewCard({ preview }: { preview: BetPreview }) {
       <h3 className="mb-2 text-base font-bold text-white">Express ×{preview.selections.length}</h3>
 
       {/* Decision context (the player is about to confirm) — every
-          selection is always shown, never truncated, regardless of count. */}
-      <div>
-        <SelectionList selections={selections} mode="full" showStatus />
+          selection is always shown, never truncated, regardless of count.
+          Sector 1 (ADR-0002) — no longer delegated to SelectionList (a
+          shared component also used by Dashboard/History surfaces this
+          sector must not touch): mapped here directly, still through the
+          exact same unmodified SelectionRow, so a per-leg Remove
+          affordance can be attached only in this preview context. */}
+      <div className="space-y-1.5">
+        {preview.selections.map((selection, index) => (
+          <div key={selections[index].id}>
+            <SelectionRow selection={selections[index]} showStatus />
+            {onExcludeLeg && isRecoverableLeg(selection) && (
+              <button
+                type="button"
+                onClick={() => onExcludeLeg(index)}
+                disabled={excludingLegIndex !== null}
+                className="mt-1 w-full rounded-lg py-1.5 text-center text-xs font-medium transition-colors disabled:opacity-50"
+                style={{
+                  color: "#f87171",
+                  background: "rgba(248,113,113,0.06)",
+                  border: "1px solid rgba(248,113,113,0.18)",
+                }}
+              >
+                {excludingLegIndex === index ? "Removing…" : "Remove and recalculate"}
+              </button>
+            )}
+          </div>
+        ))}
       </div>
 
       <div

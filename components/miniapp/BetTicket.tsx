@@ -241,8 +241,11 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
             readable — icon + label + short detail, all on one line — and
             Ticket ID/Player/Date/Time are still all present, on one
             de-emphasized line directly below, before the actual bet
-            content begins. */}
-        <div className="flex flex-col gap-2 px-5 pt-5 pb-4">
+            content begins. Stage M5.6: outer padding/internal gap trimmed
+            slightly (pt-5 -> pt-4, pb-4 -> pb-3, gap-2 -> gap-1.5) — every
+            line (wordmark, status, meta) is still present, just closer
+            together. */}
+        <div className="flex flex-col gap-1.5 px-5 pt-4 pb-3">
           <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
             <Zap size={11} strokeWidth={2.5} style={{ color: "#60E84A" }} aria-hidden="true" />
             BetPilot AI
@@ -268,8 +271,15 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
             leg label gap, mt-1 -> mt-0.5 event gap) so an EXPRESS ×2 ticket
             has a realistic shot at fitting a normal iPhone viewport without
             scrolling. No line of information was removed — only the gaps
-            between them shrank. */}
-        <div className="px-5 py-4">
+            between them shrank.
+            Stage M5.6: this was still the single largest remaining block of
+            vertical waste — each EXPRESS leg spent two full lines on
+            secondary metadata ("Leg N" on its own line, "FOOTBALL" on the
+            next). Both values are still shown, in the same order, just
+            combined onto one line (py-4 -> py-3, mt-3 -> mt-2 between legs)
+            — the primary content (event name, selection, odds) is
+            untouched in text, size, and line count. */}
+        <div className="px-5 py-3">
           {ticket.selections.map((selection, index) => {
             // Stage M4.9 — one value only: the current/accepted price
             // (SINGLE) or the current provider price (EXPRESS VERIFIED/
@@ -282,18 +292,21 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
             return (
               <div
                 key={index}
-                className={`ticket-row-animate ${index > 0 ? "mt-3" : ""}`}
+                className={`ticket-row-animate ${index > 0 ? "mt-2" : ""}`}
                 style={{ animationDelay: ticketRowDelay(TICKET_META_ROW_COUNT + index) }}
               >
-                {isParlay && (
-                  <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                    Leg {index + 1}
-                  </p>
-                )}
-                <div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-slate-500">
-                  <SportIcon sport={selection.sport} size={15} />
-                  {selection.sport}
-                  {selection.league ? ` · ${selection.league}` : ""}
+                <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  {isParlay && (
+                    <>
+                      <span>Leg {index + 1}</span>
+                      <span aria-hidden="true">·</span>
+                    </>
+                  )}
+                  <SportIcon sport={selection.sport} size={13} />
+                  <span>
+                    {selection.sport}
+                    {selection.league ? ` · ${selection.league}` : ""}
+                  </span>
                 </div>
                 <p className="mt-0.5 text-[15px] font-semibold text-white break-words">{selection.event}</p>
                 <p className="mt-0.5 text-sm break-words" style={{ color: "#60E84A" }}>
@@ -326,8 +339,8 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
             to Potential win (emphasize). No spacing/margin changes — the
             hierarchy is conveyed by weight/color only. Stage M5.4: section
             padding tightened (py-5 -> py-4), same reasoning as the Event
-            section above. */}
-        <div className="px-5 py-4">
+            section above. Stage M5.6: tightened again (py-4 -> py-3). */}
+        <div className="px-5 py-3">
           <FinancialRow label="Stake" value={formatAmount(ticket.stake)} delay={ticketRowDelay(financialRowStart)} />
           <FinancialRow
             label={isParlay ? "Combined odds" : "Odds"}
@@ -360,8 +373,13 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
             BetPilot AI" so the two elements read as one compact
             verification unit, closer together than the rest of the
             ticket's section rhythm. Barcode data/generation (barcodeWidths)
-            is completely untouched — only its container's height shrank. */}
-        <div className="flex flex-col items-center px-5 pt-4 pb-5">
+            is completely untouched — only its container's height shrank.
+            Stage M5.6: outer container padding trimmed once more
+            (pt-4 pb-5 -> pt-3 pb-4) — the barcode's own height and the gap
+            before "Verified by BetPilot AI" are deliberately left alone,
+            per this stage's own instruction not to shrink the barcode
+            again. */}
+        <div className="flex flex-col items-center px-5 pt-3 pb-4">
           <TicketBarcode seed={ticket.id} />
           <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-slate-500">
             <Barcode size={12} strokeWidth={2} aria-hidden="true" />
@@ -372,8 +390,13 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
 
       {/* Actions — intentionally only Done/View History. Download, Share,
           Print, and QR verification are prepared for by this component's
-          data-driven shape, not implemented here (Stage 4.5G scope). */}
-      <div className="mt-4 flex flex-col gap-3">
+          data-driven shape, not implemented here (Stage 4.5G scope).
+          Stage M5.6: the gaps around/between the buttons were tightened
+          (mt-4 -> mt-3, gap-3 -> gap-2.5) — per this stage's own guidance,
+          button height (min-h-11, the real accessible touch-target
+          minimum) is deliberately left untouched; only the space around it
+          shrank. */}
+      <div className="mt-3 flex flex-col gap-2.5">
         <button
           type="button"
           onClick={onDone}
@@ -459,7 +482,7 @@ function FinancialRow({
 }) {
   return (
     <div
-      className={`ticket-row-animate flex items-baseline justify-between gap-3 ${last ? "" : "mb-2"}`}
+      className={`ticket-row-animate flex items-baseline justify-between gap-3 ${last ? "" : "mb-1.5"}`}
       style={{ animationDelay: delay }}
     >
       <span className={`text-xs ${muted ? "text-slate-500" : "text-slate-400"}`}>{label}</span>

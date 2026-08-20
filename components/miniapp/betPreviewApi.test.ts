@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fetchBetPreview, getBetPreviewErrorMessage, isAiTimeoutFailure } from "./betPreviewApi";
+import {
+  fetchBetPreview,
+  fetchExpressLegExclusionPreview,
+  getBetPreviewErrorMessage,
+  isAiTimeoutFailure,
+} from "./betPreviewApi";
 
 // Focused coverage for the client-side error-message mapping — the actual
 // fetchBetPreview() network/parsing logic is exercised indirectly by the
@@ -212,4 +217,94 @@ test("UI-E1 regression: existing network failure message is unchanged by this st
 test("getBetPreviewErrorMessage: an unknown HTTP error code still uses the generic fallback, unchanged", () => {
   const message = getBetPreviewErrorMessage({ kind: "http", code: "UNKNOWN" });
   assert.equal(message, GENERIC_FALLBACK);
+});
+
+// ---------------------------------------------------------------------
+// Sector 1 (ADR-0002) — POST /api/miniapp/bets/express/exclude-legs's own
+// error codes.
+// ---------------------------------------------------------------------
+
+test("getBetPreviewErrorMessage: ALL_LEGS_EXCLUDED has its own actionable message", () => {
+  const message = getBetPreviewErrorMessage({ kind: "http", code: "ALL_LEGS_EXCLUDED" });
+  assert.equal(message, "Removing this leg would leave nothing to bet on. Please cancel and start over.");
+});
+
+test("getBetPreviewErrorMessage: PREVIEW_EXPIRED/PREVIEW_INVALID share the same message as each other, distinct from the generic fallback", () => {
+  const expired = getBetPreviewErrorMessage({ kind: "http", code: "PREVIEW_EXPIRED" });
+  const invalid = getBetPreviewErrorMessage({ kind: "http", code: "PREVIEW_INVALID" });
+  assert.equal(expired, invalid);
+  assert.notEqual(expired, GENERIC_FALLBACK);
+});
+
+test("getBetPreviewErrorMessage: the remaining exclusion defense-in-depth codes fall back to the generic message", () => {
+  for (const code of ["NOT_EXPRESS_TOKEN", "NO_LEGS_EXCLUDED", "DUPLICATE_LEG_INDEX", "INVALID_LEG_INDEX", "LEG_NOT_RECOVERABLE"] as const) {
+    assert.equal(getBetPreviewErrorMessage({ kind: "http", code }), GENERIC_FALLBACK);
+  }
+});
+
+// ---------------------------------------------------------------------
+// fetchExpressLegExclusionPreview — network/parsing behavior, mirroring
+// fetchBetPreview's own untested-here convention (server-side route tests
+// exercise the real endpoint; this covers the client-side fetch wrapper).
+// ---------------------------------------------------------------------
+
+test("fetchExpressLegExclusionPreview: a network failure is reported as kind:network", async () => {
+  const originalFetch = global.fetch;
+  global.fetch = (async () => {
+    throw new TypeError("fetch failed");
+  }) as typeof fetch;
+
+  try {
+    const result = await fetchExpressLegExclusionPreview("initdata", "token", [0]);
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.failure.kind, "network");
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("fetchExpressLegExclusionPreview: a non-2xx response is mapped to kind:http with the server's error code", async () => {
+  const originalFetch = global.fetch;
+  global.fetch = (async () =>
+    new Response(JSON.stringify({ error: "LEG_NOT_RECOVERABLE" }), { status: 422 })) as typeof fetch;
+
+  try {
+    const result = await fetchExpressLegExclusionPreview("initdata", "token", [0]);
+    assert.equal(result.ok, false);
+    if (!result.ok && result.failure.kind === "http") {
+      assert.equal(result.failure.code, "LEG_NOT_RECOVERABLE");
+    } else {
+      assert.fail("expected kind:http failure");
+    }
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("fetchExpressLegExclusionPreview: a valid success body round-trips through isBetPreviewSuccess and is returned as-is", async () => {
+  const successBody = {
+    preview: { type: "SINGLE", stake: 50, totalOdds: 2.1, potentialWin: 105, selections: [
+      {
+        sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win",
+        marketType: null, participant: null, line: null, submittedOdds: 2.1, currentOdds: 2.1,
+        oddsStatus: "VERIFIED", bookmaker: "Pinnacle", discrepancyPercent: 0,
+        homeTeamName: null, awayTeamName: null, competitionName: null, eventStartTime: null,
+      },
+    ] },
+    previewToken: "new-token-value",
+  };
+
+  const originalFetch = global.fetch;
+  global.fetch = (async () => new Response(JSON.stringify(successBody), { status: 200 })) as typeof fetch;
+
+  try {
+    const result = await fetchExpressLegExclusionPreview("initdata", "old-token-value", [1]);
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.data.previewToken, "new-token-value");
+      assert.notEqual(result.data.previewToken, "old-token-value");
+    }
+  } finally {
+    global.fetch = originalFetch;
+  }
 });

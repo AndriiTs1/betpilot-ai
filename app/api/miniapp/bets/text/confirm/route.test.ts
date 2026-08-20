@@ -855,7 +855,15 @@ test("confirm route: EXPRESS with one leg changed and one leg UNAVAILABLE return
   assert.equal(db._debug.createCallCount(), 0);
 });
 
-test("confirm route: EXPRESS with one leg changed and one leg NOT_FOUND returns 422 SELECTION_UNAVAILABLE, no DB write — SCREENSHOT ODDS QA-2 made buildBetSlipPreview's EXPRESS token null whenever ANY leg is unverified (previously only for an exempt null-submittedOdds leg), which triggers verifyPreviewFreshness.ts's own PRE-EXISTING null-token fallback (\"the response cannot be safely reconfirmed\") for the first time on this exact fixture — not a new decision, an already-written safety branch finally becoming reachable", async () => {
+test("confirm route: EXPRESS with one leg changed and one leg NOT_FOUND now returns 409 ODDS_CHANGED_RECONFIRM_REQUIRED with a real refreshed token (Sector 1 correction, ADR-0002) — but still no DB write, since the refreshed preview itself remains unconfirmable", async () => {
+  // Before this correction, buildBetSlipPreview.ts kept the EXPRESS token
+  // null whenever any leg was unverified, which routed this exact mix into
+  // verifyPreviewFreshness.ts's null-token SELECTION_UNAVAILABLE fallback —
+  // a hard stop. Now a token always exists (a signed reference, not a
+  // confirmability signal), so the player gets a real, usable
+  // refreshedPreviewToken they can hand to Sector 1's exclusion endpoint to
+  // remove the NOT_FOUND leg — but this route still creates no Bet, since
+  // the refreshed preview's own NOT_FOUND leg keeps it unconfirmable.
   const db = createFakeDb();
   const token = signExpressPreviewToken(expressTokenInput(), PREVIEW_SECRET);
 
@@ -869,12 +877,20 @@ test("confirm route: EXPRESS with one leg changed and one leg NOT_FOUND returns 
     }),
   );
 
-  assert.equal(res.status, 422);
-  const body = (await json(res)) as { error: string; refreshedPreview?: unknown; refreshedPreviewToken?: unknown };
-  assert.equal(body.error, "SELECTION_UNAVAILABLE");
-  assert.equal(body.refreshedPreview, undefined);
-  assert.equal(body.refreshedPreviewToken, undefined);
-  assert.equal(db._debug.betCount(), 0);
+  assert.equal(res.status, 409);
+  const body = (await json(res)) as {
+    error: string;
+    refreshedPreview?: { totalOdds: number | null; selections: Array<{ oddsStatus: string }> };
+    refreshedPreviewToken?: string;
+  };
+  assert.equal(body.error, "ODDS_CHANGED_RECONFIRM_REQUIRED");
+  assert.ok(typeof body.refreshedPreviewToken === "string" && body.refreshedPreviewToken.length > 0);
+  // Confirm gate proof, at the HTTP layer this time: the refreshed preview
+  // still shows totalOdds:null and the NOT_FOUND leg — nothing here implies
+  // the bet is now confirmable, only that a fresh reference exists.
+  assert.equal(body.refreshedPreview?.totalOdds, null);
+  assert.deepEqual(body.refreshedPreview?.selections.map((s) => s.oddsStatus), ["ODDS_CHANGED", "NOT_FOUND"]);
+  assert.equal(db._debug.betCount(), 0, "no Bet may be created from a 409 reconfirm response");
   assert.equal(db._debug.createCallCount(), 0);
 });
 
@@ -901,13 +917,12 @@ test("confirm route: EXPRESS with one leg NOT_FOUND and the other VERIFIED retur
   assert.equal(db._debug.createCallCount(), 0);
 });
 
-test("confirm route: EXPRESS with changed odds but no reconfirmable token (another exempt null-odds leg) returns 422 SELECTION_UNAVAILABLE, never 409 with a null token, no DB write, no persistence transaction", async () => {
+test("confirm route: EXPRESS with changed odds alongside another exempt null-odds leg now returns 409 with a real reconfirmable token (Sector 1 correction, ADR-0002), still no DB write", async () => {
   const db = createFakeDb();
-  // One leg genuinely ODDS_CHANGED, the other has no submitted odds at all
-  // — buildBetSlipPreview only signs an EXPRESS refreshedPreviewToken when
-  // EVERY selection's submittedOdds is known, so this is the real,
-  // repository-supported case where odds changed is detected but no valid
-  // signed replacement preview can exist.
+  // One leg genuinely ODDS_CHANGED, the other has no submitted odds at all.
+  // Sector 1 correction — buildBetSlipPreview.ts now signs an EXPRESS
+  // token regardless of allOddsKnown, so this scenario is no longer routed
+  // into the null-token SELECTION_UNAVAILABLE fallback.
   const token = signExpressPreviewToken(
     expressTokenInput({
       selections: [
@@ -925,12 +940,11 @@ test("confirm route: EXPRESS with changed odds but no reconfirmable token (anoth
     }),
   );
 
-  assert.equal(res.status, 422);
+  assert.equal(res.status, 409);
   const body = (await json(res)) as { error: string; refreshedPreview?: unknown; refreshedPreviewToken?: unknown };
-  assert.equal(body.error, "SELECTION_UNAVAILABLE");
-  assert.equal("refreshedPreview" in body, false);
-  assert.equal("refreshedPreviewToken" in body, false);
-  assert.equal(db._debug.betCount(), 0, "no Bet may be created");
+  assert.equal(body.error, "ODDS_CHANGED_RECONFIRM_REQUIRED");
+  assert.ok(typeof body.refreshedPreviewToken === "string" && (body.refreshedPreviewToken as string).length > 0);
+  assert.equal(db._debug.betCount(), 0, "no Bet may be created from a 409 reconfirm response");
   assert.equal(db._debug.createCallCount(), 0, "no persistence transaction (bet.create) may run");
 });
 

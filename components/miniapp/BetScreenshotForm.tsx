@@ -15,7 +15,11 @@ import {
   type AnyConfirmedBet,
 } from "./betConfirmApi";
 import { OddsStatus, PreviewCard } from "./BetPreviewCard";
-import type { BetPreviewSuccess } from "./betPreviewApi";
+import {
+  fetchExpressLegExclusionPreview,
+  getBetPreviewErrorMessage,
+  type BetPreviewSuccess,
+} from "./betPreviewApi";
 import { canConfirmBetSlip, getConfirmButtonLabel, isOddsUnavailableForConfirm } from "./canConfirmBetSlip";
 
 interface BetScreenshotFormProps {
@@ -71,11 +75,17 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
   // BetTextForm — never rendered, decoded, logged, or persisted.
   const [preview, setPreview] = useState<BetPreviewSuccess | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Sector 1 (ADR-0002) — see BetTextForm.tsx's identical field for the full
+  // rationale.
+  const [excludingLegIndex, setExcludingLegIndex] = useState<number | null>(null);
 
   const isMountedRef = useRef(true);
   const requestTokenRef = useRef(0);
   const inFlightRef = useRef(false);
   const confirmControllerRef = useRef<AbortController | null>(null);
+  // Sector 1 (ADR-0002) — see BetTextForm.tsx's identical ref for the full
+  // rationale.
+  const excludeInFlightRef = useRef(false);
   // Mirrors `previewUrl` state so the unmount cleanup effect (which only
   // runs once, with a stale closure) can always revoke whatever the latest
   // object URL actually was, not just the one from initial mount.
@@ -155,7 +165,8 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
   // either token type). previewToken !== null is still the real guard —
   // it's null exactly when there's nothing valid to submit, regardless of
   // type.
-  const canConfirm = canConfirmBetSlip(phase === "ready", preview);
+  // Sector 1 (ADR-0002) — see BetTextForm.tsx's identical guard.
+  const canConfirm = canConfirmBetSlip(phase === "ready", preview) && excludingLegIndex === null;
   // Stage M4.5 — CLEAN UNAVAILABLE-ODDS UX. When the odds themselves are
   // unavailable, there is no genuine confirmation action to offer, so the
   // button is omitted entirely rather than rendered disabled (see
@@ -202,6 +213,50 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
     } else {
       triggerHaptic("success");
     }
+  }
+
+  // Sector 1 (ADR-0002) — EXPRESS per-leg unavailable recovery. Identical
+  // logic/rationale to BetTextForm.tsx's handleExcludeLeg (extracted
+  // duplication wasn't done here — same "small self-contained handler,
+  // duplicated rather than shared" convention this file already follows for
+  // triggerHaptic/TelegramHapticFeedback above).
+  async function handleExcludeLeg(legIndex: number) {
+    if (excludeInFlightRef.current || !preview || preview.previewToken === null) return;
+
+    const tg = window.Telegram?.WebApp;
+    if (!tg) return;
+
+    excludeInFlightRef.current = true;
+    const myRequest = ++requestTokenRef.current;
+
+    setExcludingLegIndex(legIndex);
+    setError(null);
+
+    const result = await fetchExpressLegExclusionPreview(tg.initData, preview.previewToken, [legIndex]);
+
+    excludeInFlightRef.current = false;
+    if (!isMountedRef.current || requestTokenRef.current !== myRequest) return;
+    setExcludingLegIndex(null);
+
+    if (!result.ok) {
+      setError(getBetPreviewErrorMessage(result.failure));
+      triggerHaptic("error");
+
+      if (
+        result.failure.kind === "http" &&
+        (result.failure.code === "PREVIEW_EXPIRED" || result.failure.code === "PREVIEW_INVALID")
+      ) {
+        // Same file/no-file phase fallback as handleConfirm's identical
+        // reset above.
+        setPreview(null);
+        setPhase(file ? "selected" : "idle");
+      }
+      return;
+    }
+
+    setPreview(result.data);
+    setPhase("ready");
+    triggerHaptic("success");
   }
 
   function handleChooseDifferent() {
@@ -439,7 +494,7 @@ export default function BetScreenshotForm({ onBack, onConfirmed }: BetScreenshot
 
         {showPreviewBlock && preview && (
           <div className="mt-3 w-full">
-            <PreviewCard preview={preview.preview} />
+            <PreviewCard preview={preview.preview} onExcludeLeg={handleExcludeLeg} excludingLegIndex={excludingLegIndex} />
             <OddsStatus preview={preview.preview} />
 
             {/* Stage M4.7 — SILENT CURRENT-ODDS PLAYER UX: no separate

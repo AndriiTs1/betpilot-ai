@@ -213,7 +213,7 @@ test("buildBetSlipPreview: EXPRESS token is redeemable via verifyExpressPreviewT
   assert.equal(payload.selections[1].oddsStatus, "VERIFIED");
 });
 
-test("buildBetSlipPreview: a selection whose odds check never resolved has currentOdds null in the PREVIEW, and — since SCREENSHOT ODDS QA-2 — an EXPRESS with any such leg no longer signs a token at all (fail-closed, not merely 'null inside a signed token')", async () => {
+test("buildBetSlipPreview: a selection whose odds check never resolved has currentOdds null in the PREVIEW, and totalOdds/potentialWin stay null — but (Sector 1 correction, ADR-0002) a previewToken IS still signed as a safe reference, distinct from confirmability", async () => {
   const slip: ParsedBetSlip = {
     type: "EXPRESS",
     stake: 40,
@@ -232,23 +232,31 @@ test("buildBetSlipPreview: a selection whose odds check never resolved has curre
 
   // The rejected odds check means no sourceOdds was ever obtained — null,
   // not a stale or fabricated value — and the status reflects that too.
-  // This is still visible in the PREVIEW response itself (built
-  // unconditionally, independent of whether a token ends up signed).
   assert.equal(result.preview.selections[0].currentOdds, 2);
   assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
   assert.equal(result.preview.selections[1].currentOdds, null);
   assert.equal(result.preview.selections[1].oddsStatus, "UNAVAILABLE");
 
-  // SCREENSHOT ODDS QA-2 — totalOdds/potentialWin (and therefore the
-  // EXPRESS token, which is only ever signed when both are known) now
-  // require every leg's odds to be PROVIDER-VERIFIED, not merely
-  // player-submitted. One genuinely unresolved leg means the whole slip's
-  // potential win can never be honestly quoted, so no token is signed —
-  // preserving the existing EXPRESS fail-closed confirmation policy, just
-  // triggered by verification instead of submission.
+  // totalOdds/potentialWin still require every leg's odds to be
+  // PROVIDER-VERIFIED — one genuinely unresolved leg means the whole
+  // slip's potential win can never be honestly quoted. This part of the
+  // fail-closed confirmation policy is unchanged.
   assert.equal(result.preview.totalOdds, null);
   assert.equal(result.preview.potentialWin, null);
-  assert.equal(result.previewToken, null);
+
+  // Sector 1 correction (ADR-0002) — a signed token IS produced (a safe
+  // reference to this exact recognized slip, needed by
+  // lib/bets/buildExpressLegExclusionPreview.ts), even though the slip
+  // cannot be confirmed yet. Confirmability is decided independently by
+  // oddsStatus (components/miniapp/canConfirmBetSlip.ts), never by whether
+  // this field is a string.
+  assert.ok(result.previewToken !== null);
+  const verified_ = verifyExpressPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verified_.ok, true);
+  if (!verified_.ok) return;
+  assert.equal(verified_.payload.totalOdds, null);
+  assert.equal(verified_.payload.potentialWin, null);
+  assert.equal(verified_.payload.selections.length, 2);
 });
 
 test("buildBetSlipPreview: EXPRESS token signed with exactly 10 selections (the maximum)", async () => {
@@ -277,10 +285,9 @@ test("buildBetSlipPreview: EXPRESS token signed with exactly 10 selections (the 
   assert.equal(verified_.payload.selections.length, 10);
 });
 
-test("buildBetSlipPreview: EXPRESS with a leg the provider can't resolve a price for still has no token (nothing valid to sign)", async () => {
-  // Step 17 — "Unknown Odds" IS now sent to the provider (auto-lookup
-  // applies to EXPRESS too), but the lookup genuinely fails to find a price
-  // for it, so totals/token stay null exactly as before this fix.
+test("buildBetSlipPreview: EXPRESS with a leg the provider can't resolve a price for still has totalOdds/potentialWin null, but (Sector 1 correction, ADR-0002) a signed token now exists to reference this exact slip for exclusion", async () => {
+  // Step 17 — "Unknown Odds" IS sent to the provider (auto-lookup applies
+  // to EXPRESS too), but the lookup genuinely fails to find a price for it.
   const slip: ParsedBetSlip = {
     type: "EXPRESS",
     stake: 40,
@@ -303,7 +310,15 @@ test("buildBetSlipPreview: EXPRESS with a leg the provider can't resolve a price
   assert.equal(result.preview.selections[1].submittedOdds, null);
   assert.equal(result.preview.totalOdds, null);
   assert.equal(result.preview.potentialWin, null);
-  assert.equal(result.previewToken, null);
+
+  // Sector 1 correction — the token exists (a safe reference for
+  // exclusion), NOT_FOUND leg included as-is, totalOdds/potentialWin null.
+  assert.ok(result.previewToken !== null);
+  const verified_ = verifyExpressPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verified_.ok, true);
+  if (!verified_.ok) return;
+  assert.equal(verified_.payload.totalOdds, null);
+  assert.equal(verified_.payload.selections[1].oddsStatus, "NOT_FOUND");
 });
 
 test("buildBetSlipPreview: rejects EXPRESS with 1 selection", async () => {
@@ -367,15 +382,17 @@ test("buildBetSlipPreview: one odds verification rejected -> Preview still succe
   assert.equal(result.preview.selections.length, 2);
   assert.equal(result.preview.selections[0].oddsStatus, "VERIFIED");
   assert.equal(result.preview.selections[1].oddsStatus, "UNAVAILABLE");
-  // SCREENSHOT ODDS QA-2 — totalOdds/potentialWin now require every leg's
-  // odds to be PROVIDER-VERIFIED, never merely submitted — a rejected odds
-  // check means this slip's real payout can never be honestly quoted, so
-  // both become null (and, per the EXPRESS-token gate, no token is signed
-  // either) even though the preview response itself still succeeds and
+  // totalOdds/potentialWin still require every leg's odds to be
+  // PROVIDER-VERIFIED, never merely submitted — a rejected odds check
+  // means this slip's real payout can never be honestly quoted, so both
+  // stay null, even though the preview response itself still succeeds and
   // still reports each leg's own status/currentOdds independently.
   assert.equal(result.preview.totalOdds, null);
   assert.equal(result.preview.potentialWin, null);
-  assert.equal(result.previewToken, null);
+  // Sector 1 correction (ADR-0002) — a signed token is still produced (a
+  // safe reference to this exact slip for exclusion), distinct from
+  // confirmability.
+  assert.ok(result.previewToken !== null);
 });
 
 test("buildBetSlipPreview: statuses are mapped independently across a mixed EXPRESS", async () => {
@@ -405,16 +422,25 @@ test("buildBetSlipPreview: statuses are mapped independently across a mixed EXPR
   assert.equal(c.oddsStatus, "NOT_FOUND");
   assert.equal(d.oddsStatus, "UNAVAILABLE");
 
-  // SCREENSHOT ODDS QA-2 — two of these four legs never matched a real
-  // provider price at all (NOT_FOUND/UNAVAILABLE), so totalOdds/potentialWin
-  // are null and — per the EXPRESS token gate — no token is signed for this
-  // mixed slip at all; there is no longer a token to carry the same four
-  // statuses into for this exact scenario. The "signed token carries the
-  // same per-leg oddsStatus/currentOdds as the preview" property is still
-  // covered, on an all-VERIFIED EXPRESS where a token genuinely gets
-  // signed, by the "EXPRESS token is redeemable via verifyExpressPreviewToken..."
-  // test above.
-  assert.equal(result.previewToken, null);
+  // Two of these four legs never matched a real provider price at all
+  // (NOT_FOUND/UNAVAILABLE), so totalOdds/potentialWin stay null for this
+  // mixed slip.
+  assert.equal(result.preview.totalOdds, null);
+  assert.equal(result.preview.potentialWin, null);
+
+  // Sector 1 correction (ADR-0002) — a token IS still signed, carrying the
+  // same four per-leg statuses as the preview — this is exactly the shape
+  // lib/bets/buildExpressLegExclusionPreview.ts needs to reference a mixed
+  // slip and let the player exclude the NOT_FOUND/UNAVAILABLE legs.
+  assert.ok(result.previewToken !== null);
+  const verified_ = verifyExpressPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verified_.ok, true);
+  if (!verified_.ok) return;
+  assert.equal(verified_.payload.totalOdds, null);
+  assert.deepEqual(
+    verified_.payload.selections.map((s) => s.oddsStatus),
+    ["VERIFIED", "ODDS_CHANGED", "NOT_FOUND", "UNAVAILABLE"],
+  );
 });
 
 test("buildBetSlipPreview: a null-odds selection whose provider lookup throws maps to UNAVAILABLE (attempted, not skipped) and totals become null", async () => {
@@ -1102,13 +1128,14 @@ test("Step 17 (2): EXPRESS of two null-odds legs, both VERIFIED — each leg's c
   assert.equal(result.preview.totalOdds, 3.3); // 1.65 * 2.0
   assert.equal(result.preview.potentialWin, 330); // 100 * 3.3
 
-  // Confirm becomes available: an EXPRESS previewToken is only ever signed
-  // once totalOdds/potentialWin are both known (buildBetSlipPreview.ts's
-  // own EXPRESS token-signing condition, unchanged by this fix).
+  // Confirm becomes available: totalOdds/potentialWin are both known, and
+  // canConfirmBetSlip.ts's oddsStatus-based gate allows Confirm (a signed
+  // token exists in this case too, but — Sector 1 correction, ADR-0002 —
+  // token presence alone no longer implies confirmability either way).
   assert.ok(typeof result.previewToken === "string" && result.previewToken.length > 0);
 });
 
-test("Step 17 (3): EXPRESS of two null-odds legs, one NOT_FOUND — that leg maps to NOT_FOUND per the existing mapping, the whole express stays unconfirmable (no token, no totals)", async () => {
+test("Step 17 (3): EXPRESS of two null-odds legs, one NOT_FOUND — that leg maps to NOT_FOUND per the existing mapping, the whole express stays unconfirmable by totals (token still signed as a reference)", async () => {
   const result = await buildBetSlipPreview(dinamoKupsExpressSlip(), "player-1", TEST_SECRET, {
     verifyOddsFn: async (input) => {
       if (input.event === "Dinamo Zagreb vs Thun") return verified(1.65, 1.65);
@@ -1124,17 +1151,27 @@ test("Step 17 (3): EXPRESS of two null-odds legs, one NOT_FOUND — that leg map
   assert.equal(kups.currentOdds, null);
   assert.equal(kups.submittedOdds, null, "a failed lookup never fabricates a price");
 
-  // The whole EXPRESS stays unconfirmable: one leg's odds are unknown, so
-  // totalOdds/potentialWin can't be computed and no token is signed —
-  // downstream (Mini App canConfirmBetSlip.ts / confirm-time
+  // The whole EXPRESS stays unconfirmable BY TOTALS: one leg's odds are
+  // unknown, so totalOdds/potentialWin can't be computed — downstream
+  // (Mini App canConfirmBetSlip.ts / confirm-time
   // verifyPreviewFreshness.ts, both untouched by this fix) already treat
-  // NOT_FOUND identically to UNAVAILABLE as blocking.
+  // NOT_FOUND identically to UNAVAILABLE as blocking, independent of token
+  // presence.
   assert.equal(result.preview.totalOdds, null);
   assert.equal(result.preview.potentialWin, null);
-  assert.equal(result.previewToken, null);
+  // Sector 1 correction (ADR-0002) — a token IS signed as a safe reference
+  // to this exact slip, so the player can exclude the NOT_FOUND leg via
+  // lib/bets/buildExpressLegExclusionPreview.ts. It carries totalOdds:null
+  // and the NOT_FOUND status as-is — never a fabricated total.
+  assert.ok(result.previewToken !== null);
+  const verified_ = verifyExpressPreviewToken(result.previewToken!, TEST_SECRET);
+  assert.equal(verified_.ok, true);
+  if (!verified_.ok) return;
+  assert.equal(verified_.payload.totalOdds, null);
+  assert.equal(verified_.payload.selections[1].oddsStatus, "NOT_FOUND");
 });
 
-test("Step 17 (3b): EXPRESS of two null-odds legs, one provider exception (never attempted a real match) — UNAVAILABLE, still unconfirmable", async () => {
+test("Step 17 (3b): EXPRESS of two null-odds legs, one provider exception (never attempted a real match) — UNAVAILABLE, still unconfirmable by totals (token still signed)", async () => {
   const result = await buildBetSlipPreview(dinamoKupsExpressSlip(), "player-1", TEST_SECRET, {
     verifyOddsFn: async (input) => {
       if (input.event === "Dinamo Zagreb vs Thun") return verified(1.65, 1.65);
@@ -1146,7 +1183,9 @@ test("Step 17 (3b): EXPRESS of two null-odds legs, one provider exception (never
   assert.equal(dinamo.oddsStatus, "VERIFIED");
   assert.equal(kups.oddsStatus, "UNAVAILABLE", "a genuinely thrown/never-completed check maps to UNAVAILABLE, distinct from an attempted-but-unmatched NOT_FOUND");
   assert.equal(result.preview.totalOdds, null);
-  assert.equal(result.previewToken, null);
+  // Sector 1 correction (ADR-0002) — see the identical comment on the
+  // NOT_FOUND variant of this test above.
+  assert.ok(result.previewToken !== null);
 });
 
 test("Step 17 (4): SINGLE null-odds regression — unaffected by the EXPRESS fix, byte-for-byte same as Step 15I (A)", async () => {
@@ -3572,7 +3611,7 @@ test("MASTER STAGE M3.1 Phase F — EXPRESS: screenshot leg odds 2.00x1.80 != of
   assert.equal(result.preview.potentialWin, 323); // 100 * 3.23
 });
 
-test("SCREENSHOT ODDS QA-2 EXPRESS: one leg unverified — fail-closed, no token, exactly the existing EXPRESS confirmation policy, unchanged in kind by this stage", async () => {
+test("SCREENSHOT ODDS QA-2 EXPRESS: one leg unverified — totals stay fail-closed null; a token is still signed as a Sector 1 exclusion reference (ADR-0002 correction)", async () => {
   const slip: ParsedBetSlip = {
     type: "EXPRESS",
     stake: 50,
@@ -3593,5 +3632,5 @@ test("SCREENSHOT ODDS QA-2 EXPRESS: one leg unverified — fail-closed, no token
   assert.equal(result.preview.selections[1].oddsStatus, "NOT_FOUND");
   assert.equal(result.preview.totalOdds, null);
   assert.equal(result.preview.potentialWin, null);
-  assert.equal(result.previewToken, null);
+  assert.ok(result.previewToken !== null);
 });

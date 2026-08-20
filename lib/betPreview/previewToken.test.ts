@@ -268,6 +268,50 @@ test("EXPRESS: a selection's null market/submittedOdds/currentOdds round-trip as
   assert.equal(result.payload.selections[0].oddsStatus, "UNAVAILABLE");
 });
 
+// ---------------------------------------------------------------------
+// Sector 1 correction (ADR-0002) — totalOdds/potentialWin are nullable:
+// a token is a signed reference to a recognized slip, not a promise it's
+// priced/confirmable. See ExpressPreviewTokenPayload's own comment for the
+// full rationale.
+// ---------------------------------------------------------------------
+
+test("EXPRESS: sign -> verify roundtrip with null totalOdds and potentialWin succeeds — a token is a reference, not a confirmability signal", () => {
+  const token = signExpressPreviewToken(expressInput({ totalOdds: null, potentialWin: null }), SECRET);
+  const result = verifyExpressPreviewToken(token, SECRET);
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.payload.totalOdds, null);
+  assert.equal(result.payload.potentialWin, null);
+  // stake is unaffected — it's the player's own input, never derived from
+  // odds verification, so it stays required.
+  assert.equal(result.payload.stake, "40.00");
+});
+
+test("EXPRESS: totalOdds and potentialWin can be independently null (one known, one not) — no coupling assumed between the two fields", () => {
+  const token = signExpressPreviewToken(expressInput({ totalOdds: "3.06", potentialWin: null }), SECRET);
+  const result = verifyExpressPreviewToken(token, SECRET);
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.payload.totalOdds, "3.06");
+  assert.equal(result.payload.potentialWin, null);
+});
+
+test("EXPRESS: a forged token with a non-decimal-looking (but non-null) totalOdds is still rejected — null is the only accepted non-decimal value", () => {
+  const token = forgeExpressToken(baseForgedPayload({ totalOdds: "not-a-number" }), SECRET);
+  const result = verifyExpressPreviewToken(token, SECRET);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.reason, "invalid_payload");
+});
+
+test("EXPRESS: a forged token with totalOdds: null is accepted by shape validation (the reference-token case)", () => {
+  const token = forgeExpressToken(baseForgedPayload({ totalOdds: null, potentialWin: null }), SECRET);
+  const result = verifyExpressPreviewToken(token, SECRET);
+  assert.equal(result.ok, true);
+});
+
 test("EXPRESS: sign -> verify roundtrip with exactly 10 selections succeeds", () => {
   const selections = Array.from({ length: 10 }, (_, i) =>
     expressSelection({ event: `Match ${i}`, outcome: `Outcome ${i}`, submittedOdds: "1.10" }),

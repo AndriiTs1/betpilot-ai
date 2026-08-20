@@ -639,7 +639,23 @@ export async function buildBetSlipPreview(
       },
       previewTokenSecret,
     );
-  } else if (slip.type === "EXPRESS" && totalOdds !== null && potentialWin !== null) {
+  } else if (slip.type === "EXPRESS") {
+    // Sector 1 correction (ADR-0002) — a signed EXPRESS token is now
+    // produced whenever the slip itself is structurally valid (2-10
+    // selections, already enforced by validateBetSlipType above),
+    // regardless of whether totalOdds/potentialWin could be computed.
+    // `previewToken exists` (a safe, signed reference to this exact set of
+    // legs — what lib/bets/buildExpressLegExclusionPreview.ts needs) and
+    // `bet can be confirmed` (decided independently by each selection's own
+    // oddsStatus — canConfirmBetSlip.ts/verifyPreviewFreshness.ts/
+    // createBetFromPreview.ts's own EXPRESS_INVALID_DECIMAL guard) are
+    // deliberately different questions; this branch only ever answers the
+    // first one. Before this correction, one NOT_FOUND/UNAVAILABLE leg made
+    // allOddsKnown false, which kept previewToken null for the WHOLE slip —
+    // the exact condition that made Sector 1's exclusion endpoint
+    // structurally unreachable in its own target scenario (see ADR-0002's
+    // Sector 1 practical-QA finding).
+    //
     // Not caught here: signExpressPreviewToken's own selections-count guard
     // (lib/betPreview/previewToken.ts) can only ever throw for a count
     // outside 2-10, and validateBetSlipType already enforced that same
@@ -652,8 +668,8 @@ export async function buildBetSlipPreview(
       {
         playerId,
         stake: stakeDecimal.toString(),
-        totalOdds: totalOdds.toString(),
-        potentialWin: potentialWin.toString(),
+        totalOdds: totalOdds !== null ? totalOdds.toString() : null,
+        potentialWin: potentialWin !== null ? potentialWin.toString() : null,
         selections: previewSelections.map((selection, index) => {
           const legOddsCheck = reconstructedByIndex.get(index)?.oddsCheck ?? null;
           const providerTokenFields = buildProviderTokenFields(legOddsCheck, requests[index]?.selection);

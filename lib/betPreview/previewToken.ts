@@ -417,14 +417,31 @@ export interface ExpressPreviewTokenSelection extends Partial<PreviewTokenProvid
   oddsStatus: BetSelectionOddsStatus;
 }
 
+// Sector 1 correction (ADR-0002) — totalOdds/potentialWin are nullable:
+// `previewToken exists` and `bet can be confirmed` are two different
+// concepts (the architecture principle this correction enforces). A token
+// is now signed for every valid EXPRESS slip regardless of whether every
+// leg's odds are currently known — it's a signed REFERENCE to a specific
+// recognized set of legs, safe to hand back to the exclusion endpoint
+// (lib/bets/buildExpressLegExclusionPreview.ts), not a promise that the
+// slip is ready to confirm. totalOdds/potentialWin are null exactly when
+// buildBetSlipPreview.ts's own allOddsKnown is false (at least one leg is
+// NOT_FOUND/UNAVAILABLE/PENDING) — the same condition that already, and
+// independently, keeps canConfirmBetSlip.ts's hasUnverifiedOddsStatus
+// false and createBetFromPreview.ts's assertValidExpressPayload throwing
+// EXPRESS_INVALID_DECIMAL. Confirmability was never determined by whether
+// this field is a string — it's determined by each selection's own
+// oddsStatus, unchanged by this correction. `stake` stays required: it's
+// the player's own input, never derived from odds verification, so it's
+// always known the moment a slip exists.
 export interface ExpressPreviewTokenPayload {
   v: typeof TOKEN_VERSION;
   previewId: string;
   playerId: string;
   type: "EXPRESS";
   stake: string;
-  totalOdds: string;
-  potentialWin: string;
+  totalOdds: string | null;
+  potentialWin: string | null;
   selections: ExpressPreviewTokenSelection[];
   issuedAt: number;
   expiresAt: number;
@@ -433,8 +450,8 @@ export interface ExpressPreviewTokenPayload {
 export interface ExpressPreviewTokenInput {
   playerId: string;
   stake: string;
-  totalOdds: string;
-  potentialWin: string;
+  totalOdds: string | null;
+  potentialWin: string | null;
   selections: ExpressPreviewTokenSelection[];
 }
 
@@ -536,8 +553,11 @@ function hasValidExpressPreviewTokenShape(
     p.playerId.length > 0 &&
     p.type === "EXPRESS" &&
     isValidDecimalString(p.stake) &&
-    isValidDecimalString(p.totalOdds) &&
-    isValidDecimalString(p.potentialWin) &&
+    // Sector 1 correction (ADR-0002) — totalOdds/potentialWin are null
+    // exactly when the slip isn't fully priced yet; see
+    // ExpressPreviewTokenPayload's own comment.
+    (p.totalOdds === null || isValidDecimalString(p.totalOdds)) &&
+    (p.potentialWin === null || isValidDecimalString(p.potentialWin)) &&
     Array.isArray(p.selections) &&
     p.selections.length >= MIN_EXPRESS_SELECTIONS &&
     p.selections.length <= MAX_EXPRESS_SELECTIONS &&

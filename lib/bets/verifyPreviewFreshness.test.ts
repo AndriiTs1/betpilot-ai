@@ -349,13 +349,14 @@ test("verifyPreviewFreshness: EXPRESS odds changed with every leg's odds known p
   assert.ok(decision.refreshedPreviewToken.length > 0);
 });
 
-test("verifyPreviewFreshness: EXPRESS odds changed but no reconfirmable token can be produced (another exempt null-odds leg) returns SELECTION_UNAVAILABLE, never ODDS_CHANGED with a null token", async () => {
-  // Real repository-supported case: buildBetSlipPreview only signs an
-  // EXPRESS refreshedPreviewToken when EVERY selection's submittedOdds is
-  // known (allOddsKnown), regardless of which selections are
-  // freshness-relevant. A second, exempt (null-submittedOdds) leg alongside
-  // a genuinely ODDS_CHANGED leg is exactly the scenario where odds changed
-  // is detected but no signed replacement preview can exist.
+test("verifyPreviewFreshness: EXPRESS odds changed alongside another exempt null-odds leg still returns a reconfirmable ODDS_CHANGED (Sector 1 correction, ADR-0002)", async () => {
+  // Sector 1 correction — buildBetSlipPreview.ts now signs an EXPRESS
+  // token whenever the slip is structurally valid, regardless of
+  // allOddsKnown (previously, this exempt leg alone was enough to keep
+  // refreshedPreviewToken null for the whole slip, forcing this scenario
+  // into decideFreshnessOutcome's null-token SELECTION_UNAVAILABLE
+  // fallback). That fallback is still correct code — it's just no longer
+  // reachable for EXPRESS, since a token is always produced now.
   const payload = expressPayload({
     selections: [
       expressPayload().selections[0],
@@ -367,7 +368,10 @@ test("verifyPreviewFreshness: EXPRESS odds changed but no reconfirmable token ca
     verifyOddsFn: fakeVerifyOddsFn({ "Real Madrid vs Barcelona": oddsChanged(1.6, 1.8) }),
   });
 
-  assert.deepEqual(decision, { kind: "SELECTION_UNAVAILABLE" });
+  assert.equal(decision.kind, "ODDS_CHANGED");
+  if (decision.kind !== "ODDS_CHANGED") return;
+  assert.equal(typeof decision.refreshedPreviewToken, "string");
+  assert.ok(decision.refreshedPreviewToken.length > 0);
 });
 
 test("verifyPreviewFreshness: EXPRESS with multiple legs ODDS_CHANGED still rejects the entire slip as ODDS_CHANGED", async () => {
@@ -409,7 +413,18 @@ test("verifyPreviewFreshness: EXPRESS with one leg UNAVAILABLE returns VERIFICAT
   assert.deepEqual(decision, { kind: "VERIFICATION_UNAVAILABLE" });
 });
 
-test("verifyPreviewFreshness: EXPRESS ODDS_CHANGED + NOT_FOUND resolves to SELECTION_UNAVAILABLE — SCREENSHOT ODDS QA-2 made buildBetSlipPreview's EXPRESS refreshedPreviewToken null whenever ANY leg is unverified (not just an exempt null-submittedOdds leg), which is exactly the null-token case this function's own header already documents as falling back to SELECTION_UNAVAILABLE rather than a reconfirmable ODDS_CHANGED — a real price move on one leg is still never silently confirmable while a sibling leg can't be priced at all", async () => {
+test("verifyPreviewFreshness: EXPRESS ODDS_CHANGED + NOT_FOUND now resolves to a reconfirmable ODDS_CHANGED (Sector 1 correction, ADR-0002) — but the refreshed preview itself is still NOT confirmable, because the NOT_FOUND leg is still present", async () => {
+  // Before this correction, buildBetSlipPreview.ts kept refreshedPreviewToken
+  // null whenever ANY leg was unverified, which forced this exact mix into
+  // decideFreshnessOutcome's null-token SELECTION_UNAVAILABLE fallback — a
+  // hard stop with no way to recover except restarting the whole EXPRESS.
+  // Now a token always exists, so the player gets a real, usable reference
+  // to this exact slip — but this does NOT mean the bet became confirmable:
+  // the refreshed preview still has the NOT_FOUND leg, so
+  // canConfirmBetSlip.ts's hasUnverifiedOddsStatus still blocks Confirm on
+  // it (proven below, not just asserted by name). Recovering from here
+  // requires Sector 1 exclusion (lib/bets/buildExpressLegExclusionPreview.ts)
+  // on this exact refreshedPreviewToken, not a plain Confirm tap.
   const payload = expressPayload();
 
   const decision = await verifyPreviewFreshness(payload, TEST_SECRET, {
@@ -419,7 +434,20 @@ test("verifyPreviewFreshness: EXPRESS ODDS_CHANGED + NOT_FOUND resolves to SELEC
     }),
   });
 
-  assert.deepEqual(decision, { kind: "SELECTION_UNAVAILABLE" });
+  assert.equal(decision.kind, "ODDS_CHANGED");
+  if (decision.kind !== "ODDS_CHANGED") return;
+  assert.equal(typeof decision.refreshedPreviewToken, "string");
+  assert.ok(decision.refreshedPreviewToken.length > 0);
+
+  // Confirm gate proof: totalOdds/potentialWin are null (one leg still
+  // unresolved) — the presence of a signed token never implies these are
+  // known, and never bypasses the oddsStatus-based confirm gate.
+  assert.equal(decision.refreshedPreview.totalOdds, null);
+  assert.equal(decision.refreshedPreview.potentialWin, null);
+  assert.deepEqual(
+    decision.refreshedPreview.selections.map((s) => s.oddsStatus),
+    ["ODDS_CHANGED", "NOT_FOUND"],
+  );
 });
 
 test("verifyPreviewFreshness: EXPRESS ODDS_CHANGED + UNAVAILABLE resolves to VERIFICATION_UNAVAILABLE, never a reconfirmable refreshed preview", async () => {

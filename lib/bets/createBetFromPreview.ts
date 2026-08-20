@@ -199,7 +199,19 @@ function providerReferenceColumnsFromToken(source: {
   };
 }
 
-function assertValidExpressPayload(payload: ExpressPreviewTokenPayload): void {
+// Sector 1 correction (ADR-0002) — an `asserts` type predicate, not a plain
+// `void` return: ExpressPreviewTokenPayload.totalOdds is now `string |
+// null` (a token may exist for a slip that isn't fully priced yet — see
+// that type's own comment), but a Bet must never be created without a real
+// totalOdds. This function is the one place that enforces that boundary,
+// and narrowing its own return type lets every read of payload.totalOdds
+// after this call (below, in createExpressBetFromPreview) stay a plain
+// `string` at the type level — the compiler itself now proves a partial
+// (null-totalOdds) token can never reach `new Prisma.Decimal(payload.totalOdds)`,
+// not just a runtime check that happens to run first.
+function assertValidExpressPayload(
+  payload: ExpressPreviewTokenPayload,
+): asserts payload is ExpressPreviewTokenPayload & { totalOdds: string } {
   if (payload.previewId.length === 0 || payload.playerId.length === 0) {
     throw new CreateBetFromPreviewValidationError(
       "EXPRESS_MISSING_IDENTIFIER",

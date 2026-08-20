@@ -8,6 +8,7 @@ import {
   isConfirmableSingleOdds,
   isOddsUnavailableForConfirm,
   isSingleSelectionOddsUnavailable,
+  isRecoverableLeg,
 } from "./canConfirmBetSlip";
 import type { BetPreviewSuccess, BetPreviewSelection } from "./betPreviewApi";
 
@@ -64,6 +65,48 @@ test("canConfirmBetSlip: EXPRESS preview with no token (unresolved odds) is not 
   const preview = previewSuccess({
     preview: { type: "EXPRESS", stake: 40, totalOdds: null, potentialWin: null, selections: [] },
     previewToken: null,
+  });
+  assert.equal(canConfirmBetSlip(true, preview), false);
+});
+
+// ---------------------------------------------------------------------
+// Sector 1 correction (ADR-0002) — buildBetSlipPreview.ts now signs a
+// previewToken for EXPRESS even when a leg is NOT_FOUND/UNAVAILABLE (a
+// signed reference for exclusion, not a confirmability signal). This is
+// the regression that matters now: a NON-NULL token must never, by itself,
+// make an unverified-leg EXPRESS confirmable — hasUnverifiedOddsStatus
+// (the oddsStatus-based gate) must still block it. Before this correction
+// this exact combination (real token + unavailable leg) was structurally
+// impossible to construct through buildBetSlipPreview, so this case was
+// previously untestable against the real pipeline — see
+// lib/bets/buildExpressLegExclusionPreview.test.ts's real production-path
+// integration test for the end-to-end proof.
+// ---------------------------------------------------------------------
+
+test("canConfirmBetSlip: EXPRESS preview WITH a real token but one NOT_FOUND leg is still NOT confirmable — token presence never bypasses the oddsStatus gate", () => {
+  const preview = previewSuccess({
+    preview: {
+      type: "EXPRESS",
+      stake: 40,
+      totalOdds: null,
+      potentialWin: null,
+      selections: [singleSelection({ oddsStatus: "VERIFIED" }), singleSelection({ oddsStatus: "NOT_FOUND" })],
+    },
+    previewToken: "a-real-reference-token-with-an-unavailable-leg",
+  });
+  assert.equal(canConfirmBetSlip(true, preview), false);
+});
+
+test("canConfirmBetSlip: EXPRESS preview WITH a real token but one UNAVAILABLE leg is still NOT confirmable", () => {
+  const preview = previewSuccess({
+    preview: {
+      type: "EXPRESS",
+      stake: 40,
+      totalOdds: null,
+      potentialWin: null,
+      selections: [singleSelection({ oddsStatus: "VERIFIED" }), singleSelection({ oddsStatus: "UNAVAILABLE" })],
+    },
+    previewToken: "a-real-reference-token-with-an-unavailable-leg",
   });
   assert.equal(canConfirmBetSlip(true, preview), false);
 });
@@ -482,4 +525,31 @@ test("hasUnverifiedOddsStatus: true when any selection is NOT_FOUND/UNAVAILABLE/
     true,
     "one unverified leg among otherwise-fine legs still blocks",
   );
+});
+
+// ---------------------------------------------------------------------
+// Sector 1 (ADR-0002) — isRecoverableLeg: which legs get a Remove
+// affordance in BetPreviewCard.tsx. Only NOT_FOUND/UNAVAILABLE — never
+// VERIFIED/ODDS_CHANGED (out of Sector 1's approved scope) and never the
+// reserved-but-unreachable PENDING.
+// ---------------------------------------------------------------------
+
+test("isRecoverableLeg: true for NOT_FOUND", () => {
+  assert.equal(isRecoverableLeg(singleSelection({ oddsStatus: "NOT_FOUND" })), true);
+});
+
+test("isRecoverableLeg: true for UNAVAILABLE", () => {
+  assert.equal(isRecoverableLeg(singleSelection({ oddsStatus: "UNAVAILABLE" })), true);
+});
+
+test("isRecoverableLeg: false for VERIFIED — Sector 1 never makes a verified leg removable", () => {
+  assert.equal(isRecoverableLeg(singleSelection({ oddsStatus: "VERIFIED" })), false);
+});
+
+test("isRecoverableLeg: false for ODDS_CHANGED — a real, confirmed leg whose price moved is not 'unavailable'", () => {
+  assert.equal(isRecoverableLeg(singleSelection({ oddsStatus: "ODDS_CHANGED" })), false);
+});
+
+test("isRecoverableLeg: false for PENDING (reserved, practically unreachable)", () => {
+  assert.equal(isRecoverableLeg(singleSelection({ oddsStatus: "PENDING" })), false);
 });

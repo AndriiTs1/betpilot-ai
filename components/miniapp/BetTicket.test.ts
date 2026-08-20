@@ -393,8 +393,6 @@ test("source: 'Verified by BetPilot AI' is still rendered, unchanged text, no ne
 test("source: the footer uses the new compact barcode height and tighter spacing", () => {
   assert.match(source, /className="flex h-6 items-center gap-\[3px\]"/);
   assert.equal(source.includes('className="flex h-10 items-center gap-[3px]"'), false, "old 40px barcode height must be gone");
-  assert.match(source, /className="flex flex-col items-center px-5 pt-4 pb-5"/);
-  assert.equal(source.includes('px-5 pb-6 pt-5"'), false, "old, looser footer padding must be gone");
   assert.match(source, /<p className="mt-1\.5 flex items-center gap-1\.5 text-\[11px\] text-slate-500">/);
   assert.equal(/<p className="mt-3 flex items-center gap-1\.5 text-\[11px\]/.test(source), false, "old, looser gap before the verification line must be gone");
 });
@@ -459,30 +457,30 @@ test("M5.3 regression guard: Done / View History remain unchanged", () => {
 // tightened so an EXPRESS ×2 submitted ticket has a realistic shot at
 // fitting a normal iPhone viewport without scrolling. Every assertion below
 // checks spacing classes only — no text content, field, or number changed.
-test("source: the Event section's container padding was tightened (py-5 -> py-4)", () => {
-  assert.match(source, /\{\/\* Event.*[\s\S]{0,400}className="px-5 py-4"/);
+test("source: the Event section's container padding was tightened (py-5 -> py-4 -> py-3)", () => {
+  assert.match(source, /\{\/\* Event.*[\s\S]{0,900}className="px-5 py-3"/);
   assert.equal(/\{\/\* Event\b[\s\S]{0,50}className="px-5 py-5"/.test(source), false, "old, looser Event section padding must be gone");
+  assert.equal(source.includes('className="px-5 py-4">\n          {ticket.selections.map'), false, "the M5.4 py-4 value must be gone, tightened further in M5.6");
 });
 
-test("source: the gap between legs was tightened (mt-4 -> mt-3)", () => {
-  assert.match(source, /className=\{`ticket-row-animate \$\{index > 0 \? "mt-3" : ""\}`\}/);
+test("source: the gap between legs was tightened (mt-4 -> mt-3 -> mt-2)", () => {
+  assert.match(source, /className=\{`ticket-row-animate \$\{index > 0 \? "mt-2" : ""\}`\}/);
+  assert.equal(source.includes('className={`ticket-row-animate ${index > 0 ? "mt-3" : ""}`}'), false, "the M5.4 mt-3 value must be gone, tightened further in M5.6");
   assert.equal(source.includes('className={`ticket-row-animate ${index > 0 ? "mt-4" : ""}`}'), false, "old, looser inter-leg gap must be gone");
-});
-
-test("source: the Leg N label gap was tightened (mb-1.5 -> mb-1)", () => {
-  assert.match(source, /<p className="mb-1 text-\[11px\] font-semibold uppercase tracking-wide text-slate-500">\s*Leg \{index \+ 1\}/);
 });
 
 test("source: the event-name gap was tightened (mt-1 -> mt-0.5)", () => {
   assert.match(source, /<p className="mt-0\.5 text-\[15px\] font-semibold text-white break-words">\{selection\.event\}<\/p>/);
 });
 
-test("source: the Financial section's container padding was tightened (py-5 -> py-4)", () => {
-  assert.match(source, /hierarchy is conveyed by weight\/color only\.[\s\S]{0,300}className="px-5 py-4"/);
+test("source: the Financial section's container padding was tightened (py-5 -> py-4 -> py-3)", () => {
+  assert.match(source, /hierarchy is conveyed by weight\/color only\.[\s\S]{0,600}className="px-5 py-3"/);
+  assert.equal(/hierarchy is conveyed by weight\/color only\.[\s\S]{0,300}className="px-5 py-4"/.test(source), false, "the M5.4 py-4 value must be gone, tightened further in M5.6");
 });
 
-test("source: FinancialRow's inter-row gap was tightened (mb-2.5 -> mb-2)", () => {
-  assert.match(source, /\$\{last \? "" : "mb-2"\}`/);
+test("source: FinancialRow's inter-row gap was tightened (mb-2.5 -> mb-2 -> mb-1.5)", () => {
+  assert.match(source, /\$\{last \? "" : "mb-1\.5"\}`/);
+  assert.equal(source.includes('${last ? "" : "mb-2"}`'), false, "the M5.4 mb-2 value must be gone, tightened further in M5.6");
   assert.equal(source.includes('${last ? "" : "mb-2.5"}`'), false, "old, looser financial-row gap must be gone");
 });
 
@@ -495,4 +493,156 @@ test("M5.4 regression guard: no leg/financial content was removed, only spacing"
   assert.match(source, /label="Stake"/);
   assert.match(source, /label=\{isParlay \? "Combined odds" : "Odds"\}/);
   assert.match(source, /label="Potential win"/);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Stage M5.6 — ONE-SCREEN SUBMITTED TICKET FINAL POLISH                     */
+/*                                                                             */
+/* Goal: reclaim the remaining vertical waste in the submitted ticket so an   */
+/* EXPRESS ×2 ticket (header + both legs + financial summary + footer +      */
+/* Done/View History) has a realistic shot at fitting a normal iPhone        */
+/* viewport without scrolling. The single largest lever this stage found:    */
+/* each leg spent two full lines on secondary metadata ("Leg N" alone, then  */
+/* "FOOTBALL" alone) — both values are now combined onto one line. Every     */
+/* other change is a spacing-token trim (header/event/financial/footer/      */
+/* action-area padding and gaps). No text, field, value, or calculation      */
+/* changed anywhere.                                                         */
+/* -------------------------------------------------------------------------- */
+
+// Requirement 1 — header/status content (wordmark, badge, detail, ticket
+// id, player, date/time) is all still present, just in a tighter container.
+test("source: header/status content is fully present, in a tighter container (pt-5 pb-4 gap-2 -> pt-4 pb-3 gap-1.5)", () => {
+  assert.match(source, /BetPilot AI/);
+  assert.match(source, /status\.badgeLabel/);
+  assert.match(source, /· \{status\.detail\}/);
+  assert.match(source, /shortTicketId\(ticket\.id\)/);
+  assert.match(source, /\{ticket\.player\}/);
+  assert.match(source, /formatDate\(ticket\.createdAt\)/);
+  assert.match(source, /formatTime\(ticket\.createdAt\)/);
+  assert.match(source, /className="flex flex-col gap-1\.5 px-5 pt-4 pb-3"/);
+  assert.equal(source.includes('className="flex flex-col gap-2 px-5 pt-5 pb-4"'), false, "old, looser header container must be gone");
+});
+
+// Requirements 2-4 — both EXPRESS legs render fully: event name, selection,
+// odds, and the sport/leg metadata (now combined onto one line, not
+// removed) are all still present.
+test("source: both legs' sport/Leg-N metadata is combined onto one line — both values are still shown, neither removed", () => {
+  assert.match(
+    source,
+    /<div className="flex items-center gap-1\.5 text-\[11px\] font-semibold uppercase tracking-wide text-slate-500">\s*\{isParlay && \(\s*<>\s*<span>Leg \{index \+ 1\}<\/span>\s*<span aria-hidden="true">·<\/span>\s*<\/>\s*\)\}\s*<SportIcon sport=\{selection\.sport\} size=\{13\} \/>\s*<span>\s*\{selection\.sport\}/,
+  );
+  assert.equal(source.includes('<p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">'), false, "the old separate Leg-N-only line must be gone");
+  assert.equal(source.includes('<div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-slate-500">'), false, "the old separate sport-only line must be gone");
+});
+
+test("source: event name, selection, and odds remain present and unchanged in the leg block", () => {
+  assert.match(source, /<p className="mt-0\.5 text-\[15px\] font-semibold text-white break-words">\{selection\.event\}<\/p>/);
+  assert.match(source, /\{selection\.selection\}/);
+  assert.match(source, /\{selection\.market \? ` · \$\{selection\.market\}` : ""\}/);
+  assert.match(source, /\{displayOdds !== null \? ` · \$\{formatAmount\(displayOdds\)\}` : ""\}/);
+});
+
+// Requirements 5-8 — Stake, Combined odds, Potential win (with currency),
+// and Available credit are all still present, values/labels unchanged.
+test("source: Stake, Combined odds, Potential win (with currency), and Available credit are all unchanged", () => {
+  assert.match(source, /label="Stake" value=\{formatAmount\(ticket\.stake\)\}/);
+  assert.match(source, /label=\{isParlay \? "Combined odds" : "Odds"\}/);
+  assert.match(source, /label="Potential win"\s*\n\s*value=\{formatPotentialWin\(potentialWin\)\}/);
+  assert.equal(formatPotentialWin(computeTicketPotentialWin(5, 6.16)), "30.80 USDC");
+  assert.match(source, /label="Available credit"[\s\S]{0,120}muted/);
+});
+
+// Requirements 9-10 — the barcode and "Verified by BetPilot AI" both
+// remain, only the surrounding container padding was trimmed further.
+test("source: barcode and 'Verified by BetPilot AI' remain, footer container padding tightened once more (pt-4 pb-5 -> pt-3 pb-4)", () => {
+  assert.match(source, /<TicketBarcode seed=\{ticket\.id\}\s*\/>/);
+  assert.match(source, /Verified by BetPilot AI/);
+  assert.match(source, /className="flex flex-col items-center px-5 pt-3 pb-4"/);
+  assert.equal(source.includes('className="flex flex-col items-center px-5 pt-4 pb-5"'), false, "the M5.3 pt-4 pb-5 value must be gone, tightened further in M5.6");
+  // The barcode's own height and the gap before the label are deliberately
+  // untouched — this stage's own instruction says not to shrink the
+  // barcode again.
+  assert.match(source, /className="flex h-6 items-center gap-\[3px\]"/);
+  assert.match(source, /<p className="mt-1\.5 flex items-center gap-1\.5 text-\[11px\] text-slate-500">/);
+});
+
+// Requirements 11-12 — Done and View History both remain, same handlers,
+// same labels, same accessible min-h-11 touch target; only the gaps around
+// them were tightened.
+test("source: Done and View History remain, same handlers/labels/touch-target height; only surrounding gaps were tightened (mt-4 gap-3 -> mt-3 gap-2.5)", () => {
+  assert.match(source, /aria-label="Done"/);
+  assert.match(source, /onClick=\{onDone\}/);
+  assert.match(source, /aria-label="View history"/);
+  assert.match(source, /onClick=\{onViewHistory\}/);
+  assert.match(source, /className="mt-3 flex flex-col gap-2\.5"/);
+  assert.equal(source.includes('className="mt-4 flex flex-col gap-3"'), false, "old, looser action-area spacing must be gone");
+  // Button height itself must be untouched — reduce gaps, never the
+  // accessible touch-target minimum.
+  const doneHeightCount = (source.match(/className="min-h-11 w-full rounded-2xl text-\[15px\]/g) ?? []).length;
+  assert.equal(doneHeightCount, 2, "both Done and View History must keep the exact same min-h-11 button height");
+});
+
+// Requirement 13 — this stage touches only BetTicket.tsx; BottomNav
+// integration lives entirely in app/miniapp/page.tsx/BetScreen.tsx, neither
+// of which BetTicket.tsx renders or references, so it cannot be affected.
+test("M5.6 regression guard: BetTicket.tsx does not render or reference BottomNav — bottom-nav integration is out of this file's reach", () => {
+  assert.equal(source.includes("BottomNav"), false);
+});
+
+// Requirement 14 — M4.9's current-odds resolution is completely untouched
+// (behavioral, not just source-text): same functions, same reuse of
+// SelectionRow's getOddsPresentation.
+test("M5.6 regression guard: M4.9 current-odds logic (resolveTicketSelectionOdds/resolveTicketStatusBadge) is unchanged", () => {
+  assert.equal(resolveTicketSelectionOdds(selection({ odds: 1.74, currentOdds: 1.74, oddsStatus: "VERIFIED" })), 1.74);
+  assert.equal(resolveTicketStatusBadge(selection({ currentOdds: 1.74, oddsStatus: "VERIFIED" })), null);
+  assert.equal(resolveTicketSelectionOdds(selection({ odds: 2.04, currentOdds: null, oddsStatus: null })), 2.04);
+  assert.match(source, /getOddsPresentation\(selection\.oddsStatus, selection\.currentOdds \?\? null\)/);
+});
+
+// Requirement 15 — M5.1 header semantics (badge label, detail phrase,
+// ticket id/player/date/time all present, single-line meta) unchanged.
+test("M5.6 regression guard: M5.1 header semantics are unchanged", () => {
+  assert.equal(STATUS_CONFIG.submitted.badgeLabel, "Submitted");
+  assert.equal(STATUS_CONFIG.submitted.detail, "Awaiting confirmation");
+  assert.equal(source.includes("Digital Bet Ticket"), false);
+  assert.equal(source.includes("h-16 w-16"), false);
+  assert.equal(source.includes("grid-cols-2"), false);
+});
+
+// Requirement 16 — M5.2 financial hierarchy (Potential win = emphasize,
+// Available credit = muted, Stake/Combined odds = default) unchanged.
+test("M5.6 regression guard: M5.2 financial hierarchy is unchanged", () => {
+  assert.match(source, /label="Potential win"[\s\S]{0,40}value=\{formatPotentialWin\(potentialWin\)\}[\s\S]{0,80}emphasize/);
+  assert.match(source, /label="Available credit"[\s\S]{0,120}muted/);
+});
+
+// Requirement 17 — M5.3 barcode semantics (still derived from ticket.id,
+// still 36 bars, still the same seed-hash generation) unchanged.
+test("M5.6 regression guard: M5.3 barcode semantics are unchanged", () => {
+  assert.match(source, /function barcodeWidths\(seed: string\): number\[\]/);
+  assert.match(source, /for \(let i = 0; i < 36; i \+= 1\)/);
+  assert.match(source, /bars\.push\(1 \+ \(hash % 3\)\)/);
+  assert.match(source, /<TicketBarcode seed=\{ticket\.id\}\s*\/>/);
+});
+
+// Requirement 18 — EXPRESS ×3+ is never artificially clipped, hidden, or
+// truncated: the ticket maps every selection unconditionally, with no
+// max-height/overflow-hidden/slice on the selections list itself.
+test("M5.6 regression guard: EXPRESS ×3+ is not artificially clipped, hidden, or truncated", () => {
+  assert.match(source, /\{ticket\.selections\.map\(\(selection, index\) => \{/);
+  assert.equal(source.includes("selections.slice("), false, "the selections list must never be truncated");
+  assert.equal(/max-h-\[?\d/.test(source), false, "no max-height clamp must be introduced on the selections list");
+  assert.equal(source.includes("overflow-hidden") && source.includes("selections.map"), true, "sanity: overflow-hidden should only appear on the outer rounded card, never wrapping the selections list itself");
+  // The only overflow-hidden in the file is on the outer card (rounded-3xl,
+  // for the notch cutouts), never around the selections list.
+  const cardMatch = source.match(/className="ticket-animate-in relative overflow-hidden rounded-3xl"/);
+  assert.ok(cardMatch, "overflow-hidden is expected exactly once, on the outer card only");
+});
+
+// Requirement 19 — no transform/scale/zoom/device-specific layout hack was
+// introduced anywhere in this stage's spacing changes.
+test("M5.6 regression guard: no transform/scale/zoom/device-specific hack exists", () => {
+  for (const forbidden of ["transform: scale", "transform: \"scale", "zoom:", "userAgent", "devicePixelRatio", "matchMedia"]) {
+    assert.equal(source.includes(forbidden), false, `must not contain: "${forbidden}"`);
+  }
 });

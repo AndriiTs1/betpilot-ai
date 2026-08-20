@@ -518,6 +518,42 @@ test("createBetFromPreview: EXPRESS with 11 selections is rejected before any wr
   assert.equal(db._debug.betCount(), 0);
 });
 
+// ---------------------------------------------------------------------
+// Sector 1 correction (ADR-0002) — ExpressPreviewTokenPayload.totalOdds is
+// now nullable at the type level (a signed reference token can exist for a
+// slip that isn't fully priced yet). This is the one place that must still
+// refuse to ever create a Bet from such a payload — proving the
+// architecture principle "previewToken exists" != "bet can be confirmed"
+// actually holds at the write boundary, not just in the type system.
+// ---------------------------------------------------------------------
+
+test("createBetFromPreview: a partial EXPRESS payload (totalOdds: null) is rejected before any write — a signed reference token can never create a Bet on its own", async () => {
+  const db = createFakeDb();
+  const payload = expressPayload({ totalOdds: null, potentialWin: null });
+
+  await assert.rejects(
+    () => createBetFromPreview(payload, fakeOptions(db)),
+    (err: unknown) => {
+      assert.ok(err instanceof CreateBetFromPreviewValidationError);
+      assert.equal(err.code, "EXPRESS_INVALID_DECIMAL");
+      return true;
+    },
+  );
+  assert.equal(db._debug.betCount(), 0, "no Bet may be created from a partial token");
+  assert.equal(db._debug.createCallCount(), 0, "the write transaction must never even start");
+});
+
+test("createBetFromPreview: totalOdds: null is rejected even when potentialWin is a real decimal string — both must be real for a Bet to be written", async () => {
+  const db = createFakeDb();
+  const payload = expressPayload({ totalOdds: null, potentialWin: "122.40" });
+
+  await assert.rejects(
+    () => createBetFromPreview(payload, fakeOptions(db)),
+    (err: unknown) => err instanceof CreateBetFromPreviewValidationError && err.code === "EXPRESS_INVALID_DECIMAL",
+  );
+  assert.equal(db._debug.betCount(), 0);
+});
+
 test("createBetFromPreview: an unknown payload type is rejected", async () => {
   const db = createFakeDb();
   const bogus = { ...expressPayload(), type: "PARLAY" } as unknown as ExpressPreviewTokenPayload;

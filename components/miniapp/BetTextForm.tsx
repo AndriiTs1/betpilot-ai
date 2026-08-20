@@ -1,7 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { fetchBetPreview, getBetPreviewErrorMessage, isAiTimeoutFailure, type BetPreviewSuccess } from "./betPreviewApi";
+import {
+  fetchBetPreview,
+  fetchExpressLegExclusionPreview,
+  getBetPreviewErrorMessage,
+  isAiTimeoutFailure,
+  type BetPreviewSuccess,
+} from "./betPreviewApi";
 import {
   fetchBetConfirm,
   getBetConfirmErrorMessage,
@@ -80,6 +86,12 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
   // betPreviewApi.ts itself exports. Reset everywhere `error` is reset, so
   // it can never outlive the failure that set it.
   const [isTimeoutError, setIsTimeoutError] = useState(false);
+  // Sector 1 (ADR-0002) — non-null exactly while a leg-exclusion request for
+  // that leg index is in flight; drives the Remove button's disabled/label
+  // state (BetPreviewCard.tsx) and additionally gates canConfirm below, so
+  // Confirm can't be tapped while the preview is about to change underneath
+  // it.
+  const [excludingLegIndex, setExcludingLegIndex] = useState<number | null>(null);
 
   // inFlightRef guards against a double click firing two requests: React
   // state updates aren't guaranteed to be visible to a second synchronous
@@ -91,6 +103,11 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
   const requestTokenRef = useRef(0);
   const inFlightRef = useRef(false);
   const confirmControllerRef = useRef<AbortController | null>(null);
+  // Sector 1 (ADR-0002) — separate from inFlightRef (preview/confirm) so a
+  // double-tap on Remove can't fire two overlapping exclusion requests,
+  // without overloading the existing preview/confirm in-flight guard or its
+  // FormPhase state machine.
+  const excludeInFlightRef = useRef(false);
 
   useEffect(() => {
     // Explicitly reset on (re)mount, not just at useRef(true) declaration —
@@ -112,7 +129,10 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
   // either token type). previewToken !== null is still the real guard —
   // it's null exactly when there's nothing valid to submit (e.g. an
   // EXPRESS slip missing some selection's odds), regardless of type.
-  const canConfirm = canConfirmBetSlip(phase === "ready", preview);
+  // Sector 1 (ADR-0002) — additionally false while a leg exclusion is
+  // in-flight: the preview/token this button would submit is about to be
+  // replaced, so Confirm must not be tappable in that window.
+  const canConfirm = canConfirmBetSlip(phase === "ready", preview) && excludingLegIndex === null;
   // Stage M4.5 — CLEAN UNAVAILABLE-ODDS UX. When the odds themselves are
   // unavailable, there is no genuine confirmation action to offer, so the
   // button is omitted entirely rather than rendered disabled (see
@@ -174,6 +194,69 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     } else {
       triggerHaptic("success");
     }
+  }
+
+  // Sector 1 (ADR-0002) — EXPRESS per-leg unavailable recovery. Called only
+  // with the index of a leg BetPreviewCard.tsx has already determined is
+  // recoverable (isRecoverableLeg) — the server independently re-verifies
+  // this (lib/bets/buildExpressLegExclusionPreview.ts), so a stale/forged
+  // call still fails safe. Sends only [legIndex] and the already-signed
+  // previewToken — never any odds/market/event data.
+  async function handleExcludeLeg(legIndex: number) {
+    if (excludeInFlightRef.current || !preview || preview.previewToken === null) return;
+
+    let tg: NonNullable<typeof window.Telegram>["WebApp"] | undefined;
+    let initDataValue = "";
+    try {
+      tg = window.Telegram?.WebApp;
+      initDataValue = tg?.initData ?? "";
+    } catch {
+      setError("Telegram WebApp is unavailable.");
+      return;
+    }
+    if (!tg) return;
+
+    excludeInFlightRef.current = true;
+    // Shares requestTokenRef with preview/confirm — a stale preview or
+    // confirm response that lands after this exclusion request starts must
+    // never overwrite the state this request is about to produce, and vice
+    // versa; this is the same single "latest request wins" discipline every
+    // other async operation in this form already uses.
+    const myRequest = ++requestTokenRef.current;
+
+    setExcludingLegIndex(legIndex);
+    setError(null);
+    setIsTimeoutError(false);
+
+    const result = await fetchExpressLegExclusionPreview(initDataValue, preview.previewToken, [legIndex]);
+
+    excludeInFlightRef.current = false;
+    if (!isMountedRef.current || requestTokenRef.current !== myRequest) return;
+    setExcludingLegIndex(null);
+
+    if (!result.ok) {
+      setError(getBetPreviewErrorMessage(result.failure));
+      triggerHaptic("error");
+
+      // The current preview's token is genuinely no longer usable — same
+      // reset every other PREVIEW_EXPIRED/PREVIEW_INVALID failure in this
+      // form already gets, so the player can't retry against a dead token.
+      if (
+        result.failure.kind === "http" &&
+        (result.failure.code === "PREVIEW_EXPIRED" || result.failure.code === "PREVIEW_INVALID")
+      ) {
+        setPreview(null);
+        setPhase("editing");
+      }
+      return;
+    }
+
+    // Atomically replaces the entire previous preview+token with the new
+    // one — the old token is never separately retained anywhere in this
+    // component; there is no second state slot it could linger in.
+    setPreview(result.data);
+    setPhase("ready");
+    triggerHaptic("success");
   }
 
   function handleEditMessage() {
@@ -338,7 +421,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
             value={message}
             onChange={(event) => handleMessageChange(event.target.value)}
             maxLength={MESSAGE_MAX_LENGTH}
-            placeholder="Real Madrid win, stake 100"
+            placeholder="Команда, исход, ставка"
             aria-label="Bet message"
             disabled={phase === "previewing"}
             className="w-full resize-none rounded-2xl p-3 text-base text-white placeholder:text-slate-500"
@@ -398,7 +481,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
 
       {showPreviewBlock && preview && (
         <div className="mt-3">
-          <PreviewCard preview={preview.preview} />
+          <PreviewCard preview={preview.preview} onExcludeLeg={handleExcludeLeg} excludingLegIndex={excludingLegIndex} />
           <OddsStatus preview={preview.preview} />
 
           {/* Stage M4.7 — SILENT CURRENT-ODDS PLAYER UX: no separate

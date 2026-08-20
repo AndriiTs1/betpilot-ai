@@ -93,6 +93,26 @@ export function isSingleSelectionOddsUnavailable(selection: BetPreviewSelection)
   return hasUnverifiedOddsStatus([selection]) || !isConfirmableSingleOdds(selection);
 }
 
+// Sector 1 (ADR-0002) — a leg is offered for player-initiated exclusion
+// only when the provider genuinely could not confirm it right now
+// (NOT_FOUND/UNAVAILABLE) — never a VERIFIED/ODDS_CHANGED leg (out of
+// Sector 1's approved scope: "VERIFIED legs в Sector 1 не делаем
+// произвольно удаляемыми") and never the reserved-but-practically-
+// unreachable PENDING. This is the client-side mirror of the identical
+// rule enforced server-side in
+// lib/bets/buildExpressLegExclusionPreview.ts's RECOVERABLE_ODDS_STATUSES —
+// same "client mirrors server, server is the real gate" pattern as
+// hasUnverifiedOddsStatus/canConfirmBetSlip above; this only decides
+// whether BetPreviewCard.tsx shows the Remove affordance at all.
+const RECOVERABLE_LEG_ODDS_STATUSES: ReadonlySet<BetPreviewSelection["oddsStatus"]> = new Set([
+  "NOT_FOUND",
+  "UNAVAILABLE",
+]);
+
+export function isRecoverableLeg(selection: BetPreviewSelection): boolean {
+  return RECOVERABLE_LEG_ODDS_STATUSES.has(selection.oddsStatus);
+}
+
 export function canConfirmBetSlip(isReady: boolean, preview: BetPreviewSuccess | null): boolean {
   if (!isReady || preview === null || preview.previewToken === null) return false;
 

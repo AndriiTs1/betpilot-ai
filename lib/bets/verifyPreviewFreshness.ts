@@ -102,7 +102,10 @@ export interface VerifyPreviewFreshnessOptions {
 // player was actually just shown in the preview being confirmed — so each
 // reconfirm cycle compares against what the player most recently saw, not
 // against history.
-function reconstructParsedBetSlip(payload: AnyPreviewTokenPayload): ParsedBetSlip {
+// Sector 1 (ADR-0002) — exported (was module-private) so
+// lib/bets/buildExpressLegExclusionPreview.ts can reuse this exact
+// reconstruction instead of duplicating it. Logic unchanged.
+export function reconstructParsedBetSlip(payload: AnyPreviewTokenPayload): ParsedBetSlip {
   if (payload.type === "SINGLE") {
     return {
       type: "SINGLE",

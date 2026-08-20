@@ -90,7 +90,32 @@ export type BetPreviewErrorCode =
   // "Something went wrong" default, discarding the server's already-
   // computed retryAfterSeconds. See BetPreviewFailure's own comment for
   // how that value is threaded through.
-  | "RATE_LIMITED";
+  | "RATE_LIMITED"
+  // Sector 1 (ADR-0002) — POST /api/miniapp/bets/express/exclude-legs's own
+  // error codes (lib/bets/buildExpressLegExclusionPreview.ts's
+  // ExpressLegExclusionErrorCode, plus the route's own INVALID_REQUEST/
+  // NOT_EXPRESS_TOKEN shape checks). None of these are expected to be
+  // player-caused in normal use (the UI only ever offers Remove on a
+  // genuinely recoverable leg) — they exist as the server-side defense-in-
+  // depth backstop, same "client mirrors server, server is the real gate"
+  // pattern as every other business rule in this codebase.
+  | "NOT_EXPRESS_TOKEN"
+  | "NO_LEGS_EXCLUDED"
+  | "DUPLICATE_LEG_INDEX"
+  | "INVALID_LEG_INDEX"
+  | "LEG_NOT_RECOVERABLE"
+  | "ALL_LEGS_EXCLUDED"
+  // Sector 1 (ADR-0002) — the exclude-legs endpoint verifies the incoming
+  // previewToken the same way POST .../text/confirm does (it's a real,
+  // signed EXPRESS token, not a fresh message/image), so it can return
+  // these same two token-verification failures. Mirrors
+  // BetConfirmErrorCode's identical two codes in betConfirmApi.ts — kept as
+  // a separate, duplicated pair here rather than importing that file's
+  // union, since betPreviewApi.ts has no existing dependency on
+  // betConfirmApi.ts and this step's scope doesn't warrant introducing one
+  // just to share two string literals.
+  | "PREVIEW_EXPIRED"
+  | "PREVIEW_INVALID";
 
 export type BetPreviewFailure =
   | {
@@ -237,6 +262,66 @@ export async function fetchBetPreview(initData: string, message: string): Promis
   return { ok: true, data: body };
 }
 
+// Sector 1 (ADR-0002) — same request/response/error-handling shape as
+// fetchBetPreview above, for POST /api/miniapp/bets/express/exclude-legs.
+// The request body carries only the already-signed previewToken and a list
+// of leg indices — never odds/market/event data (the approved Variant B
+// trust boundary). The success response is byte-for-byte the same
+// BetPreviewSuccess shape fetchBetPreview returns, validated with the exact
+// same isBetPreviewSuccess — no second, parallel response type.
+export async function fetchExpressLegExclusionPreview(
+  initData: string,
+  previewToken: string,
+  excludeIndices: readonly number[],
+): Promise<BetPreviewResult> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  let response: Response;
+
+  try {
+    response = await fetch("/api/miniapp/bets/express/exclude-legs", {
+      method: "POST",
+      headers: {
+        Authorization: `tma ${initData}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ previewToken, excludeIndices }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      return { ok: false, failure: { kind: "timeout" } };
+    }
+    return { ok: false, failure: { kind: "network" } };
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response.ok) {
+    const body: unknown = await response.json().catch(() => null);
+    const code =
+      typeof body === "object" && body !== null && typeof (body as { error?: unknown }).error === "string"
+        ? ((body as { error: string }).error as BetPreviewErrorCode | "UNKNOWN")
+        : "UNKNOWN";
+
+    const retryAfterSeconds =
+      typeof body === "object" && body !== null && typeof (body as { retryAfterSeconds?: unknown }).retryAfterSeconds === "number"
+        ? (body as { retryAfterSeconds: number }).retryAfterSeconds
+        : undefined;
+
+    return { ok: false, failure: { kind: "http", code, ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}) } };
+  }
+
+  const body: unknown = await response.json().catch(() => null);
+
+  if (!isBetPreviewSuccess(body)) {
+    return { ok: false, failure: { kind: "invalid_response" } };
+  }
+
+  return { ok: true, data: body };
+}
+
 // Step 15J.3 — the one place BetTextForm derives whether a preview failure
 // was specifically an AI timeout, so its dedicated "AI service timed out /
 // Try again" UI is never driven by string-matching getBetPreviewErrorMessage's
@@ -296,6 +381,27 @@ export function getBetPreviewErrorMessage(failure: BetPreviewFailure): string {
       return failure.retryAfterSeconds !== undefined
         ? `Too many attempts. Please try again in ${failure.retryAfterSeconds} seconds.`
         : "Too many attempts. Please try again shortly.";
+    // Sector 1 (ADR-0002) — ALL_LEGS_EXCLUDED is the one exclusion-error
+    // code that's genuinely reachable in normal use (removing the last
+    // recoverable leg alongside every other selection already gone) and
+    // needs its own actionable message; the rest
+    // (NOT_EXPRESS_TOKEN/NO_LEGS_EXCLUDED/DUPLICATE_LEG_INDEX/
+    // INVALID_LEG_INDEX/LEG_NOT_RECOVERABLE) are server-side defense-in-
+    // depth that the UI's own gating should never actually trigger, so they
+    // fall through to the generic message like any other unexpected case.
+    case "ALL_LEGS_EXCLUDED":
+      return "Removing this leg would leave nothing to bet on. Please cancel and start over.";
+    // Sector 1 (ADR-0002) — same friendly message/wording as
+    // betConfirmApi.ts's identical PREVIEW_EXPIRED/PREVIEW_INVALID case for
+    // the exact same underlying condition (a no-longer-valid signed token).
+    case "PREVIEW_EXPIRED":
+    case "PREVIEW_INVALID":
+      return "⏳ This preview has expired.\n\nOdds may have changed.\n\nPlease generate a new preview.";
+    case "NOT_EXPRESS_TOKEN":
+    case "NO_LEGS_EXCLUDED":
+    case "DUPLICATE_LEG_INDEX":
+    case "INVALID_LEG_INDEX":
+    case "LEG_NOT_RECOVERABLE":
     case "INVALID_JSON":
     case "INTERNAL_ERROR":
     default:
