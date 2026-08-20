@@ -150,7 +150,9 @@ export default function SelectionRow({
           )}
 
           <div className="flex items-start justify-between gap-3">
-            <p className="min-w-0 flex-1 break-words text-sm font-semibold text-white">{selection.event}</p>
+            <p className="min-w-0 flex-1 line-clamp-2 break-words text-sm font-semibold leading-5 text-white">
+              {selection.event}
+            </p>
             {statusBadge && statusBadge.label && (
               <span
                 className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium"
@@ -162,14 +164,14 @@ export default function SelectionRow({
           </div>
 
           {(selection.competitionName || eventDateTime) && (
-            <p className="break-words text-xs text-slate-500">
+            <p className="truncate text-xs text-slate-500">
               {selection.competitionName}
               {selection.competitionName && eventDateTime ? " · " : ""}
               {eventDateTime}
             </p>
           )}
 
-          <p className="break-words text-xs text-slate-400">
+          <p className="line-clamp-2 break-words text-xs leading-4 text-slate-400">
             {selection.outcome}
             {selection.market ? ` · ${selection.market}` : ""}
           </p>

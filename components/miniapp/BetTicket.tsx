@@ -342,8 +342,13 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
                     {selection.league ? ` · ${selection.league}` : ""}
                   </span>
                 </div>
-                <p className="mt-0.5 text-[15px] font-semibold text-white break-words">{selection.event}</p>
-                <p className="mt-0.5 text-sm break-words" style={{ color: "#60E84A" }}>
+                <p className="mt-0.5 line-clamp-2 break-words text-[15px] font-semibold leading-5 text-white">
+                  {selection.event}
+                </p>
+                <p
+                  className="mt-0.5 line-clamp-2 break-words text-sm leading-5"
+                  style={{ color: "#60E84A" }}
+                >
                   {selection.selection}
                   {selection.market ? ` · ${selection.market}` : ""}
                   {displayOdds !== null ? ` · ${formatAmount(displayOdds)}` : ""}
