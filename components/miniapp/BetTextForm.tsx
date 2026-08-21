@@ -55,12 +55,50 @@ function triggerHaptic(kind: "success" | "error" | "warning-light"): void {
 
 type FormPhase = "editing" | "previewing" | "ready" | "confirming";
 
-// Purely visual bet-type selector for the top of the "Place a bet" screen.
-// Not read by handlePreviewSubmit or sent to the API — actual SINGLE/EXPRESS
-// type is still decided entirely by the AI parser server-side
-// (preview.preview.type). Wiring this to the request is a separate,
-// out-of-scope change.
+// Bet-type selector for the top of the "Place a bet" screen. Its literal
+// value is never sent to the API, and the AI parser server-side is still
+// the sole authority on the actual SINGLE/EXPRESS classification
+// (preview.preview.type) — this tab only decides which LOCAL input UI is
+// shown (structured fields vs. free-text textarea) and, from there, which
+// text handlePreviewSubmit composes and sends. A player who types an
+// EXPRESS-shaped sentence into SINGLE's composed text (or vice versa)
+// still gets whatever the parser actually determines, unaffected by which
+// tab was active.
 type BetTypeTab = "single" | "express";
+
+// Structured SINGLE input — Event / Selection / Stake. Exported as pure
+// functions (same convention as e.g. BetPreviewCard.tsx's
+// isProviderUnavailable, SelectionRow.tsx's getOddsPresentation) so the
+// validation/composition logic is directly unit-testable without this
+// project's deliberately absent DOM-rendering test infra.
+
+// A stake must be a real, finite, positive number — the exact same
+// "genuinely usable amount" bar the free-text flow's own AI parser already
+// enforces server-side (lib/ai/betParser.ts's stake: z.number().positive());
+// checked here only so the Review bet button can honestly reflect
+// readiness before ever reaching the network.
+export function isValidStakeInput(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return false;
+  const numeric = Number(trimmed);
+  return Number.isFinite(numeric) && numeric > 0;
+}
+
+export function isSingleBetReady(eventValue: string, selectionValue: string, stakeValue: string): boolean {
+  return eventValue.trim().length > 0 && selectionValue.trim().length > 0 && isValidStakeInput(stakeValue);
+}
+
+// The AI parser/preview endpoint (POST .../text/preview) only ever accepts
+// one free-text string — this is the one, minimal seam that lets the new
+// structured SINGLE fields reuse that exact same, otherwise completely
+// unmodified endpoint/parser/preview pipeline. A simple comma-joined
+// composition of the player's own three raw values, structurally identical
+// to bet slips the parser already handles today (e.g. "Real Madrid win,
+// stake 100") — no locale-specific phrasing, so it behaves identically
+// regardless of UI language.
+export function buildSingleSubmissionText(eventValue: string, selectionValue: string, stakeValue: string): string {
+  return `${eventValue.trim()}, ${selectionValue.trim()}, ${stakeValue.trim()}`;
+}
 
 // "Place a bet" screen: free-text message -> POST /api/miniapp/bets/text/preview
 // -> read-only preview + odds status -> POST .../confirm -> a real Bet
@@ -70,6 +108,13 @@ type BetTypeTab = "single" | "express";
 export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
   const { t, locale } = useLocale();
   const [message, setMessage] = useState("");
+  // Structured SINGLE input — EXPRESS still uses `message`/the free-text
+  // textarea, completely unchanged. Independent state (not derived from/
+  // synced with `message`) so switching tabs never mixes the two modes'
+  // input together.
+  const [eventValue, setEventValue] = useState("");
+  const [selectionValue, setSelectionValue] = useState("");
+  const [stakeValue, setStakeValue] = useState("");
   const [betTypeTab, setBetTypeTab] = useState<BetTypeTab>("single");
   const [phase, setPhase] = useState<FormPhase>("editing");
   // preview.previewToken (Stage 4.3) lives here in memory only — never
@@ -124,7 +169,14 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
   }, []);
 
   const trimmedLength = message.trim().length;
-  const canSubmitPreview = phase === "editing" && trimmedLength >= MESSAGE_MIN_LENGTH;
+  // SINGLE's readiness comes from the three structured fields; EXPRESS is
+  // completely unchanged (still gated on the free-text textarea's own
+  // length). Never both at once — betTypeTab picks exactly one.
+  const canSubmitPreview =
+    phase === "editing" &&
+    (betTypeTab === "single"
+      ? isSingleBetReady(eventValue, selectionValue, stakeValue)
+      : trimmedLength >= MESSAGE_MIN_LENGTH);
   // Stage 12, Phase 4, Step 5 — EXPRESS confirm is now implemented
   // end-to-end (buildBetSlipPreview.ts signs an EXPRESS previewToken
   // whenever every selection's odds are known; the confirm route redeems
@@ -142,14 +194,43 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
   // of phase/isReady).
   const oddsUnavailable = isOddsUnavailableForConfirm(preview);
 
-  function handleMessageChange(value: string) {
-    setMessage(value);
-    // Never show a preview (or keep a token) that no longer matches the
-    // text on screen.
+  // Shared by every input change below (message, and now the three
+  // structured SINGLE fields) — never show a preview (or keep a token)
+  // that no longer matches what's on screen.
+  function resetPreviewIfShown() {
     if (preview) {
       setPreview(null);
       setPhase("editing");
     }
+  }
+
+  function handleMessageChange(value: string) {
+    setMessage(value);
+    resetPreviewIfShown();
+  }
+
+  function handleEventChange(value: string) {
+    setEventValue(value);
+    resetPreviewIfShown();
+  }
+
+  function handleSelectionChange(value: string) {
+    setSelectionValue(value);
+    resetPreviewIfShown();
+  }
+
+  function handleStakeChange(value: string) {
+    setStakeValue(value);
+    resetPreviewIfShown();
+  }
+
+  // SINGLE and EXPRESS now hold genuinely different underlying data (three
+  // structured fields vs. one free-text message) — switching tabs must
+  // invalidate a stale preview from the mode being left, same principle as
+  // editing any field above.
+  function handleBetTypeChange(tab: BetTypeTab) {
+    setBetTypeTab(tab);
+    resetPreviewIfShown();
   }
 
   async function handlePreviewSubmit() {
@@ -165,7 +246,12 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     setError(null);
     setIsTimeoutError(false);
 
-    const result = await fetchBetPreview(tg.initData, message.trim());
+    // SINGLE composes its three structured fields into the exact same
+    // free-text shape the EXPRESS textarea already sends — the AI parser/
+    // preview endpoint (POST .../text/preview) never sees a difference.
+    const textToSubmit =
+      betTypeTab === "single" ? buildSingleSubmissionText(eventValue, selectionValue, stakeValue) : message.trim();
+    const result = await fetchBetPreview(tg.initData, textToSubmit);
 
     inFlightRef.current = false;
     if (!isMountedRef.current || requestTokenRef.current !== myRequest) return;
@@ -391,7 +477,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
           type="button"
           role="tab"
           aria-selected={betTypeTab === "single"}
-          onClick={() => setBetTypeTab("single")}
+          onClick={() => handleBetTypeChange("single")}
           className="min-h-9 flex-1 rounded-xl text-sm font-semibold transition-colors active:opacity-80"
           style={
             betTypeTab === "single"
@@ -405,7 +491,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
           type="button"
           role="tab"
           aria-selected={betTypeTab === "express"}
-          onClick={() => setBetTypeTab("express")}
+          onClick={() => handleBetTypeChange("express")}
           className="min-h-9 flex-1 rounded-xl text-sm font-semibold transition-colors active:opacity-80"
           style={
             betTypeTab === "express"
@@ -419,37 +505,112 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
 
       {showEditingBlock && (
         <div className="mt-4">
-          <textarea
-            value={message}
-            onChange={(event) => handleMessageChange(event.target.value)}
-            maxLength={MESSAGE_MAX_LENGTH}
-            placeholder={t("bet.placeholder")}
-            aria-label={t("bet.messageAriaLabel")}
-            disabled={phase === "previewing"}
-            className="w-full resize-none rounded-2xl p-3 text-base text-white placeholder:text-slate-500"
-            style={{
-              minHeight: 110,
-              background: "rgba(255,255,255,0.03)",
-              border: "1px solid rgba(255,255,255,0.08)",
-            }}
-          />
+          {betTypeTab === "single" ? (
+            // Structured SINGLE input — one compact vertical form, not
+            // three independent cards. Same dark/slate tokens as the
+            // EXPRESS textarea below (rgba(255,255,255,0.03) background,
+            // rgba(255,255,255,0.08) border, rounded-2xl) so it reads as a
+            // natural evolution of this screen, not a new design.
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block text-xs text-slate-500">{t("bet.eventLabel")}</label>
+                <input
+                  type="text"
+                  value={eventValue}
+                  onChange={(event) => handleEventChange(event.target.value)}
+                  placeholder={t("bet.eventPlaceholder")}
+                  aria-label={t("bet.eventLabel")}
+                  disabled={phase === "previewing"}
+                  className="w-full rounded-2xl px-3 py-3 text-base text-white placeholder:text-slate-600 focus:outline-none"
+                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}
+                />
+              </div>
 
-          <p className="mt-1 text-right text-xs text-slate-500">
-            {message.length} / {MESSAGE_MAX_LENGTH}
-          </p>
+              <div>
+                <label className="mb-1 block text-xs text-slate-500">{t("bet.selectionLabel")}</label>
+                <input
+                  type="text"
+                  value={selectionValue}
+                  onChange={(event) => handleSelectionChange(event.target.value)}
+                  placeholder={t("bet.selectionPlaceholder")}
+                  aria-label={t("bet.selectionLabel")}
+                  disabled={phase === "previewing"}
+                  className="w-full rounded-2xl px-3 py-3 text-base text-white placeholder:text-slate-600 focus:outline-none"
+                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs text-slate-500">{t("bet.stakeLabel")}</label>
+                {/* USDC is this product's one fixed stake currency — the
+                    exact same fixed asset ticker BetPreviewCard.tsx's/
+                    BetTicket.tsx's Potential-win figures already display
+                    elsewhere in this flow. Kept as a literal, not a
+                    translation key, same convention as any other asset
+                    ticker: it never changes by locale. */}
+                <div
+                  className="flex items-center rounded-2xl px-3 py-3"
+                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}
+                >
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    min="0"
+                    step="0.01"
+                    value={stakeValue}
+                    onChange={(event) => handleStakeChange(event.target.value)}
+                    placeholder="0"
+                    aria-label={t("bet.stakeLabel")}
+                    disabled={phase === "previewing"}
+                    className="w-full bg-transparent text-base text-white placeholder:text-slate-600 focus:outline-none"
+                  />
+                  <span className="shrink-0 pl-2 text-sm font-medium text-slate-400">USDC</span>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <>
+              <textarea
+                value={message}
+                onChange={(event) => handleMessageChange(event.target.value)}
+                maxLength={MESSAGE_MAX_LENGTH}
+                placeholder={t("bet.placeholder")}
+                aria-label={t("bet.messageAriaLabel")}
+                disabled={phase === "previewing"}
+                className="w-full resize-none rounded-2xl p-3 text-base text-white placeholder:text-slate-500"
+                style={{
+                  minHeight: 110,
+                  background: "rgba(255,255,255,0.03)",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                }}
+              />
+
+              <p className="mt-1 text-right text-xs text-slate-500">
+                {message.length} / {MESSAGE_MAX_LENGTH}
+              </p>
+            </>
+          )}
 
           <button
             type="button"
             onClick={handlePreviewSubmit}
             disabled={!canSubmitPreview}
-            aria-label={isTimeoutError ? t("bet.tryAgain") : t("bet.preview")}
+            aria-label={
+              isTimeoutError ? t("bet.tryAgain") : betTypeTab === "single" ? t("bet.reviewBet") : t("bet.preview")
+            }
             className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
             style={{
               background: "#60E84A",
               color: "#04170C",
             }}
           >
-            {phase === "previewing" ? t("bet.checking") : isTimeoutError ? t("bet.tryAgain") : t("bet.preview")}
+            {phase === "previewing"
+              ? t("bet.checking")
+              : isTimeoutError
+                ? t("bet.tryAgain")
+                : betTypeTab === "single"
+                  ? t("bet.reviewBet")
+                  : t("bet.preview")}
           </button>
 
           {/* Step 15J.3 — a dedicated, non-alarming block for AI_TIMEOUT:

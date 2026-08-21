@@ -98,6 +98,17 @@ export interface TranslationDict {
     timeoutTitle: string;
     timeoutBody: string;
     editMessage: string;
+    // Structured SINGLE input (Event / Selection / Stake) — composed into
+    // one free-text string before it ever reaches fetchBetPreview, so the
+    // AI parser/preview endpoint contract is completely unchanged; only
+    // where the text comes from changed. EXPRESS keeps using `placeholder`/
+    // `messageAriaLabel`/`preview` above, untouched.
+    eventLabel: string;
+    eventPlaceholder: string;
+    selectionLabel: string;
+    selectionPlaceholder: string;
+    stakeLabel: string;
+    reviewBet: string;
   };
   active: {
     title: string;
@@ -319,6 +330,12 @@ const en: TranslationDict = {
     timeoutTitle: "AI service timed out",
     timeoutBody: "Your bet was not rejected. The analysis took too long. Please try again.",
     editMessage: "Edit message",
+    eventLabel: "Event",
+    eventPlaceholder: "Example: Inter — Juventus",
+    selectionLabel: "Selection",
+    selectionPlaceholder: "Example: Inter to win",
+    stakeLabel: "Stake",
+    reviewBet: "Review bet",
   },
   active: {
     title: "Active",
@@ -518,6 +535,12 @@ const ru: TranslationDict = {
     timeoutTitle: "AI сервис не ответил вовремя",
     timeoutBody: "Ваша ставка не отклонена. Анализ занял слишком много времени. Попробуйте снова.",
     editMessage: "Изменить сообщение",
+    eventLabel: "Событие",
+    eventPlaceholder: "Например: Интер — Ювентус",
+    selectionLabel: "Исход",
+    selectionPlaceholder: "Например: Интер победит",
+    stakeLabel: "Ставка",
+    reviewBet: "Проверить ставку",
   },
   active: {
     title: "Активные",
