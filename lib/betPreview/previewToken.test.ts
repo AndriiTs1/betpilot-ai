@@ -7,6 +7,7 @@ import {
   signExpressPreviewToken,
   verifyExpressPreviewToken,
   PreviewTokenSignError,
+  PREVIEW_TOKEN_MAX_LENGTH,
   type PreviewTokenInput,
   type ExpressPreviewTokenInput,
   type ExpressPreviewTokenSelection,
@@ -783,4 +784,120 @@ test("Stage 3.1: an expired token carrying provider metadata is still rejected a
   } finally {
     Date.now = originalNow;
   }
+});
+
+/* -------------------------------------------------------------------------- */
+/* Production incident — PREVIEW_TOKEN_MAX_LENGTH must fit the product's own  */
+/* valid EXPRESS domain (2-10 legs), not just a value measured before Stage   */
+/* 3.1's per-selection provider metadata existed. See                        */
+/* app/api/miniapp/bets/text/confirm/route.test.ts's and                     */
+/* app/api/miniapp/bets/express/exclude-legs/route.test.ts's own realistic-  */
+/* token-size tests for the route-level (end-to-end) side of this same       */
+/* regression.                                                               */
+/* -------------------------------------------------------------------------- */
+
+// Full, realistic per-leg provider metadata — every field a real
+// buildBetSlipPreview.ts EXPRESS branch actually populates once the odds
+// provider resolves an event (never the sparse, metadata-free fixtures the
+// rest of this file uses for pure sign/verify-shape coverage). This is
+// deliberately the WORST realistic case for token size, not a minimal one.
+function realisticExpressLeg(n: number): ExpressPreviewTokenSelection {
+  return {
+    sport: "SOCCER",
+    event: `Real Full Club Name United ${n} vs Another Real Full Club Name City ${n}`,
+    outcome: `Team ${n} to win`,
+    market: "MONEYLINE_3WAY",
+    submittedOdds: "1.85",
+    currentOdds: "1.85",
+    oddsStatus: "VERIFIED",
+    providerEventId: `a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b${n}`,
+    providerSportKey: "soccer_spain_la_liga",
+    eventStartTime: "2026-08-23T18:00:00.000Z",
+    canonicalMarketType: "MONEYLINE_3WAY",
+    canonicalSelectionType: "HOME",
+    canonicalParticipant: null,
+    canonicalPeriod: "FULL_TIME",
+    canonicalLine: null,
+    homeTeamName: `Real Full Club Name United ${n}`,
+    awayTeamName: `Another Real Full Club Name City ${n}`,
+    competitionName: "Some Realistic Competition Name - Spain",
+  };
+}
+
+function realisticExpressInput(legCount: number): ExpressPreviewTokenInput {
+  return {
+    playerId: "cljk3x9p20000qzrm5b8g7h1a",
+    stake: "5",
+    totalOdds: "123.45",
+    potentialWin: "617.25",
+    selections: Array.from({ length: legCount }, (_, i) => realisticExpressLeg(i + 1)),
+  };
+}
+
+function realisticSingleInput(): PreviewTokenInput {
+  return {
+    playerId: "cljk3x9p20000qzrm5b8g7h1a",
+    sport: "SOCCER",
+    event: "Real Full Club Name United 1 vs Another Real Full Club Name City 1",
+    outcome: "Team 1 to win",
+    stake: 5,
+    odds: 1.85,
+    acceptedOdds: 1.85,
+    totalOdds: 1.85,
+    oddsCheck: { matched: true, withinTolerance: true, sourceOdds: 1.85, bookmaker: "pinnacle" },
+    providerName: "THE_ODDS_API",
+    providerEventId: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b1",
+    providerSportKey: "soccer_spain_la_liga",
+    eventStartTime: "2026-08-23T18:00:00.000Z",
+    canonicalMarketType: "MONEYLINE_3WAY",
+    canonicalSelectionType: "HOME",
+    canonicalParticipant: null,
+    canonicalPeriod: "FULL_TIME",
+    canonicalLine: null,
+    homeTeamName: "Real Full Club Name United 1",
+    awayTeamName: "Another Real Full Club Name City 1",
+    competitionName: "Some Realistic Competition Name - Spain",
+  };
+}
+
+test("PREVIEW_TOKEN_MAX_LENGTH: a realistic SINGLE token (with full provider metadata) stays well under the limit", () => {
+  const token = signPreviewToken(realisticSingleInput(), SECRET);
+  assert.ok(token.length < PREVIEW_TOKEN_MAX_LENGTH, `expected < ${PREVIEW_TOKEN_MAX_LENGTH}, got ${token.length}`);
+});
+
+test("PREVIEW_TOKEN_MAX_LENGTH: a realistic 2-leg EXPRESS token is accepted by the length guard", () => {
+  const token = signExpressPreviewToken(realisticExpressInput(2), SECRET);
+  assert.ok(token.length < PREVIEW_TOKEN_MAX_LENGTH, `expected < ${PREVIEW_TOKEN_MAX_LENGTH}, got ${token.length}`);
+});
+
+// The exact production incident: a real 3-leg EXPRESS token (full provider
+// metadata) was LARGER than the old 2048-char limit — this asserts both
+// halves of the fix at once: the old ceiling really was too small (would
+// have rejected this token), and the new one comfortably accepts it.
+test("PREVIEW_TOKEN_MAX_LENGTH: a realistic 3-leg EXPRESS token is accepted — this is the exact production incident, reproduced and fixed", () => {
+  const token = signExpressPreviewToken(realisticExpressInput(3), SECRET);
+  const OLD_LIMIT = 2048;
+  assert.ok(token.length > OLD_LIMIT, `expected a real 3-leg token to exceed the old ${OLD_LIMIT}-char limit (it did in production), got ${token.length}`);
+  assert.ok(token.length < PREVIEW_TOKEN_MAX_LENGTH, `expected < ${PREVIEW_TOKEN_MAX_LENGTH}, got ${token.length}`);
+});
+
+// The product's own documented EXPRESS maximum (MAX_EXPRESS_SELECTIONS,
+// lib/bets/betSlipRules.ts) — the anti-regression assertion: if a future
+// change to the token payload shape silently grows per-leg size again, this
+// fails BEFORE it reaches production, rather than only being discovered via
+// another live INVALID_REQUEST incident.
+test("PREVIEW_TOKEN_MAX_LENGTH: a realistic 10-leg (max EXPRESS) token's actual serialized length stays under the limit — guards against silently reintroducing this production bug", () => {
+  const token = signExpressPreviewToken(realisticExpressInput(10), SECRET);
+  assert.ok(token.length < PREVIEW_TOKEN_MAX_LENGTH, `expected < ${PREVIEW_TOKEN_MAX_LENGTH}, got ${token.length}`);
+
+  // sign -> verify roundtrip still succeeds and carries every leg's full
+  // provider metadata through unchanged — proves the larger limit didn't
+  // come from stripping/shortening any field to make the token smaller.
+  const result = verifyExpressPreviewToken(token, SECRET);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.payload.selections.length, 10);
+  assert.equal(result.payload.selections[9].providerEventId, "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b10");
+  assert.equal(result.payload.selections[9].competitionName, "Some Realistic Competition Name - Spain");
+  assert.equal(result.payload.selections[9].homeTeamName, "Real Full Club Name United 10");
 });

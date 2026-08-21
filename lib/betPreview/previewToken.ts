@@ -9,6 +9,37 @@ import type { BetSelectionOddsStatus } from "@/lib/generated/prisma/client";
 const TOKEN_VERSION = 1 as const;
 const TTL_SECONDS = 180;
 
+// Production incident fix — a signed token's transport length ceiling,
+// shared by every route that receives one as raw request-body input
+// (app/api/miniapp/bets/text/confirm/route.ts,
+// app/api/miniapp/bets/express/exclude-legs/route.ts). Previously each
+// route duplicated its own `const PREVIEW_TOKEN_MAX_LENGTH = 2048` (a
+// value sized when a token was measured at "~500-600 chars," before Stage
+// 3.1's per-selection provider metadata — providerEventId/
+// providerSportKey/eventStartTime/canonical*/homeTeamName/awayTeamName/
+// competitionName — existed at all). A real EXPRESS token's size scales
+// with leg count once that metadata is included, and 2048 sat between a
+// real 2-leg token (~1900-2100 chars) and a real 3-leg token (~2700-3000
+// chars) — rejecting every legitimate 3+ leg EXPRESS confirm/exclude-legs
+// request with a generic INVALID_REQUEST even though EXPRESS officially
+// supports 2-10 selections (MIN_EXPRESS_SELECTIONS/MAX_EXPRESS_SELECTIONS,
+// lib/bets/betSlipRules.ts).
+//
+// Measured (real signPreviewToken/signExpressPreviewToken output, full
+// realistic provider metadata on every leg, this file's own production
+// code path, see lib/betPreview/previewToken.test.ts's own
+// "realistic-size" tests for the exact fixtures):
+//   SINGLE            ~1,200-1,300 chars
+//   EXPRESS x2        ~2,000-2,200 chars
+//   EXPRESS x3        ~2,900-3,100 chars
+//   EXPRESS x10 (max) ~9,000-9,500 chars
+//
+// 16384 keeps a real 10-leg (the product's own documented maximum) token
+// comfortably under budget (~40% headroom) while still being a genuine,
+// finite sanity bound against an oversized/abusive body — this is a
+// domain-correct limit, not "remove the check."
+export const PREVIEW_TOKEN_MAX_LENGTH = 16_384;
+
 export interface PreviewTokenOddsCheck {
   matched: boolean;
   withinTolerance: boolean | null;

@@ -4,7 +4,14 @@ import { createHmac } from "node:crypto";
 import { NextRequest } from "next/server";
 import { handleBetConfirm, type HandleBetConfirmOptions } from "./route";
 import { Prisma, type PrismaClient } from "@/lib/generated/prisma/client";
-import { signPreviewToken, signExpressPreviewToken, type PreviewTokenInput, type ExpressPreviewTokenInput } from "@/lib/betPreview/previewToken";
+import {
+  signPreviewToken,
+  signExpressPreviewToken,
+  PREVIEW_TOKEN_MAX_LENGTH,
+  type PreviewTokenInput,
+  type ExpressPreviewTokenInput,
+  type ExpressPreviewTokenSelection,
+} from "@/lib/betPreview/previewToken";
 import type { OddsVerificationInput } from "@/lib/odds/oddsVerifier";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { createRequestRateLimiter, type RequestRateLimiter } from "@/lib/rateLimit/requestRateLimiter";
@@ -489,6 +496,89 @@ test("confirm route: missing previewToken -> 400 INVALID_REQUEST", async () => {
 test("confirm route: previewToken: null -> 400 INVALID_REQUEST", async () => {
   const db = createFakeDb();
   const res = await handleBetConfirm(confirmRequest(null), fakeOptions(db));
+  assert.equal(res.status, 400);
+  const body = (await json(res)) as { error: string };
+  assert.equal(body.error, "INVALID_REQUEST");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Production incident — a legitimate signed EXPRESS token (2-10 legs, full   */
+/* provider metadata) must never be rejected for being "too long." A real    */
+/* 3-leg token was measured at ~2,700-3,000 chars in production, exceeding    */
+/* the old, pre-Stage-3.1 PREVIEW_TOKEN_MAX_LENGTH = 2048 and returning 400   */
+/* INVALID_REQUEST for every EXPRESS with 3+ legs. See                       */
+/* lib/betPreview/previewToken.test.ts's own realistic-size tests for the    */
+/* unit-level side of this same regression.                                  */
+/* -------------------------------------------------------------------------- */
+
+// Full, realistic per-leg provider metadata — same fixture shape as
+// lib/betPreview/previewToken.test.ts's own realisticExpressLeg (duplicated
+// here rather than imported, matching this file's existing convention of
+// self-contained fixtures per test file).
+function realisticExpressLeg(n: number): ExpressPreviewTokenSelection {
+  return {
+    sport: "SOCCER",
+    event: `Real Full Club Name United ${n} vs Another Real Full Club Name City ${n}`,
+    outcome: `Team ${n} to win`,
+    market: "MONEYLINE_3WAY",
+    submittedOdds: "1.85",
+    currentOdds: "1.85",
+    oddsStatus: "VERIFIED",
+    providerEventId: `a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b${n}`,
+    providerSportKey: "soccer_spain_la_liga",
+    eventStartTime: "2026-08-23T18:00:00.000Z",
+    canonicalMarketType: "MONEYLINE_3WAY",
+    canonicalSelectionType: "HOME",
+    canonicalParticipant: null,
+    canonicalPeriod: "FULL_TIME",
+    canonicalLine: null,
+    homeTeamName: `Real Full Club Name United ${n}`,
+    awayTeamName: `Another Real Full Club Name City ${n}`,
+    competitionName: "Some Realistic Competition Name - Spain",
+  };
+}
+
+function realisticExpressTokenInput(legCount: number): ExpressPreviewTokenInput {
+  return {
+    playerId: PLAYER_ID,
+    stake: "5",
+    totalOdds: "123.45",
+    potentialWin: "617.25",
+    selections: Array.from({ length: legCount }, (_, i) => realisticExpressLeg(i + 1)),
+  };
+}
+
+test("confirm route: a realistic 3-leg EXPRESS token (full provider metadata, exceeds the old 2048-char limit) is confirmed successfully — the exact production incident, reproduced and fixed", async () => {
+  const db = createFakeDb();
+  const token = signExpressPreviewToken(realisticExpressTokenInput(3), PREVIEW_SECRET);
+  assert.ok(token.length > 2048, `expected the realistic 3-leg token to exceed the old 2048-char limit, got ${token.length}`);
+
+  const res = await handleBetConfirm(confirmRequest(token), fakeOptions(db));
+  assert.equal(res.status, 200);
+  const body = (await json(res)) as { bet: { type: string; selections: unknown[] } };
+  assert.equal(body.bet.type, "EXPRESS");
+  assert.equal(body.bet.selections.length, 3);
+});
+
+test("confirm route: a realistic 10-leg (max EXPRESS) token is confirmed successfully", async () => {
+  const db = createFakeDb();
+  const token = signExpressPreviewToken(realisticExpressTokenInput(10), PREVIEW_SECRET);
+  assert.ok(token.length < PREVIEW_TOKEN_MAX_LENGTH, `expected < ${PREVIEW_TOKEN_MAX_LENGTH}, got ${token.length}`);
+
+  const res = await handleBetConfirm(confirmRequest(token), fakeOptions(db));
+  assert.equal(res.status, 200);
+  const body = (await json(res)) as { bet: { type: string; selections: unknown[] } };
+  assert.equal(body.bet.type, "EXPRESS");
+  assert.equal(body.bet.selections.length, 10);
+});
+
+// The length guard itself must still exist — this fix raises the ceiling to
+// a domain-correct value, it does not remove the sanity check.
+test("confirm route: a previewToken longer than PREVIEW_TOKEN_MAX_LENGTH is still rejected with 400 INVALID_REQUEST", async () => {
+  const db = createFakeDb();
+  const oversized = "a".repeat(PREVIEW_TOKEN_MAX_LENGTH + 1);
+
+  const res = await handleBetConfirm(confirmRequest(oversized), fakeOptions(db));
   assert.equal(res.status, 400);
   const body = (await json(res)) as { error: string };
   assert.equal(body.error, "INVALID_REQUEST");

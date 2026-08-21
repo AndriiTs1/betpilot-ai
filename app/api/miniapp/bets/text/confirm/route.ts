@@ -5,6 +5,7 @@ import { verifyInitData } from "@/lib/telegram/verifyInitData";
 import {
   verifyPreviewToken,
   verifyExpressPreviewToken,
+  PREVIEW_TOKEN_MAX_LENGTH,
   type VerifyPreviewTokenFailureReason,
 } from "@/lib/betPreview/previewToken";
 import { createBetFromPreview } from "@/lib/bets/createBetFromPreview";
@@ -20,10 +21,6 @@ import { rateLimitedResponse } from "@/lib/rateLimit/rateLimitResponse";
 // Requires node:crypto (verifyInitData/verifyPreviewToken) and Prisma —
 // neither runs on the Edge runtime.
 export const runtime = "nodejs";
-
-// A real token is ~500-600 chars (measured in production); this is a
-// generous upper bound against an oversized body, not a tight budget.
-const PREVIEW_TOKEN_MAX_LENGTH = 2048;
 
 // Step 13B — PROVISIONAL MVP CONFIGURATION VALUE (Step 13A Section 9).
 // Higher than either preview route's: a cheap-to-reject invalid/expired

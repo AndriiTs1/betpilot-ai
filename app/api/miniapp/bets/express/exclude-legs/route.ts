@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import type { PrismaClient } from "@/lib/generated/prisma/client";
 import { verifyInitData } from "@/lib/telegram/verifyInitData";
-import { verifyExpressPreviewToken, type VerifyPreviewTokenFailureReason } from "@/lib/betPreview/previewToken";
+import {
+  verifyExpressPreviewToken,
+  PREVIEW_TOKEN_MAX_LENGTH,
+  type VerifyPreviewTokenFailureReason,
+} from "@/lib/betPreview/previewToken";
 import {
   buildExpressLegExclusionPreview,
   ExpressLegExclusionError,
@@ -26,7 +30,6 @@ import { rateLimitedResponse } from "@/lib/rateLimit/rateLimitResponse";
 
 export const runtime = "nodejs";
 
-const PREVIEW_TOKEN_MAX_LENGTH = 2048;
 // Cheap upper bound checked before any real work — MAX_EXPRESS_SELECTIONS
 // (10) already makes anything above this meaningless, but this route
 // doesn't import that constant just to duplicate a redundant check;
