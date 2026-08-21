@@ -276,14 +276,30 @@ test("punctuation regression: 'F1(-1.5)' still produces SPREAD evidence", () => 
 /* Decimal comma — audit only, no normalization added in this step           */
 /* -------------------------------------------------------------------------- */
 
-test("decimal comma finding: 'Арсенал ТБ 2,5 ставка 10' degrades to TOTALS evidence with NO line captured (shorthandClassifier's own LINE_NUMBER is dot-only) — not fixed in this step", () => {
+// Individual Team Totals, Stage 2 — FIXED. This test previously documented
+// a known limitation (shorthandClassifier.ts's LINE_NUMBER was dot-only, so
+// a comma-decimal line was silently dropped, embeddedLine: null). Stage 2
+// widened LINE_NUMBER to also accept a comma as the fraction separator
+// (lib/odds/shorthandClassifier.ts), so the line is now correctly captured
+// — RAW, comma still present at this layer (the actual comma-to-dot value
+// conversion happens centrally in domain.ts's normalizeLineString, proven at
+// legacyOddsBridge.test.ts's request-mapping layer, never duplicated here).
+// This specific call passes NO knownParticipantNames, so "Арсенал" is not
+// attributed here — that is Stage 1B's own, separate, already-tested
+// concern (see the Stage 1B tests above); this test is scoped to the
+// number-shape fix alone.
+test("decimal comma finding: 'Арсенал ТБ 2,5 ставка 10' now captures the comma-decimal line correctly (Individual Team Totals Stage 2 — previously a documented, now-fixed limitation)", () => {
   const evidence = extractMarketIntentEvidence("Арсенал ТБ 2,5 ставка 10");
   assert.equal(evidence.length, 1);
   assert.equal(evidence[0].classification.marketType, "TOTALS");
-  assert.equal(evidence[0].classification.embeddedLine, null);
+  assert.equal(evidence[0].classification.embeddedLine, "2,5");
 });
 
-test("decimal comma finding: 'Арсенал Ф1(-1,5) ставка 10' produces NO evidence at all (worse degradation than TOTALS — the comma breaks the paren-wrapped signed-number match entirely) — not fixed in this step", () => {
+// SPREAD's Ф1/Ф2 comma support (SIGNED_LINE_NUMBER) is deliberately
+// UNCHANGED by Stage 2 — out of this stage's explicit scope (only
+// TOTALS/TEAM_TOTAL's LINE_NUMBER was widened; see shorthandClassifier.ts's
+// own Stage 2 comment). This documented limitation still stands.
+test("decimal comma finding: 'Арсенал Ф1(-1,5) ставка 10' still produces NO evidence at all (SPREAD's comma support is out of Individual Team Totals Stage 2's scope — a separate, not-yet-done follow-up)", () => {
   assert.deepEqual(extractMarketIntentEvidence("Арсенал Ф1(-1,5) ставка 10"), []);
 });
 

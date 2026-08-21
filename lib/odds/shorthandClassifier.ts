@@ -111,20 +111,39 @@ export function isBareMoneylineShorthandToken(token: string): boolean {
 /* Totals (match)                                                              */
 /* -------------------------------------------------------------------------- */
 
-const LINE_NUMBER = "(\\d+(?:\\.\\d+)?)";
+// Individual Team Totals, Stage 2 — the number SHAPE itself now also
+// accepts a comma as the fraction separator ("2,5"), alongside the existing
+// dot ("2.5") — exactly one separator, never both, matching
+// lib/odds/domain.ts's own LINE_INPUT_PATTERN widening. This is deliberately
+// narrower than it sounds: it changes what counts as a NUMBER, not the
+// separator grammar between the market token and that number (see
+// LINE_SUFFIX_PATTERN's own comment immediately below, unchanged) — so
+// "ТБ 2,5" (whitespace token-separator, comma-decimal number) is newly
+// recognized, but a bare comma directly AS the token-to-number separator
+// (e.g. a hypothetical "ТБ,2.5") is still never accepted; that separator
+// grammar is untouched. The captured group is passed through RAW (e.g.
+// "2,5", comma still present) as this file's own embeddedLine — the actual
+// comma-to-dot VALUE conversion happens exactly once, centrally, in
+// domain.ts's normalizeLineString, the one shared canonical line boundary
+// every line value in the codebase already converges on (request
+// construction here/legacyOddsBridge.ts, provider-point comparison in
+// oddsVerifier.ts, re-persistence in createBetFromPreview.ts) — never
+// duplicated or pre-converted here.
+const LINE_NUMBER = "(\\d+(?:[.,]\\d+)?)";
 
 // BA-2C, Step 1 — narrow, explicit separator grammar accepted between a
 // numeric-line-bearing shorthand token (ТБ/ТМ/ИТБ/ИТМ) and its embedded
 // line: nothing/whitespace ("ТБ2.5"/"ТБ 2.5"), a colon ("ТБ:2.5"/
 // "ТБ: 2.5"), or a fully parenthesized number ("ТБ(2.5)"/"ТБ (2.5)").
 // Deliberately NOT a generic separator class (no \W*, no [^\d]*): a bare
-// comma is never accepted here (comma is contextually either punctuation
-// or a decimal separator — that ambiguity is already resolved upstream,
-// ephemerally, by numericRoleEvidence.ts's own
-// normalizeDecimalCommaForClassification, never duplicated here), a bare
-// hyphen is never accepted as a generic separator (would collide with
-// SPREAD's sign), and unbalanced/doubled punctuation (ТБ::2.5,
-// ТБ((2.5))) is rejected outright rather than silently tolerated.
+// comma directly AS this token-to-number separator is still never accepted
+// (that would be genuinely ambiguous — contextually punctuation vs. a
+// decimal separator glued straight onto the token with no digit before it
+// — a different question from LINE_NUMBER's own comma-as-decimal-point
+// widening above, which only ever applies INSIDE an already-recognized
+// number), a bare hyphen is never accepted as a generic separator (would
+// collide with SPREAD's sign), and unbalanced/doubled punctuation
+// (ТБ::2.5, ТБ((2.5))) is rejected outright rather than silently tolerated.
 const LINE_SUFFIX_PATTERN = new RegExp(`^(?:\\s*${LINE_NUMBER}|\\s*:\\s*${LINE_NUMBER}|\\s*\\(\\s*${LINE_NUMBER}\\s*\\))$`);
 
 interface LineSuffixResult {

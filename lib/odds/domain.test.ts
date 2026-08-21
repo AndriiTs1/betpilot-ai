@@ -157,6 +157,83 @@ test("normalizeLineString: every output it produces is itself a valid isDecimalS
 });
 
 /* -------------------------------------------------------------------------- */
+/* Individual Team Totals, Stage 2 — RU/UA decimal comma acceptance. A comma  */
+/* is an alternate INPUT spelling of the same dot-decimal value, never a      */
+/* second canonical form — every case here must produce byte-for-byte the    */
+/* same output as its dot-decimal equivalent already produces above.         */
+/* -------------------------------------------------------------------------- */
+
+test("Individual Team Totals Stage 2 (1): '1,5' -> '1.5'", () => {
+  assert.equal(normalizeLineString("1,5"), "1.5");
+});
+
+test("Individual Team Totals Stage 2 (2): '2,5' -> '2.5'", () => {
+  assert.equal(normalizeLineString("2,5"), "2.5");
+});
+
+test("Individual Team Totals Stage 2 (3): '-1,5' is normalized correctly to '-1.5' — sign preserved, comma converted, byte-for-byte identical to '-1.5' input", () => {
+  assert.equal(normalizeLineString("-1,5"), "-1.5");
+  assert.equal(normalizeLineString("-1,5"), normalizeLineString("-1.5"));
+});
+
+test("Individual Team Totals Stage 2: '+1,5' canonicalizes exactly like '+1.5' already does — leading '+' stripped, comma converted, same output as a bare '1.5'", () => {
+  assert.equal(normalizeLineString("+1,5"), "1.5");
+  assert.equal(normalizeLineString("+1,5"), normalizeLineString("1.5"));
+});
+
+test("Individual Team Totals Stage 2 (4): existing dot decimals are completely unchanged by this stage", () => {
+  assert.equal(normalizeLineString("1.5"), "1.5");
+  assert.equal(normalizeLineString("2.5"), "2.5");
+  assert.equal(normalizeLineString("-1.5"), "-1.5");
+});
+
+test("Individual Team Totals Stage 2 (5): whole numbers are unchanged — never coerced into a decimal, comma or otherwise", () => {
+  assert.equal(normalizeLineString("2"), "2");
+  assert.equal(normalizeLineString("3"), "3");
+  assert.equal(normalizeLineString("-2"), "-2");
+});
+
+test("Individual Team Totals Stage 2 (9): malformed comma input remains rejected — a comma never widens accepted syntax beyond one single separator", () => {
+  for (const malformed of ["1.5,3", "1,5.3", "1,,5", "1,5,5", ",5", "5,", "1,5,", "-,5"]) {
+    assert.equal(normalizeLineString(malformed), null, `"${malformed}" must remain rejected`);
+  }
+});
+
+test("Individual Team Totals Stage 2: comma-decimal trailing-zero canonicalization composes correctly with the H4-B5.6 rule — '1,50' -> '1.5', '2,00' -> '2'", () => {
+  assert.equal(normalizeLineString("1,50"), "1.5");
+  assert.equal(normalizeLineString("2,00"), "2");
+  assert.equal(normalizeLineString("-1,250"), "-1.25");
+});
+
+test("Individual Team Totals Stage 2: comma-decimal exact-line safety — '1,25' must never canonicalize the same as '1,5' or '1.5'", () => {
+  assert.notEqual(normalizeLineString("1,25"), normalizeLineString("1,5"));
+  assert.notEqual(normalizeLineString("1,25"), normalizeLineString("1.5"));
+  assert.equal(normalizeLineString("1,25"), "1.25");
+});
+
+test("Individual Team Totals Stage 2: comma-decimal signed zero collapses to unsigned '0', same as the dot form already does", () => {
+  for (const form of ["0,0", "-0,0", "+0,00"]) {
+    assert.equal(normalizeLineString(form), "0", `"${form}" must canonicalize to "0"`);
+  }
+});
+
+test("Individual Team Totals Stage 2: representation-equivalence matrix now includes comma spellings alongside the existing dot-decimal group", () => {
+  const groups: string[][] = [
+    ["1.5", "1,5", "+1,50", "1,50"],
+    ["-2", "-2,0", "-2.00", "-2,00"],
+    ["2.5", "2,5", "+2,5"],
+  ];
+  for (const group of groups) {
+    const canonical = group.map((form) => normalizeLineString(form));
+    const first = canonical[0];
+    assert.notEqual(first, null);
+    for (let i = 1; i < canonical.length; i++) {
+      assert.equal(canonical[i], first, `"${group[i]}" must canonicalize identically to "${group[0]}" (got "${canonical[i]}" vs "${first}")`);
+    }
+  }
+});
+
+/* -------------------------------------------------------------------------- */
 /* H4-B5.6 — trailing fractional zero canonicalization. Root cause fixed:     */
 /* a requested line of "-2.0" and a live provider point of -2 (which          */
 /* canonicalizes via String(-2) -> "-2", never "-2.0") failed to string-match */

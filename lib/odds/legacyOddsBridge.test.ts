@@ -816,6 +816,97 @@ test("Individual Team Totals Stage 1: whole-number line 'Марсель ТБ 2' 
   assert.equal(request.selection.line, "2");
 });
 
+/* -------------------------------------------------------------------------- */
+/* Individual Team Totals, Stage 2 — RU decimal comma reaches the REAL        */
+/* production canonical request with the exact converted line, for both      */
+/* TEAM_TOTAL (participant attached) and bare TOTALS. This is the request     */
+/* shape real odds verification would actually receive — proving the comma   */
+/* survives the full classifier -> normalizeLineString round-trip at the     */
+/* one function every real preview build calls.                              */
+/* -------------------------------------------------------------------------- */
+
+test("Individual Team Totals Stage 2 (6): 'Марсель ТБ 1,5' -> canonical request TEAM_TOTAL/Марсель/OVER, line '1.5' (comma converted)", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Марсель vs Страсбург",
+    selection: "Марсель ТБ 1,5",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.selectionType, "OVER");
+  assert.equal(request.selection.participant?.name, "Марсель");
+  assert.equal(request.selection.line, "1.5");
+});
+
+test("Individual Team Totals Stage 2 (6b): 'Марсель ТМ 2,5' -> canonical request TEAM_TOTAL/Марсель/UNDER, line '2.5'", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Марсель vs Страсбург",
+    selection: "Марсель ТМ 2,5",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.selectionType, "UNDER");
+  assert.equal(request.selection.participant?.name, "Марсель");
+  assert.equal(request.selection.line, "2.5");
+});
+
+test("Individual Team Totals Stage 2 (7): bare 'ТБ 2,5' -> canonical request TOTALS/OVER, no participant invented, line '2.5' (comma converted)", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Марсель vs Страсбург",
+    selection: "ТБ 2,5",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.selectionType, "OVER");
+  assert.equal(request.selection.participant, undefined);
+  assert.equal(request.selection.line, "2.5");
+});
+
+test("Individual Team Totals Stage 2 (7b): bare 'ТМ 1,5' -> canonical request TOTALS/UNDER, line '1.5'", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Марсель vs Страсбург",
+    selection: "ТМ 1,5",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.selectionType, "UNDER");
+  assert.equal(request.selection.line, "1.5");
+});
+
+test("Individual Team Totals Stage 2 (8): EN behavior is completely unchanged — 'Marseille Over 1.5' (dot, no comma anywhere) still produces the identical request it did before this stage", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Marseille vs Strasbourg",
+    selection: "Marseille Over 1.5",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.selectionType, "OVER");
+  assert.equal(request.selection.participant?.name, "Marseille");
+  assert.equal(request.selection.line, "1.5");
+});
+
+test("Individual Team Totals Stage 2: 'Страсбург ТБ 1,5' — the other team, comma decimal — is correctly attributed, never cross-attributed to Марсель", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Марсель vs Страсбург",
+    selection: "Страсбург ТБ 1,5",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.participant?.name, "Страсбург");
+  assert.equal(request.selection.line, "1.5");
+});
+
 test("request mapping: spreads/handicaps ('-1.5') are not classified as TOTALS yet — falls back to PARTICIPANT", () => {
   const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "-1.5", submittedOdds: 1.9 });
 

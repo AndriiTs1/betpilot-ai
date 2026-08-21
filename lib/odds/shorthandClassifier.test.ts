@@ -518,6 +518,74 @@ test("Individual Team Totals Stage 1 (12): decimal line '1.5' is never altered �
 });
 
 /* -------------------------------------------------------------------------- */
+/* Individual Team Totals, Stage 2 — RU decimal comma. The comma is a valid   */
+/* number SHAPE at this layer (LINE_NUMBER), captured RAW into embeddedLine   */
+/* (still comma, unconverted) — the actual comma-to-dot conversion happens    */
+/* centrally in domain.ts's normalizeLineString, proven at the               */
+/* legacyOddsBridge.ts request-mapping layer below, not here.                 */
+/* -------------------------------------------------------------------------- */
+
+test("Individual Team Totals Stage 2: 'Марсель ТБ 1,5' -> TEAM_TOTAL/Марсель/OVER, embeddedLine raw '1,5' (comma preserved at this layer)", () => {
+  const result = classifyBettingSelectionText("Марсель ТБ 1,5", MARSEILLE_STRASBOURG);
+  assert.equal(result.marketType, "TEAM_TOTAL");
+  assert.equal(result.selectionType, "OVER");
+  assert.equal(result.participantName, "Марсель");
+  assert.equal(result.embeddedLine, "1,5");
+});
+
+test("Individual Team Totals Stage 2: 'Марсель ТМ 2,5' -> TEAM_TOTAL/Марсель/UNDER, embeddedLine raw '2,5'", () => {
+  const result = classifyBettingSelectionText("Марсель ТМ 2,5", MARSEILLE_STRASBOURG);
+  assert.equal(result.marketType, "TEAM_TOTAL");
+  assert.equal(result.selectionType, "UNDER");
+  assert.equal(result.participantName, "Марсель");
+  assert.equal(result.embeddedLine, "2,5");
+});
+
+test("Individual Team Totals Stage 2: bare 'ТБ 2,5' -> TOTALS/OVER, no participant invented, embeddedLine raw '2,5'", () => {
+  const result = classifyBettingSelectionText("ТБ 2,5", MARSEILLE_STRASBOURG);
+  assert.equal(result.marketType, "TOTALS");
+  assert.equal(result.selectionType, "OVER");
+  assert.equal(result.participantName, null);
+  assert.equal(result.embeddedLine, "2,5");
+});
+
+test("Individual Team Totals Stage 2: bare 'ТМ 1,5' -> TOTALS/UNDER, no participant invented", () => {
+  const result = classifyBettingSelectionText("ТМ 1,5", MARSEILLE_STRASBOURG);
+  assert.equal(result.marketType, "TOTALS");
+  assert.equal(result.selectionType, "UNDER");
+  assert.equal(result.participantName, null);
+  assert.equal(result.embeddedLine, "1,5");
+});
+
+test("Individual Team Totals Stage 2: 'Марсель ИТБ 1,5' (dedicated token) also accepts the comma decimal", () => {
+  const result = classifyBettingSelectionText("Марсель ИТБ 1,5", MARSEILLE_STRASBOURG);
+  assert.equal(result.marketType, "TEAM_TOTAL");
+  assert.equal(result.participantName, "Марсель");
+  assert.equal(result.embeddedLine, "1,5");
+});
+
+test("Individual Team Totals Stage 2: colon/paren separator forms still work with a comma-decimal number ('ТБ:2,5', 'ТБ(2,5)')", () => {
+  for (const text of ["ТБ:2,5", "ТБ(2,5)", "ТБ: 2,5", "ТБ (2,5)"]) {
+    const result = classifyBettingSelectionText(text);
+    assert.equal(result.marketType, "TOTALS", text);
+    assert.equal(result.embeddedLine, "2,5", text);
+  }
+});
+
+test("Individual Team Totals Stage 2: a bare comma directly glued to the token (no digit before it) is still never accepted as a token-to-number separator — 'ТБ,2.5' does not classify as TOTALS", () => {
+  const result = classifyBettingSelectionText("ТБ,2.5");
+  assert.notEqual(result.marketType, "TOTALS");
+});
+
+test("Individual Team Totals Stage 2: existing dot-decimal behavior is completely unaffected by the comma widening", () => {
+  const dotResult = classifyBettingSelectionText("Марсель ТБ 1.5", MARSEILLE_STRASBOURG);
+  const commaResult = classifyBettingSelectionText("Марсель ТБ 1,5", MARSEILLE_STRASBOURG);
+  assert.equal(dotResult.marketType, commaResult.marketType);
+  assert.equal(dotResult.selectionType, commaResult.selectionType);
+  assert.equal(dotResult.participantName, commaResult.participantName);
+});
+
+/* -------------------------------------------------------------------------- */
 /* BA-2C, Step 1 — safe market-token separator tolerance                      */
 /* -------------------------------------------------------------------------- */
 //

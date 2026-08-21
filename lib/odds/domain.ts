@@ -201,7 +201,16 @@ export function isDecimalString(value: string): boolean {
 // — a real "malformed", never silently coerced. Distinct from
 // isDecimalString: that function asks "is this ALREADY canonical"; this one
 // produces the canonical string from any validly-shaped input, "+" included.
-const LINE_INPUT_PATTERN = /^[+-]?\d+(\.\d+)?$/;
+//
+// Individual Team Totals, Stage 2 — the fraction separator now also accepts
+// a comma ("1,5"), the standard RU/UA decimal spelling, as an alternate
+// INPUT spelling of the exact same dot form — never a second, differently-
+// canonicalized value. Exactly one separator character (dot OR comma, never
+// both, never more than one) is still required for a match; "1.5,3"/"1,5.3"
+// remain rejected exactly as any other malformed multi-separator string
+// already was. isDecimalString's own CANONICAL shape is unchanged by this —
+// a comma is never canonical output, only ever accepted input.
+const LINE_INPUT_PATTERN = /^[+-]?\d+(?:[.,]\d+)?$/;
 
 // H4-B5.6 — proven live production bug: a requested line of "-2.0" and a
 // provider point of -2 (canonicalized via oddsVerifier.ts's
@@ -243,8 +252,17 @@ export function normalizeLineString(value: string): string | null {
   const trimmed = value.trim();
   if (!LINE_INPUT_PATTERN.test(trimmed)) return null;
 
-  const isNegative = trimmed.startsWith("-");
-  const magnitude = isNegative || trimmed.startsWith("+") ? trimmed.slice(1) : trimmed;
+  // Individual Team Totals, Stage 2 — a single, separator-only swap, applied
+  // AFTER shape validation above already confirmed at most one comma-or-dot
+  // is present. Every subsequent step (sign stripping,
+  // stripTrailingFractionZeros, the isDecimalString-shaped output) then
+  // operates on the exact same dot-separated string it always has —
+  // "1,5" and "1.5" are therefore guaranteed to canonicalize byte-for-byte
+  // identically, never two different representations of the same line.
+  const dotForm = trimmed.replace(",", ".");
+
+  const isNegative = dotForm.startsWith("-");
+  const magnitude = isNegative || dotForm.startsWith("+") ? dotForm.slice(1) : dotForm;
   const canonicalMagnitude = stripTrailingFractionZeros(magnitude);
 
   // "-0"/"-0.0"/etc. and "0"/"0.0"/etc. are the same line (no handicap at
