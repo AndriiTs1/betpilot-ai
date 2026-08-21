@@ -9,10 +9,13 @@ import {
   findSpreadOutcome,
   verifySpreadOdds,
   resolveSpreadEventMetadata,
+  findTeamTotalOutcome,
+  verifyTeamTotalsOdds,
   type OddsVerificationInput,
   type OddsApiEvent,
   type OddsApiBookmaker,
   type OddsApiOutcome,
+  type TeamTotalVerificationInput,
 } from "./oddsVerifier";
 import { normalizeTeamName } from "./teamNameMatcher";
 
@@ -3121,4 +3124,481 @@ test("H3.1 (10): resolveSpreadEventMetadata never calls findSpreadOutcome — no
     "providerEventId",
     "providerSportKey",
   ]);
+});
+
+/* ============================================================================
+ * Individual Team Totals, Stage 3 — findTeamTotalOutcome (pure) and
+ * verifyTeamTotalsOdds (fetch-mocked, EU-first/US-fallback). Fixtures are
+ * shaped exactly like the real, live-verified The Odds API response
+ * captured during Phase 1's live investigation: outcome.name = "Over"/
+ * "Under", outcome.description = the team, outcome.point = the line,
+ * outcome.price = the odds; team_totals (standard, one line per team) and
+ * alternate_team_totals (multiple lines) are separate market keys that can
+ * both appear on the same bookmaker.
+ * ============================================================================ */
+
+function teamTotalOutcome(name: "Over" | "Under", description: string, price: number, point: number | undefined): OddsApiOutcome {
+  return { name, description, price, point };
+}
+
+function bookmakerWithMarkets(key: string, title: string, markets: { key: string; outcomes: OddsApiOutcome[] }[]): OddsApiBookmaker {
+  return { key, title, markets };
+}
+
+function teamTotalsEvent(id: string, homeTeam: string, awayTeam: string, bookmakers: OddsApiBookmaker[]): OddsApiEvent {
+  return { id, home_team: homeTeam, away_team: awayTeam, bookmakers };
+}
+
+/* -------------------------------------------------------------------------- */
+/* findTeamTotalOutcome — pure, no fetch mocking needed                       */
+/* -------------------------------------------------------------------------- */
+
+test("Individual Team Totals Stage 3 (1): Marseille OVER 1.5 — exact match against the real live-shaped fixture", () => {
+  const event = teamTotalsEvent("evt-tt-1", "Marseille", "Strasbourg", [
+    bookmakerWithMarkets("fanduel", "FanDuel", [
+      {
+        key: "team_totals",
+        outcomes: [
+          teamTotalOutcome("Over", "Marseille", 1.53, 1.5),
+          teamTotalOutcome("Under", "Marseille", 2.42, 1.5),
+          teamTotalOutcome("Over", "Strasbourg", 2.65, 1.5),
+          teamTotalOutcome("Under", "Strasbourg", 1.45, 1.5),
+        ],
+      },
+    ]),
+  ]);
+
+  const result = findTeamTotalOutcome(event, "Marseille", "OVER", "1.5", "eu");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.price, 1.53);
+  assert.equal(result.point, "1.5");
+  assert.equal(result.outcomeParticipant, "Marseille");
+  assert.equal(result.marketKey, "team_totals");
+});
+
+test("Individual Team Totals Stage 3 (2): Marseille UNDER 1.5 — exact match, different direction, same fixture", () => {
+  const event = teamTotalsEvent("evt-tt-1", "Marseille", "Strasbourg", [
+    bookmakerWithMarkets("fanduel", "FanDuel", [
+      {
+        key: "team_totals",
+        outcomes: [
+          teamTotalOutcome("Over", "Marseille", 1.53, 1.5),
+          teamTotalOutcome("Under", "Marseille", 2.42, 1.5),
+        ],
+      },
+    ]),
+  ]);
+
+  const result = findTeamTotalOutcome(event, "Marseille", "UNDER", "1.5", "eu");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.price, 2.42);
+});
+
+test("Individual Team Totals Stage 3 (3): away team (Strasbourg) OVER 1.5 — exact match, proving both teams work independently", () => {
+  const event = teamTotalsEvent("evt-tt-1", "Marseille", "Strasbourg", [
+    bookmakerWithMarkets("fanduel", "FanDuel", [
+      {
+        key: "team_totals",
+        outcomes: [
+          teamTotalOutcome("Over", "Marseille", 1.53, 1.5),
+          teamTotalOutcome("Over", "Strasbourg", 2.65, 1.5),
+        ],
+      },
+    ]),
+  ]);
+
+  const result = findTeamTotalOutcome(event, "Strasbourg", "OVER", "1.5", "eu");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.price, 2.65);
+  assert.equal(result.outcomeParticipant, "Strasbourg");
+});
+
+test("Individual Team Totals Stage 3 (4): no cross-team matching — Marseille's request never returns Strasbourg's price, even though both are OVER 1.5 in the same market", () => {
+  const event = teamTotalsEvent("evt-tt-1", "Marseille", "Strasbourg", [
+    bookmakerWithMarkets("fanduel", "FanDuel", [
+      {
+        key: "team_totals",
+        outcomes: [
+          teamTotalOutcome("Over", "Marseille", 1.53, 1.5),
+          teamTotalOutcome("Over", "Strasbourg", 2.65, 1.5),
+        ],
+      },
+    ]),
+  ]);
+
+  const marseille = findTeamTotalOutcome(event, "Marseille", "OVER", "1.5", "eu");
+  const strasbourg = findTeamTotalOutcome(event, "Strasbourg", "OVER", "1.5", "eu");
+
+  assert.equal(marseille.kind, "MATCHED");
+  assert.equal(strasbourg.kind, "MATCHED");
+  if (marseille.kind !== "MATCHED" || strasbourg.kind !== "MATCHED") return;
+  assert.notEqual(marseille.price, strasbourg.price);
+  assert.equal(marseille.price, 1.53);
+  assert.equal(strasbourg.price, 2.65);
+});
+
+test("Individual Team Totals Stage 3 (5): exact line 1.5 does not match a 2.5 outcome — LINE_NOT_AVAILABLE, never the nearest line", () => {
+  const event = teamTotalsEvent("evt-tt-1", "Marseille", "Strasbourg", [
+    bookmakerWithMarkets("fanduel", "FanDuel", [
+      { key: "team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 2.88, 2.5)] },
+    ]),
+  ]);
+
+  const result = findTeamTotalOutcome(event, "Marseille", "OVER", "1.5", "eu");
+
+  assert.equal(result.kind, "LINE_NOT_AVAILABLE");
+});
+
+test("Individual Team Totals Stage 3 (6): whole-number line '2' does not match 1.5 or 2.5 — no rounding, no nearest-line substitution", () => {
+  const event = teamTotalsEvent("evt-tt-1", "Marseille", "Strasbourg", [
+    bookmakerWithMarkets("fanduel", "FanDuel", [
+      {
+        key: "alternate_team_totals",
+        outcomes: [teamTotalOutcome("Over", "Marseille", 1.53, 1.5), teamTotalOutcome("Over", "Marseille", 2.88, 2.5)],
+      },
+    ]),
+  ]);
+
+  const result = findTeamTotalOutcome(event, "Marseille", "OVER", "2", "eu");
+
+  assert.equal(result.kind, "LINE_NOT_AVAILABLE");
+});
+
+test("Individual Team Totals Stage 3 (7): the standard team_totals market alone (no alternate present) is matched correctly", () => {
+  const event = teamTotalsEvent("evt-tt-1", "Marseille", "Strasbourg", [
+    bookmakerWithMarkets("betmgm", "BetMGM", [
+      { key: "team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 1.57, 1.5)] },
+    ]),
+  ]);
+
+  const result = findTeamTotalOutcome(event, "Marseille", "OVER", "1.5", "eu");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.marketKey, "team_totals");
+});
+
+test("Individual Team Totals Stage 3 (8): alternate_team_totals is used when the exact requested line is genuinely only there (not in the standard market)", () => {
+  const event = teamTotalsEvent("evt-tt-1", "Marseille", "Strasbourg", [
+    bookmakerWithMarkets("fanduel", "FanDuel", [
+      { key: "team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 1.53, 1.5)] },
+      { key: "alternate_team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 2.88, 2.5)] },
+    ]),
+  ]);
+
+  const result = findTeamTotalOutcome(event, "Marseille", "OVER", "2.5", "eu");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.marketKey, "alternate_team_totals");
+  assert.equal(result.price, 2.88);
+});
+
+test("Individual Team Totals Stage 3 (9): standard-market exact match has deterministic priority over alternate — when the SAME exact line exists in both, team_totals wins, never alternate", () => {
+  const event = teamTotalsEvent("evt-tt-1", "Marseille", "Strasbourg", [
+    bookmakerWithMarkets("fanduel", "FanDuel", [
+      { key: "team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 1.53, 1.5)] },
+      { key: "alternate_team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 1.60, 1.5)] },
+    ]),
+  ]);
+
+  const result = findTeamTotalOutcome(event, "Marseille", "OVER", "1.5", "eu");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.marketKey, "team_totals");
+  assert.equal(result.price, 1.53, "must be the standard market's price, never alternate's 1.60");
+});
+
+test("Individual Team Totals Stage 3: a genuinely unresolvable participant ('Real Madrid' against a Marseille/Strasbourg event) -> PARTICIPANT_NOT_FOUND, never a fabricated guess", () => {
+  const event = teamTotalsEvent("evt-tt-1", "Marseille", "Strasbourg", [
+    bookmakerWithMarkets("fanduel", "FanDuel", [
+      { key: "team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 1.53, 1.5)] },
+    ]),
+  ]);
+
+  const result = findTeamTotalOutcome(event, "Real Madrid", "OVER", "1.5", "eu");
+
+  assert.equal(result.kind, "PARTICIPANT_NOT_FOUND");
+});
+
+test("Individual Team Totals Stage 3: neither team_totals nor alternate_team_totals present on any bookmaker -> MARKET_ABSENT", () => {
+  const event = teamTotalsEvent("evt-tt-1", "Marseille", "Strasbourg", [
+    bookmakerWithMarkets("fanduel", "FanDuel", [{ key: "h2h", outcomes: [] }]),
+  ]);
+
+  const result = findTeamTotalOutcome(event, "Marseille", "OVER", "1.5", "eu");
+
+  assert.equal(result.kind, "MARKET_ABSENT");
+});
+
+test("Individual Team Totals Stage 3: no bookmakers at all -> NO_BOOKMAKER", () => {
+  const event = teamTotalsEvent("evt-tt-1", "Marseille", "Strasbourg", []);
+  const result = findTeamTotalOutcome(event, "Marseille", "OVER", "1.5", "eu");
+  assert.equal(result.kind, "NO_BOOKMAKER");
+});
+
+test("Individual Team Totals Stage 3: a malformed requested line -> INVALID_REQUESTED_LINE, never silently coerced", () => {
+  const event = teamTotalsEvent("evt-tt-1", "Marseille", "Strasbourg", [
+    bookmakerWithMarkets("fanduel", "FanDuel", [{ key: "team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 1.53, 1.5)] }]),
+  ]);
+
+  const result = findTeamTotalOutcome(event, "Marseille", "OVER", "not-a-number", "eu");
+
+  assert.equal(result.kind, "INVALID_REQUESTED_LINE");
+});
+
+test("Individual Team Totals Stage 3: Pinnacle is preferred over other bookmakers when both have the exact requested outcome — same deterministic bookmaker policy as SPREAD/TOTALS, never a 'best odds' comparison", () => {
+  const event = teamTotalsEvent("evt-tt-1", "Marseille", "Strasbourg", [
+    bookmakerWithMarkets("fanduel", "FanDuel", [{ key: "team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 99.0, 1.5)] }]),
+    bookmakerWithMarkets("pinnacle", "Pinnacle", [{ key: "team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 1.53, 1.5)] }]),
+  ]);
+
+  const result = findTeamTotalOutcome(event, "Marseille", "OVER", "1.5", "eu");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.bookmaker, "Pinnacle", "Pinnacle must be preferred even though FanDuel's price (99.0) would be 'better'");
+  assert.equal(result.price, 1.53);
+  assert.equal(result.isFallbackBookmaker, false);
+});
+
+test("Individual Team Totals Stage 3: falls back to the next bookmaker in order when Pinnacle lacks the exact outcome — isFallbackBookmaker reflects this honestly", () => {
+  const event = teamTotalsEvent("evt-tt-1", "Marseille", "Strasbourg", [
+    bookmakerWithMarkets("pinnacle", "Pinnacle", [{ key: "team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 1.53, 2.5)] }]),
+    bookmakerWithMarkets("fanduel", "FanDuel", [{ key: "team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 1.60, 1.5)] }]),
+  ]);
+
+  const result = findTeamTotalOutcome(event, "Marseille", "OVER", "1.5", "eu");
+
+  assert.equal(result.kind, "MATCHED");
+  if (result.kind !== "MATCHED") return;
+  assert.equal(result.bookmaker, "FanDuel");
+  assert.equal(result.isFallbackBookmaker, true);
+});
+
+/* -------------------------------------------------------------------------- */
+/* verifyTeamTotalsOdds — fetch-mocked, EU-first/US-fallback orchestration.   */
+/* The bulk h2h URL shape (/sports/{sportKey}/odds/?...) is used ONLY for     */
+/* event discovery; the per-event URL shape                                  */
+/* (/sports/{sportKey}/events/{eventId}/odds/?...) is used for the actual    */
+/* team-totals odds, once per region attempted. A dedicated router           */
+/* distinguishes the two, and further distinguishes EU vs US by the          */
+/* `regions` query parameter — proving exactly which calls were (and were    */
+/* NOT) made is central to several of these tests.                          */
+/* -------------------------------------------------------------------------- */
+
+function h2hResolutionEvent(id: string, homeTeam: string, awayTeam: string): unknown {
+  return {
+    id,
+    home_team: homeTeam,
+    away_team: awayTeam,
+    commence_time: "2026-08-21T18:45:00Z",
+    bookmakers: [{ key: "pinnacle", title: "Pinnacle", markets: [{ key: "h2h", outcomes: [] }] }],
+  };
+}
+
+type RegionResponse = unknown[] | "reject" | undefined;
+
+interface TeamTotalsMockConfig {
+  readonly h2h: unknown[];
+  readonly perEvent: Record<string, { eu?: RegionResponse; us?: RegionResponse }>;
+}
+
+function parsePerEventUrl(url: string): { sportKey: string; eventId: string; region: string } | null {
+  const u = new URL(url);
+  const match = /^\/v4\/sports\/([^/]+)\/events\/([^/]+)\/odds\/$/.exec(u.pathname);
+  if (!match) return null;
+  return { sportKey: match[1], eventId: match[2], region: u.searchParams.get("regions") ?? "" };
+}
+
+// Records every per-event (sportKey, eventId, region) call actually made, in
+// order — the primary evidence several tests below check against, to prove
+// exactly when a US call was (or was NOT) made.
+function mockTeamTotalsProvider(config: TeamTotalsMockConfig): { perEventCalls: Array<{ eventId: string; region: string }> } {
+  const perEventCalls: Array<{ eventId: string; region: string }> = [];
+
+  currentHandler = async (url: string) => {
+    const perEventInfo = parsePerEventUrl(url);
+
+    if (perEventInfo) {
+      perEventCalls.push({ eventId: perEventInfo.eventId, region: perEventInfo.region });
+      const eventConfig = config.perEvent[perEventInfo.eventId];
+      if (!eventConfig) throw new Error(`oddsVerifier.test.ts: no per-event fixture for eventId "${perEventInfo.eventId}"`);
+      const regionResponse = perEventInfo.region === "eu" ? eventConfig.eu : eventConfig.us;
+      if (regionResponse === undefined) {
+        throw new Error(`oddsVerifier.test.ts: no "${perEventInfo.region}" fixture for eventId "${perEventInfo.eventId}"`);
+      }
+      if (regionResponse === "reject") {
+        throw new Error(`simulated per-event fetch failure for region "${perEventInfo.region}"`);
+      }
+      // The per-event endpoint returns ONE event object, never an array —
+      // the fixture itself is a single-event bookmakers-carrying object.
+      return jsonResponse(regionResponse[0]);
+    }
+
+    // Bulk h2h URL — event discovery only.
+    return jsonResponse(config.h2h);
+  };
+
+  return { perEventCalls };
+}
+
+// "ligue 1" (a single-sport_key league, unlike bare "football"'s 7-way
+// fallback fan-out) matches Phase 1's own real, live-verified Marseille —
+// Strasbourg Ligue 1 fixture, and keeps these tests' bulk h2h mock to
+// exactly one request instead of needing to answer for every football
+// fallback key.
+function teamTotalBet(overrides: Partial<TeamTotalVerificationInput> = {}): TeamTotalVerificationInput {
+  return {
+    sport: "ligue 1",
+    event: "Marseille vs Strasbourg",
+    participant: "Marseille",
+    direction: "OVER",
+    line: "1.5",
+    odds: null,
+    ...overrides,
+  };
+}
+
+test("Individual Team Totals Stage 3 (10): EU exact match prevents a US request entirely", async () => {
+  const { perEventCalls } = mockTeamTotalsProvider({
+    h2h: [h2hResolutionEvent("evt-tt-10", "Marseille", "Strasbourg")],
+    perEvent: {
+      "evt-tt-10": {
+        eu: [teamTotalsEvent("evt-tt-10", "Marseille", "Strasbourg", [bookmakerWithMarkets("fanduel", "FanDuel", [{ key: "team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 1.53, 1.5)] }])])],
+      },
+    },
+  });
+
+  const result = await verifyTeamTotalsOdds(teamTotalBet());
+
+  assert.equal(result.matched, true);
+  assert.equal(result.sourceOdds, 1.53);
+  assert.deepEqual(perEventCalls, [{ eventId: "evt-tt-10", region: "eu" }], "US must never be requested when EU already matched");
+});
+
+test("Individual Team Totals Stage 3 (11): EU miss (LINE_NOT_AVAILABLE) triggers a US fallback request", async () => {
+  const { perEventCalls } = mockTeamTotalsProvider({
+    h2h: [h2hResolutionEvent("evt-tt-11", "Marseille", "Strasbourg")],
+    perEvent: {
+      "evt-tt-11": {
+        eu: [teamTotalsEvent("evt-tt-11", "Marseille", "Strasbourg", [])], // no bookmakers -> NO_BOOKMAKER, not matched
+        us: [teamTotalsEvent("evt-tt-11", "Marseille", "Strasbourg", [bookmakerWithMarkets("fanduel", "FanDuel", [{ key: "team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 1.55, 1.5)] }])])],
+      },
+    },
+  });
+
+  const result = await verifyTeamTotalsOdds(teamTotalBet());
+
+  assert.equal(result.matched, true);
+  assert.deepEqual(perEventCalls, [
+    { eventId: "evt-tt-11", region: "eu" },
+    { eventId: "evt-tt-11", region: "us" },
+  ]);
+});
+
+test("Individual Team Totals Stage 3 (12): US exact match succeeds and reports the US-sourced price/bookmaker", async () => {
+  mockTeamTotalsProvider({
+    h2h: [h2hResolutionEvent("evt-tt-12", "Marseille", "Strasbourg")],
+    perEvent: {
+      "evt-tt-12": {
+        eu: [teamTotalsEvent("evt-tt-12", "Marseille", "Strasbourg", [])],
+        us: [teamTotalsEvent("evt-tt-12", "Marseille", "Strasbourg", [bookmakerWithMarkets("betmgm", "BetMGM", [{ key: "team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 1.57, 1.5)] }])])],
+      },
+    },
+  });
+
+  const result = await verifyTeamTotalsOdds(teamTotalBet());
+
+  assert.equal(result.matched, true);
+  assert.equal(result.sourceOdds, 1.57);
+  assert.equal(result.bookmaker, "BetMGM");
+});
+
+test("Individual Team Totals Stage 3 (13): EU + US both miss -> unavailable, never a fabricated price", async () => {
+  mockTeamTotalsProvider({
+    h2h: [h2hResolutionEvent("evt-tt-13", "Marseille", "Strasbourg")],
+    perEvent: {
+      "evt-tt-13": {
+        eu: [teamTotalsEvent("evt-tt-13", "Marseille", "Strasbourg", [])],
+        us: [teamTotalsEvent("evt-tt-13", "Marseille", "Strasbourg", [])],
+      },
+    },
+  });
+
+  const result = await verifyTeamTotalsOdds(teamTotalBet());
+
+  assert.equal(result.matched, false);
+  assert.equal(result.sourceOdds, null);
+  assert.match(result.note ?? "", /Could not match team total selection/);
+  assert.match(result.note ?? "", /NO_BOOKMAKER/);
+});
+
+test("Individual Team Totals Stage 3 (14): provider/network failure on BOTH regions follows the existing safe failure behavior — a genuine fetch failure, never reported as 'line unavailable'", async () => {
+  mockTeamTotalsProvider({
+    h2h: [h2hResolutionEvent("evt-tt-14", "Marseille", "Strasbourg")],
+    perEvent: {
+      "evt-tt-14": { eu: "reject", us: "reject" },
+    },
+  });
+
+  const result = await verifyTeamTotalsOdds(teamTotalBet());
+
+  assert.equal(result.matched, false);
+  assert.equal(result.sourceOdds, null);
+  assert.doesNotMatch(result.note ?? "", /Could not match team total selection/, "a fetch failure must never be reported as a line/selection mismatch");
+});
+
+test("Individual Team Totals Stage 3: EU fetch failure alone (US still succeeds) still finds the match — a single region's network failure does not abort the whole lookup", async () => {
+  mockTeamTotalsProvider({
+    h2h: [h2hResolutionEvent("evt-tt-14b", "Marseille", "Strasbourg")],
+    perEvent: {
+      "evt-tt-14b": {
+        eu: "reject",
+        us: [teamTotalsEvent("evt-tt-14b", "Marseille", "Strasbourg", [bookmakerWithMarkets("fanduel", "FanDuel", [{ key: "team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 1.53, 1.5)] }])])],
+      },
+    },
+  });
+
+  const result = await verifyTeamTotalsOdds(teamTotalBet());
+
+  assert.equal(result.matched, true);
+  assert.equal(result.sourceOdds, 1.53);
+});
+
+test("Individual Team Totals Stage 3: event not found -> honest NOT_FOUND note, no per-event call ever attempted", async () => {
+  const { perEventCalls } = mockTeamTotalsProvider({
+    h2h: [h2hResolutionEvent("evt-other", "Real Madrid", "Barcelona")],
+    perEvent: {},
+  });
+
+  const result = await verifyTeamTotalsOdds(teamTotalBet({ event: "Marseille vs Strasbourg" }));
+
+  assert.equal(result.matched, false);
+  assert.match(result.note ?? "", /No matching event found/);
+  assert.deepEqual(perEventCalls, [], "no per-event odds call should ever be made when the event itself was never found");
+});
+
+test("Individual Team Totals Stage 3: participant not found in either region -> unavailable, distinct PARTICIPANT_NOT_FOUND reason surfaced in the note", async () => {
+  mockTeamTotalsProvider({
+    h2h: [h2hResolutionEvent("evt-tt-pnf", "Marseille", "Strasbourg")],
+    perEvent: {
+      "evt-tt-pnf": {
+        eu: [teamTotalsEvent("evt-tt-pnf", "Marseille", "Strasbourg", [bookmakerWithMarkets("fanduel", "FanDuel", [{ key: "team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 1.53, 1.5)] }])])],
+        us: [teamTotalsEvent("evt-tt-pnf", "Marseille", "Strasbourg", [bookmakerWithMarkets("fanduel", "FanDuel", [{ key: "team_totals", outcomes: [teamTotalOutcome("Over", "Marseille", 1.53, 1.5)] }])])],
+      },
+    },
+  });
+
+  const result = await verifyTeamTotalsOdds(teamTotalBet({ participant: "Real Madrid" }));
+
+  assert.equal(result.matched, false);
+  assert.match(result.note ?? "", /PARTICIPANT_NOT_FOUND/);
 });

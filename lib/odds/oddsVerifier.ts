@@ -166,6 +166,14 @@ export interface OddsApiOutcome {
   // this comment continues to construct/consume OddsApiOutcome without it —
   // purely additive, no existing behavior changes.
   point?: number;
+  // Individual Team Totals, Stage 3 — only ever present on a "team_totals"/
+  // "alternate_team_totals" market's outcomes: the team the line applies to
+  // (e.g. "Marseille"), confirmed live against the real provider response —
+  // `name` on these outcomes is "Over"/"Under" (the direction), never the
+  // team; `description` is where the team lives. No other market key this
+  // file reads (h2h/totals/spreads) ever populates this field. Optional for
+  // the same additive reason `point` is.
+  description?: string;
 }
 
 export interface OddsApiMarket {
@@ -1585,5 +1593,400 @@ export async function resolveSpreadEventMetadata(sport: string, event: string): 
     eventStartTime: resolved.providerMetadata.eventStartTime ?? null,
     providerEventId: resolved.providerMetadata.providerEventId ?? null,
     providerSportKey: resolved.providerMetadata.providerSportKey ?? null,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Individual Team Totals, Stage 3 — production TEAM_TOTAL verification.      */
+/*                                                                             */
+/* Provider facts verified LIVE before writing this section (see the Phase 1  */
+/* live-verification report): The Odds API's BULK /sports/{sportKey}/odds     */
+/* endpoint rejects team_totals/alternate_team_totals outright (HTTP 422      */
+/* INVALID_MARKET, "Markets not supported by this endpoint") — only the       */
+/* PER-EVENT /sports/{sportKey}/events/{eventId}/odds endpoint serves them.   */
+/* This is genuinely new fetch infrastructure, not a variant of               */
+/* fetchOddsForSport/fetchTotalsOddsForSport/fetchSpreadOddsForSport: it      */
+/* needs an already-known event id, and its response is a single event        */
+/* object, never an array.                                                   */
+/*                                                                             */
+/* Event resolution therefore happens in two conceptually separate steps,     */
+/* both reusing existing, unmodified machinery:                              */
+/*   1. resolveMatchedEvent(sport, event, "h2h") — the EXACT SAME event-      */
+/*      resolution architecture every other market already uses (fuzzy        */
+/*      team-name scoring, multi-key football/tennis merge, semantic          */
+/*      dedup, ambiguity detection). "h2h" is queried purely to discover      */
+/*      WHICH event this is (id + sport_key + home/away/commence_time) —      */
+/*      never for h2h price data itself, which this function never reads.    */
+/*   2. fetchTeamTotalsOddsForEvent(sportKey, eventId, region) below — the    */
+/*      new per-event odds fetch, using the id/sport_key the step above       */
+/*      already resolved.                                                    */
+/*                                                                             */
+/* Region strategy — EU first, US fallback for TEAM_TOTAL ONLY (verified      */
+/* live: EU-region bookmakers carried zero team-total coverage across every   */
+/* fixture tested, while several US-region books consistently did). The US    */
+/* fetch is only ever attempted when the EU attempt did not produce an exact  */
+/* MATCHED outcome — never both regions when EU already succeeded.           */
+/* -------------------------------------------------------------------------- */
+
+export type TeamTotalsRegion = "eu" | "us";
+
+// Same market-key discipline as fetchTotalsOddsForSport/
+// fetchSpreadOddsForSport — one explicit, minimal set, requested together
+// (not two separate calls) because The Odds API bills per markets+regions
+// combination for the per-event endpoint regardless of how many market keys
+// are named in one request; asking for both in one call is the cheaper
+// option, not a shortcut.
+const TEAM_TOTALS_MARKETS_PARAM = "team_totals,alternate_team_totals";
+
+interface EventOddsCacheEntry {
+  readonly expiresAt: number;
+  readonly event: OddsApiEvent;
+}
+
+// Separate from oddsCache above — keyed on sportKey+eventId+region, a
+// different dimension than the bulk cache's sportKey+market. Same TTL
+// constant, same "never mutate a cached entry" discipline.
+const teamTotalsEventOddsCache = new Map<string, EventOddsCacheEntry>();
+
+function teamTotalsEventOddsCacheKey(sportKey: string, eventId: string, region: TeamTotalsRegion): string {
+  return `${sportKey}:${eventId}:${region}:team_totals`;
+}
+
+async function fetchTeamTotalsOddsForEvent(sportKey: string, eventId: string, region: TeamTotalsRegion): Promise<OddsApiEvent> {
+  const cacheKey = teamTotalsEventOddsCacheKey(sportKey, eventId, region);
+  const cached = teamTotalsEventOddsCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.event;
+  }
+
+  const apiKey = process.env.ODDS_API_KEY;
+  if (!apiKey) {
+    throw new Error("ODDS_API_KEY is not configured");
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ODDS_API_TIMEOUT_MS);
+
+  try {
+    // Same URL/error-handling shape as fetchOddsForSport (identical timeout,
+    // identical OddsApiHttpError classification, identical "never embed the
+    // raw response body" discipline) — only the path (per-event, not
+    // per-sport) and the markets/regions values differ.
+    const url = `${ODDS_API_BASE_URL}/sports/${sportKey}/events/${eventId}/odds/?apiKey=${apiKey}&regions=${region}&markets=${TEAM_TOTALS_MARKETS_PARAM}&oddsFormat=decimal`;
+    const response = await fetch(url, { signal: controller.signal });
+
+    if (!response.ok) {
+      const bodyText = await response.text().catch(() => "");
+      let providerErrorCode: string | null = null;
+      try {
+        const parsedBody = JSON.parse(bodyText) as { error_code?: unknown };
+        if (typeof parsedBody.error_code === "string") {
+          providerErrorCode = parsedBody.error_code;
+        }
+      } catch {
+        // Non-JSON body — providerErrorCode stays null.
+      }
+      throw new OddsApiHttpError(response.status, providerErrorCode);
+    }
+
+    const parsed = (await response.json()) as unknown;
+    // The per-event endpoint returns ONE event object, never an array
+    // (confirmed live) — the opposite shape check from fetchOddsForSport's
+    // own Array.isArray guard.
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("Unexpected response shape from The Odds API");
+    }
+
+    const event = parsed as OddsApiEvent;
+    teamTotalsEventOddsCache.set(cacheKey, { expiresAt: Date.now() + ODDS_CACHE_TTL_MS, event });
+    return event;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export interface TeamTotalOutcomeMatch {
+  readonly price: number;
+  readonly bookmaker: string;
+  readonly isFallbackBookmaker: boolean;
+  readonly marketKey: "team_totals" | "alternate_team_totals";
+  // Canonical decimal string — same convention as TotalsOutcomeMatch/
+  // SpreadOutcomeMatch's own `point` field.
+  readonly point: string;
+  // The provider's own outcome.description (its literal home_team/away_team
+  // string) — returned for the same reason SpreadOutcomeMatch's outcomeName
+  // is: a caller can log/display exactly which team the provider itself
+  // attributed this line to.
+  readonly outcomeParticipant: string;
+  readonly region: TeamTotalsRegion;
+}
+
+// Mirrors SpreadOutcomeLookupResult's kind vocabulary exactly — TEAM_TOTAL
+// needs the identical set of honest failure distinctions (a market that
+// doesn't exist at all vs. a participant that couldn't be resolved vs. a
+// line that genuinely isn't offered), for the same reasons. No OUTCOME_ABSENT
+// separate from PARTICIPANT_NOT_FOUND, matching findSpreadOutcome's own
+// choice not to distinguish those two cases either.
+export type TeamTotalOutcomeLookupResult =
+  | ({ readonly kind: "MATCHED" } & TeamTotalOutcomeMatch)
+  | { readonly kind: "INVALID_REQUESTED_LINE" }
+  | { readonly kind: "NO_BOOKMAKER" }
+  | { readonly kind: "MARKET_ABSENT" }
+  | { readonly kind: "PARTICIPANT_NOT_FOUND" }
+  | { readonly kind: "MISSING_POINT" }
+  | { readonly kind: "MALFORMED_POINT" }
+  | { readonly kind: "LINE_NOT_AVAILABLE" };
+
+// Standard market checked before alternate, for EACH bookmaker in
+// orderedBookmakersForFallback's own preference order — deliberately a
+// per-bookmaker priority, not a global "team_totals across every bookmaker,
+// then alternate_team_totals across every bookmaker" pass: this matches the
+// existing, unmodified bookmaker-preference-first policy every other
+// verified market (h2h/totals/spreads) already uses (Pinnacle, when
+// present, is always preferred over every other bookmaker regardless of
+// which market key holds the requested line) — never a new "best available
+// market across bookmakers" policy invented for this one market.
+const TEAM_TOTAL_MARKET_KEY_PRIORITY: readonly ("team_totals" | "alternate_team_totals")[] = [
+  "team_totals",
+  "alternate_team_totals",
+];
+
+// Pure — no I/O, no caching, no mutation, no extra network calls. Mirrors
+// findSpreadOutcome's own two-stage match discipline exactly:
+//   1. WHICH TEAM — resolve the requested participant against the matched
+//      EVENT's own home_team/away_team (fuzzy, via the same
+//      normalizeTeamName/overlapScore primitives, same
+//      SELECTION_MATCH_THRESHOLD). Computed once, before any bookmaker/
+//      market loop — this is what makes Marseille structurally unable to
+//      match a Strasbourg outcome, regardless of which bookmaker or market
+//      key it appears under.
+//   2. WHICH OUTCOME — for each bookmaker (preference order), for each
+//      market key (team_totals then alternate_team_totals), only outcomes
+//      whose `name` matches the requested direction (Over/Under) AND whose
+//      `description` matches the resolved team are candidates; exact
+//      canonical-string equality against requestedLine (identical
+//      discipline to findTotalsOutcome/findSpreadOutcome — never "closest
+//      available", never rounds, never substitutes).
+export function findTeamTotalOutcome(
+  event: OddsApiEvent,
+  participantName: string,
+  direction: TotalsDirection,
+  requestedLine: string,
+  region: TeamTotalsRegion,
+): TeamTotalOutcomeLookupResult {
+  const canonicalRequestedLine = normalizeLineString(requestedLine);
+  if (canonicalRequestedLine === null) {
+    return { kind: "INVALID_REQUESTED_LINE" };
+  }
+
+  if (event.bookmakers.length === 0) {
+    return { kind: "NO_BOOKMAKER" };
+  }
+
+  const normalizedTarget = normalizeTeamName(participantName);
+  const homeScore = overlapScore(normalizedTarget, normalizeTeamName(event.home_team));
+  const awayScore = overlapScore(normalizedTarget, normalizeTeamName(event.away_team));
+
+  let resolvedTeamName: string | null = null;
+  if (homeScore >= SELECTION_MATCH_THRESHOLD || awayScore >= SELECTION_MATCH_THRESHOLD) {
+    resolvedTeamName = homeScore >= awayScore ? event.home_team : event.away_team;
+  }
+  if (resolvedTeamName === null) {
+    return { kind: "PARTICIPANT_NOT_FOUND" };
+  }
+  const normalizedResolvedTeam = normalizeTeamName(resolvedTeamName);
+  const targetDirectionName = TOTALS_OUTCOME_NAME[direction];
+
+  let sawMarket = false;
+  let sawParticipantCandidates = false;
+  let sawMissingPoint = false;
+  let sawMalformedPoint = false;
+
+  for (const bookmaker of orderedBookmakersForFallback(event)) {
+    for (const marketKey of TEAM_TOTAL_MARKET_KEY_PRIORITY) {
+      const market = bookmaker.markets.find((m) => m.key === marketKey);
+      if (!market) continue;
+      sawMarket = true;
+
+      const candidates = market.outcomes.filter(
+        (outcome) =>
+          outcome.name.trim().toLowerCase() === targetDirectionName &&
+          outcome.description !== undefined &&
+          normalizeTeamName(outcome.description) === normalizedResolvedTeam,
+      );
+      if (candidates.length === 0) continue;
+      sawParticipantCandidates = true;
+
+      for (const outcome of candidates) {
+        if (outcome.point === undefined || outcome.point === null) {
+          sawMissingPoint = true;
+          continue;
+        }
+
+        const canonicalPoint = canonicalizeProviderPoint(outcome.point);
+        if (canonicalPoint === null) {
+          sawMalformedPoint = true;
+          continue;
+        }
+
+        if (canonicalPoint === canonicalRequestedLine) {
+          return {
+            kind: "MATCHED",
+            price: outcome.price,
+            bookmaker: bookmaker.title,
+            isFallbackBookmaker: bookmaker.key !== "pinnacle",
+            marketKey,
+            point: canonicalPoint,
+            outcomeParticipant: outcome.description as string,
+            region,
+          };
+        }
+      }
+    }
+  }
+
+  if (!sawMarket) return { kind: "MARKET_ABSENT" };
+  if (!sawParticipantCandidates) return { kind: "PARTICIPANT_NOT_FOUND" };
+  if (sawMissingPoint) return { kind: "MISSING_POINT" };
+  if (sawMalformedPoint) return { kind: "MALFORMED_POINT" };
+  return { kind: "LINE_NOT_AVAILABLE" };
+}
+
+export interface TeamTotalVerificationInput {
+  sport: string;
+  event: string;
+  // The player's own requested participant name — never a provider team
+  // string. Matched fuzzily against the resolved event's own home_team/
+  // away_team by findTeamTotalOutcome above, same as SPREAD's participant.
+  participant: string;
+  direction: TotalsDirection;
+  line: string;
+  odds: number | null;
+}
+
+export async function verifyTeamTotalsOdds(bet: TeamTotalVerificationInput): Promise<OddsCheckResult> {
+  const baseResult: OddsCheckResult = {
+    matched: false,
+    withinTolerance: null,
+    sourceOdds: null,
+    submittedOdds: bet.odds,
+    discrepancyPercent: null,
+    bookmaker: null,
+    note: null,
+  };
+
+  // Event discovery only — see this section's own header comment. Reuses
+  // the exact same resolution architecture (and therefore the exact same
+  // NO_SPORT_KEYS/FETCH_FAILED/NOT_FOUND/AMBIGUOUS failure vocabulary) every
+  // other market already uses.
+  const resolved = await resolveMatchedEvent(bet.sport, bet.event, "h2h");
+
+  if (resolved.kind === "NO_SPORT_KEYS") {
+    return { ...baseResult, note: `Sport/league "${bet.sport}" is not mapped to a The Odds API sport_key` };
+  }
+  if (resolved.kind === "FETCH_FAILED") {
+    return { ...baseResult, note: resolved.note };
+  }
+  if (resolved.kind === "NOT_FOUND") {
+    return { ...baseResult, note: `No matching event found for "${bet.event}" in ${resolved.sportKeys.join(", ")}` };
+  }
+  if (resolved.kind === "AMBIGUOUS") {
+    return { ...baseResult, note: `Ambiguous event match for "${bet.event}" across multiple leagues` };
+  }
+
+  const { event, providerMetadata } = resolved;
+
+  // Always present — resolveMatchedEvent's own fetch loop unconditionally
+  // tags every event it returns with the exact sport_key that produced it,
+  // before this function ever sees it (see OddsApiEvent.providerSportKey's
+  // own comment). Guarded rather than asserted, so a future change to that
+  // invariant fails safe (an honest NOT_FOUND-shaped note) instead of
+  // crashing.
+  if (!event.providerSportKey) {
+    return { ...baseResult, ...providerMetadata, note: `No matching event found for "${bet.event}" in unknown` };
+  }
+  const sportKey = event.providerSportKey;
+
+  let lastFetchError: string | null = null;
+  let lastLookup: TeamTotalOutcomeLookupResult | null = null;
+
+  for (const region of ["eu", "us"] as const) {
+    let regionEvent: OddsApiEvent;
+    try {
+      regionEvent = await fetchTeamTotalsOddsForEvent(sportKey, event.id, region);
+    } catch (err) {
+      const isTimeout = err instanceof Error && err.name === "AbortError";
+      lastFetchError = isTimeout
+        ? `The Odds API request timed out after ${ODDS_API_TIMEOUT_MS}ms`
+        : err instanceof Error
+          ? err.message
+          : "Unknown error calling The Odds API";
+      // A fetch failure in one region does not stop the other from being
+      // tried — mirrors resolveMatchedEvent's own multi-key (tennis) "try
+      // every key, only report FETCH_FAILED if every one failed" policy.
+      continue;
+    }
+
+    const lookup = findTeamTotalOutcome(regionEvent, bet.participant, bet.direction, bet.line, region);
+    lastLookup = lookup;
+
+    if (lookup.kind === "MATCHED") {
+      const price = lookup.price;
+      const bookmaker = lookup.bookmaker;
+
+      if (bet.odds === null) {
+        return {
+          matched: true,
+          withinTolerance: true,
+          sourceOdds: price,
+          submittedOdds: price,
+          discrepancyPercent: 0,
+          bookmaker,
+          note: lookup.isFallbackBookmaker ? `Pinnacle odds unavailable — using ${bookmaker} instead` : null,
+          ...providerMetadata,
+        };
+      }
+
+      const discrepancyPercent = Number((((bet.odds - price) / price) * 100).toFixed(2));
+
+      return {
+        matched: true,
+        withinTolerance: Math.abs(discrepancyPercent) <= ODDS_TOLERANCE_PERCENT,
+        sourceOdds: price,
+        submittedOdds: bet.odds,
+        discrepancyPercent,
+        bookmaker,
+        note: lookup.isFallbackBookmaker ? `Pinnacle odds unavailable — using ${bookmaker} instead` : null,
+        ...providerMetadata,
+      };
+    }
+
+    // A malformed line can never become valid by switching region — retrying
+    // against US would only waste a second call for the identical, already-
+    // certain outcome.
+    if (lookup.kind === "INVALID_REQUESTED_LINE") break;
+
+    // Any other non-match (MARKET_ABSENT/PARTICIPANT_NOT_FOUND/
+    // MISSING_POINT/MALFORMED_POINT/LINE_NOT_AVAILABLE) falls through to try
+    // the next region — "Avoid a US call when EU already produced an exact
+    // valid match" is satisfied by the MATCHED branch above returning
+    // immediately; every other EU outcome legitimately continues to US.
+  }
+
+  if (lastLookup === null) {
+    // Both region fetches threw — a genuine provider/network failure, never
+    // reported as "line unavailable" (which would incorrectly suggest the
+    // provider was reachable and simply didn't have this line).
+    return { ...baseResult, ...providerMetadata, note: lastFetchError ?? "Unknown error calling The Odds API" };
+  }
+
+  // Same single-parseable-note-template convention as Totals/Spread — never
+  // a "closest line" fallback, findTeamTotalOutcome itself already
+  // guarantees that. Reports the LAST lookup's kind (US's, when US was
+  // actually attempted) as the final, most complete determination.
+  return {
+    ...baseResult,
+    ...providerMetadata,
+    note: `Could not match team total selection "${bet.participant} ${bet.direction} ${bet.line}" for "${bet.event}" (${lastLookup.kind})`,
   };
 }

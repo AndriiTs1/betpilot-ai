@@ -16,9 +16,11 @@ import {
   verifyOdds,
   verifyTotalsOdds,
   verifySpreadOdds,
+  verifyTeamTotalsOdds,
   type OddsVerificationInput,
   type TotalsVerificationInput,
   type SpreadVerificationInput,
+  type TeamTotalVerificationInput,
 } from "./oddsVerifier";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import { validateCanonicalSelection, type CanonicalParticipant, type CanonicalSelection, type Sport } from "./domain";
@@ -111,18 +113,33 @@ function buildMatchedOutcome(legacyResult: OddsCheckResult, selection: Canonical
   // actually requests (oddsVerifier.ts's verifyOdds()/verifyTotalsOdds()
   // hardcode "h2h"/"totals" respectively) — not synthesized, not guessed.
   // Handicap Stage H1 — verifySpreadOdds() hardcodes "spreads" the same way.
-  const marketKey = selection.marketType === "TOTALS" ? "totals" : selection.marketType === "SPREAD" ? "spreads" : "h2h";
+  // Individual Team Totals, Stage 3 — TEAM_TOTAL maps to "team_totals" as
+  // its representative key, the same static per-marketType convention every
+  // other market already uses here (never distinguishing standard vs.
+  // alternate_team_totals at this layer, exactly as TOTALS/SPREAD never
+  // distinguish which specific line grid the match came from).
+  const marketKey =
+    selection.marketType === "TOTALS"
+      ? "totals"
+      : selection.marketType === "SPREAD"
+        ? "spreads"
+        : selection.marketType === "TEAM_TOTAL"
+          ? "team_totals"
+          : "h2h";
 
   return {
     marketType: selection.marketType,
     period: selection.period,
     selectionType: selection.selectionType,
     participant: selection.participant,
-    // line is only ever meaningful for TOTALS/SPREAD — the request-side
-    // canonicalLine (already exact-match-verified against the provider's
-    // own point by findTotalsOutcome/findSpreadOutcome), never re-derived
-    // from the response.
-    line: selection.marketType === "TOTALS" || selection.marketType === "SPREAD" ? selection.line : undefined,
+    // line is only ever meaningful for TOTALS/SPREAD/TEAM_TOTAL — the
+    // request-side canonicalLine (already exact-match-verified against the
+    // provider's own point by findTotalsOutcome/findSpreadOutcome/
+    // findTeamTotalOutcome), never re-derived from the response.
+    line:
+      selection.marketType === "TOTALS" || selection.marketType === "SPREAD" || selection.marketType === "TEAM_TOTAL"
+        ? selection.line
+        : undefined,
     currentOdds: String(legacyResult.sourceOdds),
     bookmaker: legacyResult.bookmaker ?? undefined,
     marketReference: { provider: PROVIDER_NAME, marketKey },
@@ -146,8 +163,7 @@ const CAPABILITIES: OddsProviderCapabilities = {
   // Betting Markets V1, Phase 3.3 — TOTALS joins MONEYLINE_2WAY/3WAY, but
   // ONLY for football (see the sport gate in verifySelection() below) —
   // oddsVerifier.ts's verifyTotalsOdds() has only ever been built/tested
-  // against football fixtures this phase; Team Totals remain fully out of
-  // scope.
+  // against football fixtures this phase.
   // Handicap Stage H1 — SPREAD joins the set, for every currently supported
   // sport (unlike TOTALS, nothing in findSpreadOutcome()/verifySpreadOdds()
   // is football-specific — event resolution and outcome lookup are both
@@ -159,7 +175,13 @@ const CAPABILITIES: OddsProviderCapabilities = {
   // rounds, substitutes, or picks a nearest neighbor — so an unavailable
   // exact quarter line still fails safely (SELECTION_NOT_FOUND), it is
   // simply no longer rejected up front purely for being a quarter line.
-  supportedMarketTypes: ["MONEYLINE_2WAY", "MONEYLINE_3WAY", "TOTALS", "SPREAD"],
+  // Individual Team Totals, Stage 3 — TEAM_TOTAL joins the set, football
+  // only (see the sport gate in verifySelection() below, same restriction
+  // TOTALS already has — verifyTeamTotalsOdds() has only ever been
+  // built/tested against football fixtures). Routed through
+  // oddsVerifier.ts's own dedicated verifyTeamTotalsOdds()/
+  // findTeamTotalOutcome() — never forced through the match-TOTALS matcher.
+  supportedMarketTypes: ["MONEYLINE_2WAY", "MONEYLINE_3WAY", "TOTALS", "SPREAD", "TEAM_TOTAL"],
   // Step 16A — true as of this step: a stated, supported football league
   // (lib/odds/footballLeagues.ts) now actually routes the request to that
   // league's own sport_key, and an unsupported one is honestly reported as
@@ -169,11 +191,23 @@ const CAPABILITIES: OddsProviderCapabilities = {
   livePrematchSupport: "PREMATCH_ONLY",
   eventSearchSupported: false,
   eventByIdLookupSupported: false,
-  regions: ["eu"], // oddsVerifier.ts:406 hardcodes `regions=eu`
+  // oddsVerifier.ts hardcodes `regions=eu` for MONEYLINE/TOTALS/SPREAD —
+  // this remains the accurate, single region for those three markets.
+  // Individual Team Totals, Stage 3 — TEAM_TOTAL is the one documented
+  // exception: it queries `regions=eu` FIRST and only falls back to
+  // `regions=us` when EU produced no exact usable outcome (see
+  // oddsVerifier.ts's verifyTeamTotalsOdds()) — never the other three
+  // markets, which are completely unaffected by this fallback. This field
+  // stays `["eu"]` (accurate for the three markets it has always described)
+  // rather than becoming `["eu","us"]`, which would incorrectly imply every
+  // market now queries both regions; the exception is spelled out in notes
+  // below instead.
+  regions: ["eu"],
   notes: [
     "Generic football/soccer with no stated league now merges across every currently supported competition (lib/odds/footballLeagues.ts / oddsVerifier.ts SPORT_KEY_ALIASES), not only the English Premier League. A football selection whose league is one of the supported names (or a recognized alias, e.g. EPL/UCL) resolves to that league's own sport_key alone; an unrecognized league returns LEAGUE_NOT_SUPPORTED rather than querying an unrelated competition.",
     "Tennis coverage is limited to the four Grand Slam tournaments, in-tournament only (oddsVerifier.ts TENNIS_SPORT_KEYS) — no year-round ATP/WTA tour coverage.",
-    "1X2/moneyline selections are verifiable for every supported sport; TOTALS (Over/Under) is verifiable for football only (Betting Markets V1, Phase 3.3); SPREAD (handicap) is verifiable for every supported sport, including exact Asian quarter lines (±0.25/±0.75/±1.25/±1.75) as of Handicap Stage H4-B5 — both-teams-to-score, double-chance, and team-totals markets remain out of scope. Quarter-line SPREAD bets can become confirmable, but automatic settlement remains deferred for every SPREAD bet regardless (see lib/bets/settlement/autoSettleSingleBet.ts).",
+    "1X2/moneyline selections are verifiable for every supported sport; TOTALS (Over/Under) and TEAM_TOTAL (individual team Over/Under) are verifiable for football only; SPREAD (handicap) is verifiable for every supported sport, including exact Asian quarter lines (±0.25/±0.75/±1.25/±1.75) as of Handicap Stage H4-B5 — both-teams-to-score and double-chance markets remain out of scope. Quarter-line SPREAD bets can become confirmable, but automatic settlement remains deferred for every SPREAD bet regardless (see lib/bets/settlement/autoSettleSingleBet.ts). TEAM_TOTAL settlement is also not yet implemented (Individual Team Totals Stage 3 scope: verification only).",
+    "TEAM_TOTAL uses The Odds API's PER-EVENT odds endpoint (team_totals/alternate_team_totals are not available on the bulk sport-wide endpoint at all — confirmed live, HTTP 422). It queries EU bookmakers first, falling back to US bookmakers only when EU has no exact usable outcome for the requested participant/direction/line. Live verification (three real fixtures across three leagues) found ZERO EU-region bookmaker coverage for team totals despite full EU coverage of TOTALS/SPREAD on the same fixtures — this is expected to be the common case, not an edge case: most TEAM_TOTAL requests will genuinely resolve via the US fallback, and a request with no exact matching line in EITHER region honestly reports unavailable rather than substituting a different line, team, or direction. Do not assume any given EU fixture or bookmaker offers this market.",
     "findEvents() and getEventMarkets() are not implemented by this adapter in Step 5 — verifySelection() is the only operational method (see its own code comment below).",
   ],
 };
@@ -352,6 +386,21 @@ function classifyLegacyFailureNote(
   if (spreadMatch) {
     return { reasonCode: "SELECTION_NOT_FOUND", diagnosticCode: `LEGACY_SPREAD_${spreadMatch[1]}` };
   }
+  // Individual Team Totals, Stage 3 — verifyTeamTotalsOdds()'s own note
+  // template, covering every findTeamTotalOutcome() non-match kind
+  // (INVALID_REQUESTED_LINE/NO_BOOKMAKER/MARKET_ABSENT/
+  // PARTICIPANT_NOT_FOUND/MISSING_POINT/MALFORMED_POINT/
+  // LINE_NOT_AVAILABLE), reported after BOTH the EU and US region attempts
+  // found no exact usable outcome. Same SELECTION_NOT_FOUND family as
+  // h2h/totals/spread's own "market/event were found, the specific outcome
+  // wasn't" cases. A genuine provider/network failure on both region
+  // attempts produces one of the OTHER, already-handled note templates
+  // above instead (fetchTeamTotalsOddsForEvent reuses the identical error
+  // message construction fetchOddsForSport already uses) — never this one.
+  const teamTotalMatch = note.match(/^Could not match team total selection ".*" for ".*" \(([A-Z_]+)\)$/);
+  if (teamTotalMatch) {
+    return { reasonCode: "SELECTION_NOT_FOUND", diagnosticCode: `LEGACY_TEAM_TOTAL_${teamTotalMatch[1]}` };
+  }
 
   // Defensive fallback only — every note template oddsVerifier.ts can
   // currently produce is enumerated above (confirmed by a full read of the
@@ -388,10 +437,16 @@ export class TheOddsApiProvider implements OddsProvider {
   // SPREAD line — standard or quarter — resolves its event the same way,
   // inside verifySpreadOddsFn itself, exactly like it always has for
   // standard lines. No replacement seam is needed.
+  //
+  // Individual Team Totals, Stage 3 — verifyTeamTotalsOddsFn added as a
+  // fourth, independently-injectable seam, same additive pattern as every
+  // seam before it: a new parameter with its own default, never a change to
+  // the three that already exist.
   constructor(
     private readonly verifyOddsFn: typeof verifyOdds = verifyOdds,
     private readonly verifyTotalsOddsFn: typeof verifyTotalsOdds = verifyTotalsOdds,
     private readonly verifySpreadOddsFn: typeof verifySpreadOdds = verifySpreadOdds,
+    private readonly verifyTeamTotalsOddsFn: typeof verifyTeamTotalsOdds = verifyTeamTotalsOdds,
   ) {}
 
   getCapabilities(): OddsProviderCapabilities {
@@ -475,12 +530,14 @@ export class TheOddsApiProvider implements OddsProvider {
     }
 
     // Betting Markets V1, Phase 3.3 — TOTALS joins the two MONEYLINE
-    // variants. Handicap Stage H1 — SPREAD joins them too.
+    // variants. Handicap Stage H1 — SPREAD joins them too. Individual Team
+    // Totals, Stage 3 — TEAM_TOTAL joins them too.
     if (
       selection.marketType !== "MONEYLINE_2WAY" &&
       selection.marketType !== "MONEYLINE_3WAY" &&
       selection.marketType !== "TOTALS" &&
-      selection.marketType !== "SPREAD"
+      selection.marketType !== "SPREAD" &&
+      selection.marketType !== "TEAM_TOTAL"
     ) {
       return createFailedResult({
         submittedOdds,
@@ -513,6 +570,21 @@ export class TheOddsApiProvider implements OddsProvider {
         checkedAt: checkedAtFor(),
         reasonCode: "MARKET_NOT_SUPPORTED",
         diagnosticCode: "ADAPTER_TOTALS_FOOTBALL_ONLY",
+      });
+    }
+
+    // Individual Team Totals, Stage 3 — same football-only restriction as
+    // TOTALS, for the same reason: verifyTeamTotalsOdds()/
+    // findTeamTotalOutcome() have only ever been built/tested against
+    // football fixtures (the live provider verification this stage is based
+    // on covered football only).
+    if (selection.marketType === "TEAM_TOTAL" && selection.sport !== "FOOTBALL") {
+      return createFailedResult({
+        submittedOdds,
+        provider: PROVIDER_NAME,
+        checkedAt: checkedAtFor(),
+        reasonCode: "MARKET_NOT_SUPPORTED",
+        diagnosticCode: "ADAPTER_TEAM_TOTAL_FOOTBALL_ONLY",
       });
     }
 
@@ -620,6 +692,23 @@ export class TheOddsApiProvider implements OddsProvider {
         odds: submittedOddsNumber,
       };
       legacyResult = await this.verifySpreadOddsFn(spreadInput);
+    } else if (selection.marketType === "TEAM_TOTAL") {
+      // participant, selectionType (OVER/UNDER), and line are all
+      // guaranteed present here — validateCanonicalSelection's own
+      // TEAM_TOTAL rule already ran above and would have returned
+      // INVALID_INPUT otherwise. Routed through the dedicated
+      // verifyTeamTotalsOddsFn (EU-first, US-fallback, per-event provider
+      // lookup) — never forced through verifyTotalsOddsFn's match-TOTALS
+      // matcher, which has no concept of a participant at all.
+      const teamTotalInput: TeamTotalVerificationInput = {
+        sport: legacySport,
+        event: legacyEvent,
+        participant: (selection.participant as CanonicalParticipant).name,
+        direction: selection.selectionType as "OVER" | "UNDER",
+        line: selection.line as string,
+        odds: submittedOddsNumber,
+      };
+      legacyResult = await this.verifyTeamTotalsOddsFn(teamTotalInput);
     } else {
       const legacySelection = selectionToLegacyText(selection);
       if (!legacySelection) {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { TheOddsApiProvider } from "./theOddsApiProvider";
 import type { CanonicalEvent, CanonicalSelection } from "./domain";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
-import type { OddsVerificationInput, TotalsVerificationInput, SpreadVerificationInput } from "./oddsVerifier";
+import type { OddsVerificationInput, TotalsVerificationInput, SpreadVerificationInput, TeamTotalVerificationInput } from "./oddsVerifier";
 import { legacySelectionToCanonicalRequest } from "./legacyOddsBridge";
 
 const FOOTBALL_EVENT: CanonicalEvent = {
@@ -77,6 +77,19 @@ function capturingVerifySpreadOddsFn(result: OddsCheckResult) {
 }
 
 
+// Individual Team Totals, Stage 3 — same capturing-fake shape as
+// capturingVerifyOddsFn/capturingVerifyTotalsOddsFn/capturingVerifySpreadOddsFn
+// above, for the new, independently-injected verifyTeamTotalsOddsFn
+// constructor parameter.
+function capturingVerifyTeamTotalsOddsFn(result: OddsCheckResult) {
+  const calls: TeamTotalVerificationInput[] = [];
+  const fn = async (input: TeamTotalVerificationInput): Promise<OddsCheckResult> => {
+    calls.push(input);
+    return result;
+  };
+  return { fn, calls };
+}
+
 function baseLegacyResult(overrides: Partial<OddsCheckResult>): OddsCheckResult {
   return {
     matched: false,
@@ -107,12 +120,15 @@ test("capabilities: only the four current MVP sports plus American Football are 
   assert.ok(!capabilities.supportedSports.includes("UNKNOWN"));
 });
 
-test("capabilities: moneyline + totals + spread markets are advertised — BTTS/double-chance are not current (Betting Markets V1 Phase 3.3 + Handicap Stage H1 — TOTALS and SPREAD now intentionally supported)", () => {
+test("capabilities: moneyline + totals + spread + team_total markets are advertised — BTTS/double-chance are not current (Betting Markets V1 Phase 3.3 + Handicap Stage H1 + Individual Team Totals Stage 3 — TOTALS, SPREAD, and TEAM_TOTAL are now intentionally supported)", () => {
   const provider = new TheOddsApiProvider();
   const capabilities = provider.getCapabilities();
 
-  assert.deepEqual(capabilities.supportedMarketTypes.slice().sort(), ["MONEYLINE_2WAY", "MONEYLINE_3WAY", "TOTALS", "SPREAD"].sort());
-  for (const notCurrent of ["BOTH_TEAMS_TO_SCORE", "DOUBLE_CHANCE", "TEAM_TOTAL"] as const) {
+  assert.deepEqual(
+    capabilities.supportedMarketTypes.slice().sort(),
+    ["MONEYLINE_2WAY", "MONEYLINE_3WAY", "TOTALS", "SPREAD", "TEAM_TOTAL"].sort(),
+  );
+  for (const notCurrent of ["BOTH_TEAMS_TO_SCORE", "DOUBLE_CHANCE"] as const) {
     assert.ok(!capabilities.supportedMarketTypes.includes(notCurrent), `${notCurrent} must not be advertised as current`);
   }
 });
@@ -435,7 +451,7 @@ test("adapter mapping: TOTALS for a non-football sport is not yet supported — 
 /* either market to make this pass.                                         */
 /* -------------------------------------------------------------------------- */
 
-test("end-to-end: 'Арсенал ИТБ 1.5' (TEAM_TOTAL shorthand) is classified correctly and safely rejected as MARKET_NOT_SUPPORTED — never becomes a MONEYLINE bet", async () => {
+test("end-to-end: 'Арсенал ИТБ 1.5' (TEAM_TOTAL shorthand) is classified correctly and routes ONLY to team-total verification (Individual Team Totals Stage 3) — never becomes a MONEYLINE bet, never MARKET_NOT_SUPPORTED", async () => {
   const request = legacySelectionToCanonicalRequest({
     sport: "Football",
     event: "Арсенал vs Челси",
@@ -444,14 +460,20 @@ test("end-to-end: 'Арсенал ИТБ 1.5' (TEAM_TOTAL shorthand) is classifi
   });
   assert.equal(request.selection.marketType, "TEAM_TOTAL");
 
-  const { fn, calls } = capturingVerifyOddsFn(baseLegacyResult({}));
-  const provider = new TheOddsApiProvider(fn);
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(baseLegacyResult({}));
+  const { fn: teamTotalFn, calls: teamTotalCalls } = capturingVerifyTeamTotalsOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9 }),
+  );
+  const provider = new TheOddsApiProvider(h2hFn, undefined, undefined, teamTotalFn);
 
   const result = await provider.verifySelection({ selection: request.selection });
 
-  assert.equal(result.status, "FAILED");
-  assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED");
-  assert.equal(calls.length, 0, "the h2h verifier must never be called for an unsupported market");
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(h2hCalls.length, 0, "the h2h verifier must never be called for a TEAM_TOTAL selection");
+  assert.equal(teamTotalCalls.length, 1, "the team-total verifier must be called exactly once");
+  assert.equal(teamTotalCalls[0].participant, "Арсенал");
+  assert.equal(teamTotalCalls[0].direction, "OVER");
+  assert.equal(teamTotalCalls[0].line, "1.5");
 });
 
 test("end-to-end: 'Арсенал Ф1(-1.5)' (SPREAD shorthand) is classified correctly and routes ONLY to spread verification (Handicap Stage H1) — never becomes a MONEYLINE bet", async () => {
@@ -1957,4 +1979,159 @@ test("Stage 3.1: matchedEvent is absent on a FAILED result when the event itself
   assert.equal(result.status, "FAILED");
   assert.equal(result.reasonCode, "EVENT_NOT_FOUND");
   assert.equal(result.matchedEvent, undefined);
+});
+
+/* ============================================================================
+ * Individual Team Totals, Stage 3 — production-path proof. Both the RU
+ * shorthand form and the EN natural-language form must reach the SAME
+ * canonical verification request shape (TEAM_TOTAL/participant/OVER-UNDER/
+ * exact line) through the REAL production bridge
+ * (legacySelectionToCanonicalRequest, the function buildBetSlipPreview.ts
+ * actually calls) and this adapter's verifySelection() — never a separate,
+ * parallel code path.
+ * ============================================================================ */
+
+test("Individual Team Totals Stage 3 (19): RU 'Марсель ТБ 1,5' (comma decimal) reaches TEAM_TOTAL verification as Marseille/OVER/1.5", async () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Ligue 1",
+    event: "Марсель vs Страсбург",
+    selection: "Марсель ТБ 1,5",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.participant?.name, "Марсель");
+  assert.equal(request.selection.line, "1.5", "the comma must already be canonicalized to a dot by the time it reaches the provider request");
+
+  const { fn: teamTotalFn, calls } = capturingVerifyTeamTotalsOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.53 }),
+  );
+  const provider = new TheOddsApiProvider(undefined, undefined, undefined, teamTotalFn);
+
+  const result = await provider.verifySelection({ selection: request.selection });
+
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].participant, "Марсель");
+  assert.equal(calls[0].direction, "OVER");
+  assert.equal(calls[0].line, "1.5");
+});
+
+test("Individual Team Totals Stage 3 (20): EN 'Marseille Over 1.5' — the exact verified production bug input — reaches the SAME canonical verification request shape", async () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Ligue 1",
+    event: "Marseille vs Strasbourg",
+    selection: "Marseille Over 1.5",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.participant?.name, "Marseille");
+  assert.equal(request.selection.line, "1.5");
+
+  const { fn: teamTotalFn, calls } = capturingVerifyTeamTotalsOddsFn(
+    baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.53 }),
+  );
+  const provider = new TheOddsApiProvider(undefined, undefined, undefined, teamTotalFn);
+
+  const result = await provider.verifySelection({ selection: request.selection });
+
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].participant, "Marseille");
+  assert.equal(calls[0].direction, "OVER");
+  assert.equal(calls[0].line, "1.5");
+});
+
+test("Individual Team Totals Stage 3 (15): existing MONEYLINE behavior is completely unaffected — a MONEYLINE_3WAY selection still routes only to verifyOddsFn", async () => {
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 2.1 }));
+  const { fn: teamTotalFn, calls: teamTotalCalls } = capturingVerifyTeamTotalsOddsFn(baseLegacyResult({}));
+  const provider = new TheOddsApiProvider(h2hFn, undefined, undefined, teamTotalFn);
+
+  const result = await provider.verifySelection({ selection: moneyline3Way() });
+
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(h2hCalls.length, 1);
+  assert.equal(teamTotalCalls.length, 0, "TEAM_TOTAL's verifier must never be called for a MONEYLINE selection");
+});
+
+test("Individual Team Totals Stage 3 (16): existing bare TOTALS behavior is completely unaffected — routes only to verifyTotalsOddsFn, never verifyTeamTotalsOddsFn", async () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Arsenal vs Chelsea",
+    selection: "Over 2.5",
+    submittedOdds: null,
+  });
+  assert.equal(request.selection.marketType, "TOTALS");
+
+  const { fn: totalsFn, calls: totalsCalls } = capturingVerifyTotalsOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.8 }));
+  const { fn: teamTotalFn, calls: teamTotalCalls } = capturingVerifyTeamTotalsOddsFn(baseLegacyResult({}));
+  const provider = new TheOddsApiProvider(undefined, totalsFn, undefined, teamTotalFn);
+
+  const result = await provider.verifySelection({ selection: request.selection });
+
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(totalsCalls.length, 1);
+  assert.equal(teamTotalCalls.length, 0, "TEAM_TOTAL's verifier must never be called for a bare TOTALS selection");
+});
+
+test("Individual Team Totals Stage 3 (17): existing SPREAD behavior is completely unaffected — routes only to verifySpreadOddsFn, never verifyTeamTotalsOddsFn", async () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Арсенал vs Челси",
+    selection: "Арсенал Ф1(-1.5)",
+    submittedOdds: null,
+  });
+  assert.equal(request.selection.marketType, "SPREAD");
+
+  const { fn: spreadFn, calls: spreadCalls } = capturingVerifySpreadOddsFn(baseLegacyResult({ matched: true, withinTolerance: true, sourceOdds: 1.9 }));
+  const { fn: teamTotalFn, calls: teamTotalCalls } = capturingVerifyTeamTotalsOddsFn(baseLegacyResult({}));
+  const provider = new TheOddsApiProvider(undefined, undefined, spreadFn, teamTotalFn);
+
+  const result = await provider.verifySelection({ selection: request.selection });
+
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(spreadCalls.length, 1);
+  assert.equal(teamTotalCalls.length, 0, "TEAM_TOTAL's verifier must never be called for a SPREAD selection");
+});
+
+test("Individual Team Totals Stage 3: TEAM_TOTAL for a non-football sport is not yet supported — FAILED/MARKET_NOT_SUPPORTED, same football-only restriction as TOTALS", async () => {
+  const { fn: teamTotalFn, calls } = capturingVerifyTeamTotalsOddsFn(baseLegacyResult({}));
+  const provider = new TheOddsApiProvider(undefined, undefined, undefined, teamTotalFn);
+
+  const result = await provider.verifySelection({
+    selection: {
+      sport: "TENNIS",
+      event: TENNIS_EVENT,
+      marketType: "TEAM_TOTAL",
+      period: "MATCH",
+      selectionType: "OVER",
+      participant: { name: "Carlos Alcaraz" },
+      line: "22.5",
+      submittedOdds: undefined,
+    },
+  });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "MARKET_NOT_SUPPORTED");
+  assert.equal(calls.length, 0);
+});
+
+test("Individual Team Totals Stage 3: an unavailable TEAM_TOTAL result classifies as SELECTION_NOT_FOUND, never a generic/unclassified failure", async () => {
+  const { fn: teamTotalFn } = capturingVerifyTeamTotalsOddsFn(
+    baseLegacyResult({ matched: false, note: 'Could not match team total selection "Marseille OVER 1.5" for "Marseille vs Strasbourg" (LINE_NOT_AVAILABLE)' }),
+  );
+  const provider = new TheOddsApiProvider(undefined, undefined, undefined, teamTotalFn);
+
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Ligue 1",
+    event: "Marseille vs Strasbourg",
+    selection: "Marseille Over 1.5",
+    submittedOdds: null,
+  });
+
+  const result = await provider.verifySelection({ selection: request.selection });
+
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.reasonCode, "SELECTION_NOT_FOUND");
 });
