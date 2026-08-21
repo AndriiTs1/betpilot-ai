@@ -109,6 +109,17 @@ export interface TranslationDict {
     selectionPlaceholder: string;
     stakeLabel: string;
     reviewBet: string;
+    // Structured EXPRESS input (a variable-length list of legs sharing one
+    // Stake) — see components/miniapp/BetTextForm.tsx. eventLabel/
+    // selectionLabel above are reused as each leg's Event/Selection
+    // aria-labels; stakeLabel above is reused as-is for the one shared
+    // Stake field.
+    expressLegTitle: string;
+    expressEventPlaceholder: string;
+    expressSelectionPlaceholder: string;
+    addEvent: string;
+    removeEvent: string;
+    reviewExpress: string;
   };
   active: {
     title: string;
@@ -336,6 +347,12 @@ const en: TranslationDict = {
     selectionPlaceholder: "Example: Inter to win",
     stakeLabel: "Stake",
     reviewBet: "Review bet",
+    expressLegTitle: "Event {number}",
+    expressEventPlaceholder: "Example: Arsenal — Chelsea",
+    expressSelectionPlaceholder: "Example: Arsenal to win",
+    addEvent: "+ Add event",
+    removeEvent: "Remove event {number}",
+    reviewExpress: "Review express",
   },
   active: {
     title: "Active",
@@ -541,6 +558,12 @@ const ru: TranslationDict = {
     selectionPlaceholder: "Например: Интер победит",
     stakeLabel: "Ставка",
     reviewBet: "Проверить ставку",
+    expressLegTitle: "Событие {number}",
+    expressEventPlaceholder: "Например: Арсенал — Челси",
+    expressSelectionPlaceholder: "Например: Арсенал победит",
+    addEvent: "+ Добавить событие",
+    removeEvent: "Удалить событие {number}",
+    reviewExpress: "Проверить экспресс",
   },
   active: {
     title: "Активные",

@@ -24,8 +24,6 @@ interface BetTextFormProps {
   onConfirmed: (bet: AnyConfirmedBet) => void;
 }
 
-const MESSAGE_MIN_LENGTH = 3;
-const MESSAGE_MAX_LENGTH = 2000;
 
 // Telegram's HapticFeedback isn't part of the TelegramWebApp type declared
 // in app/miniapp/page.tsx (that file isn't touched here) — accessed through
@@ -58,12 +56,12 @@ type FormPhase = "editing" | "previewing" | "ready" | "confirming";
 // Bet-type selector for the top of the "Place a bet" screen. Its literal
 // value is never sent to the API, and the AI parser server-side is still
 // the sole authority on the actual SINGLE/EXPRESS classification
-// (preview.preview.type) — this tab only decides which LOCAL input UI is
-// shown (structured fields vs. free-text textarea) and, from there, which
-// text handlePreviewSubmit composes and sends. A player who types an
-// EXPRESS-shaped sentence into SINGLE's composed text (or vice versa)
-// still gets whatever the parser actually determines, unaffected by which
-// tab was active.
+// (preview.preview.type) — this tab only decides which LOCAL structured
+// input UI is shown (one Event/Selection/Stake form vs. a multi-leg list +
+// shared Stake) and, from there, which composed text handlePreviewSubmit
+// sends. A player who types an EXPRESS-shaped sentence into SINGLE's
+// composed text (or vice versa) still gets whatever the parser actually
+// determines, unaffected by which tab was active.
 type BetTypeTab = "single" | "express";
 
 // Structured SINGLE input — Event / Selection / Stake. Exported as pure
@@ -100,6 +98,57 @@ export function buildSingleSubmissionText(eventValue: string, selectionValue: st
   return `${eventValue.trim()}, ${selectionValue.trim()}, ${stakeValue.trim()}`;
 }
 
+// Structured EXPRESS input — a variable number of legs (Event + Selection
+// each) sharing exactly one Stake. Mirrors the MIN/MAX_EXPRESS_SELECTIONS
+// bounds the backend already enforces (lib/bets/betSlipRules.ts,
+// lib/betPreview/previewToken.ts's signExpressPreviewToken) so the "+ Add
+// event"/remove-leg UI can never build something the parser's own
+// extract_express_bet tool or buildBetSlipPreview.ts would reject purely on
+// leg count — duplicated as literals here for the same reason those two
+// files already duplicate it from each other rather than importing.
+export const MIN_EXPRESS_LEGS = 2;
+export const MAX_EXPRESS_LEGS = 10;
+
+export interface ExpressLegInput {
+  event: string;
+  selection: string;
+}
+
+// UI-only shape: `id` is a stable React key/removal handle, never sent to
+// the parser or read by any of the pure functions above (they all take
+// plain ExpressLegInput[], id-free) — kept local to this file rather than
+// exported.
+interface ExpressLeg extends ExpressLegInput {
+  id: number;
+}
+
+export function isExpressLegComplete(leg: ExpressLegInput): boolean {
+  return leg.event.trim().length > 0 && leg.selection.trim().length > 0;
+}
+
+export function isExpressBetReady(legs: ExpressLegInput[], stakeValue: string): boolean {
+  return (
+    legs.length >= MIN_EXPRESS_LEGS &&
+    legs.length <= MAX_EXPRESS_LEGS &&
+    legs.every(isExpressLegComplete) &&
+    isValidStakeInput(stakeValue)
+  );
+}
+
+// Same seam as buildSingleSubmissionText — one free-text string for the
+// unmodified preview endpoint/parser. Each leg is joined "Event, Selection",
+// legs are separated by "; ", and the shared stake is named explicitly
+// ("stake 100") since — unlike SINGLE's single implicit trailing number —
+// EXPRESS has several numbers-shaped fragments in play (odds/scorelines
+// inside event names) and only one of them is actually the stake; this is
+// the same disambiguating convention buildSingleSubmissionText's own comment
+// already cites the parser as handling today (e.g. "Real Madrid win, stake
+// 100").
+export function buildExpressSubmissionText(legs: ExpressLegInput[], stakeValue: string): string {
+  const legsText = legs.map((leg) => `${leg.event.trim()}, ${leg.selection.trim()}`).join("; ");
+  return `${legsText}; stake ${stakeValue.trim()}`;
+}
+
 // "Place a bet" screen: free-text message -> POST /api/miniapp/bets/text/preview
 // -> read-only preview + odds status -> POST .../confirm -> a real Bet
 // (Stage 4.4B). `phase` is the single source of truth for which block is
@@ -107,14 +156,23 @@ export function buildSingleSubmissionText(eventValue: string, selectionValue: st
 // still-usable previewToken exists (never duplicated elsewhere).
 export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
   const { t, locale } = useLocale();
-  const [message, setMessage] = useState("");
-  // Structured SINGLE input — EXPRESS still uses `message`/the free-text
-  // textarea, completely unchanged. Independent state (not derived from/
-  // synced with `message`) so switching tabs never mixes the two modes'
-  // input together.
+  // Structured SINGLE input. Independent state (not derived from/synced
+  // with the EXPRESS state below) so switching tabs never mixes the two
+  // modes' input together.
   const [eventValue, setEventValue] = useState("");
   const [selectionValue, setSelectionValue] = useState("");
   const [stakeValue, setStakeValue] = useState("");
+  // Structured EXPRESS input — a variable-length list of legs (each with
+  // its own stable `id`, never the array index, so removing a leg from the
+  // middle can't cause React to rebind a later leg's inputs onto the
+  // removed one's DOM node) plus one shared stake, completely independent
+  // of SINGLE's fields above.
+  const legIdRef = useRef(2);
+  const [expressLegs, setExpressLegs] = useState<ExpressLeg[]>(() => [
+    { id: 0, event: "", selection: "" },
+    { id: 1, event: "", selection: "" },
+  ]);
+  const [expressStakeValue, setExpressStakeValue] = useState("");
   const [betTypeTab, setBetTypeTab] = useState<BetTypeTab>("single");
   const [phase, setPhase] = useState<FormPhase>("editing");
   // preview.previewToken (Stage 4.3) lives here in memory only — never
@@ -168,15 +226,14 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     };
   }, []);
 
-  const trimmedLength = message.trim().length;
-  // SINGLE's readiness comes from the three structured fields; EXPRESS is
-  // completely unchanged (still gated on the free-text textarea's own
-  // length). Never both at once — betTypeTab picks exactly one.
+  // SINGLE's readiness comes from its three structured fields; EXPRESS's
+  // comes from its leg list + shared stake. Never both at once —
+  // betTypeTab picks exactly one.
   const canSubmitPreview =
     phase === "editing" &&
     (betTypeTab === "single"
       ? isSingleBetReady(eventValue, selectionValue, stakeValue)
-      : trimmedLength >= MESSAGE_MIN_LENGTH);
+      : isExpressBetReady(expressLegs, expressStakeValue));
   // Stage 12, Phase 4, Step 5 — EXPRESS confirm is now implemented
   // end-to-end (buildBetSlipPreview.ts signs an EXPRESS previewToken
   // whenever every selection's odds are known; the confirm route redeems
@@ -204,11 +261,6 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     }
   }
 
-  function handleMessageChange(value: string) {
-    setMessage(value);
-    resetPreviewIfShown();
-  }
-
   function handleEventChange(value: string) {
     setEventValue(value);
     resetPreviewIfShown();
@@ -221,6 +273,39 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
 
   function handleStakeChange(value: string) {
     setStakeValue(value);
+    resetPreviewIfShown();
+  }
+
+  function handleExpressLegEventChange(id: number, value: string) {
+    setExpressLegs((legs) => legs.map((leg) => (leg.id === id ? { ...leg, event: value } : leg)));
+    resetPreviewIfShown();
+  }
+
+  function handleExpressLegSelectionChange(id: number, value: string) {
+    setExpressLegs((legs) => legs.map((leg) => (leg.id === id ? { ...leg, selection: value } : leg)));
+    resetPreviewIfShown();
+  }
+
+  function handleExpressStakeChange(value: string) {
+    setExpressStakeValue(value);
+    resetPreviewIfShown();
+  }
+
+  function handleAddExpressLeg() {
+    if (expressLegs.length >= MAX_EXPRESS_LEGS) return;
+    const nextId = legIdRef.current;
+    legIdRef.current += 1;
+    setExpressLegs((legs) => [...legs, { id: nextId, event: "", selection: "" }]);
+    resetPreviewIfShown();
+  }
+
+  // Never removes below MIN_EXPRESS_LEGS — the remove control itself is
+  // only rendered once a leg count exceeds the minimum (see the JSX below),
+  // but this guard makes that the actual invariant rather than a UI-only
+  // convention.
+  function handleRemoveExpressLeg(id: number) {
+    if (expressLegs.length <= MIN_EXPRESS_LEGS) return;
+    setExpressLegs((legs) => legs.filter((leg) => leg.id !== id));
     resetPreviewIfShown();
   }
 
@@ -246,11 +331,14 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
     setError(null);
     setIsTimeoutError(false);
 
-    // SINGLE composes its three structured fields into the exact same
-    // free-text shape the EXPRESS textarea already sends — the AI parser/
-    // preview endpoint (POST .../text/preview) never sees a difference.
+    // Both modes compose their structured fields into one free-text
+    // string — the AI parser/preview endpoint (POST .../text/preview)
+    // never sees a difference between a structured submission and a
+    // hand-typed one.
     const textToSubmit =
-      betTypeTab === "single" ? buildSingleSubmissionText(eventValue, selectionValue, stakeValue) : message.trim();
+      betTypeTab === "single"
+        ? buildSingleSubmissionText(eventValue, selectionValue, stakeValue)
+        : buildExpressSubmissionText(expressLegs, expressStakeValue);
     const result = await fetchBetPreview(tg.initData, textToSubmit);
 
     inFlightRef.current = false;
@@ -569,26 +657,102 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
               </div>
             </div>
           ) : (
-            <>
-              <textarea
-                value={message}
-                onChange={(event) => handleMessageChange(event.target.value)}
-                maxLength={MESSAGE_MAX_LENGTH}
-                placeholder={t("bet.placeholder")}
-                aria-label={t("bet.messageAriaLabel")}
-                disabled={phase === "previewing"}
-                className="w-full resize-none rounded-2xl p-3 text-base text-white placeholder:text-slate-500"
-                style={{
-                  minHeight: 110,
-                  background: "rgba(255,255,255,0.03)",
-                  border: "1px solid rgba(255,255,255,0.08)",
-                }}
-              />
+            // Structured EXPRESS input — a compact, variable-length list of
+            // legs (each just a small "Event N" title + Event/Selection
+            // inputs, same dark/slate tokens as SINGLE above) followed by
+            // "+ Add event" and exactly one shared Stake field. No per-leg
+            // stake, no currency selector — mirrors SINGLE's Stake block
+            // verbatim below.
+            <div className="space-y-3">
+              <div className="space-y-2">
+                {expressLegs.map((leg, index) => (
+                  <div
+                    key={leg.id}
+                    className="rounded-2xl p-3"
+                    style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}
+                  >
+                    <div className="mb-2 flex items-center justify-between">
+                      <p className="text-xs font-semibold text-slate-500">
+                        {t("bet.expressLegTitle", { number: String(index + 1) })}
+                      </p>
+                      {expressLegs.length > MIN_EXPRESS_LEGS && (
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveExpressLeg(leg.id)}
+                          aria-label={t("bet.removeEvent", { number: String(index + 1) })}
+                          disabled={phase === "previewing"}
+                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-sm text-slate-500 disabled:opacity-50"
+                          style={{ background: "rgba(255,255,255,0.05)" }}
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
 
-              <p className="mt-1 text-right text-xs text-slate-500">
-                {message.length} / {MESSAGE_MAX_LENGTH}
-              </p>
-            </>
+                    <input
+                      type="text"
+                      value={leg.event}
+                      onChange={(event) => handleExpressLegEventChange(leg.id, event.target.value)}
+                      placeholder={t("bet.expressEventPlaceholder")}
+                      aria-label={t("bet.eventLabel")}
+                      disabled={phase === "previewing"}
+                      className="w-full rounded-xl px-3 py-2.5 text-base text-white placeholder:text-slate-600 focus:outline-none"
+                      style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}
+                    />
+                    <input
+                      type="text"
+                      value={leg.selection}
+                      onChange={(event) => handleExpressLegSelectionChange(leg.id, event.target.value)}
+                      placeholder={t("bet.expressSelectionPlaceholder")}
+                      aria-label={t("bet.selectionLabel")}
+                      disabled={phase === "previewing"}
+                      className="mt-2 w-full rounded-xl px-3 py-2.5 text-base text-white placeholder:text-slate-600 focus:outline-none"
+                      style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}
+                    />
+                  </div>
+                ))}
+              </div>
+
+              {expressLegs.length < MAX_EXPRESS_LEGS && (
+                <button
+                  type="button"
+                  onClick={handleAddExpressLeg}
+                  disabled={phase === "previewing"}
+                  className="min-h-9 w-full rounded-xl text-sm font-semibold disabled:opacity-50"
+                  style={{
+                    background: "rgba(96,232,74,0.08)",
+                    border: "1px solid rgba(96,232,74,0.25)",
+                    color: "#60E84A",
+                  }}
+                >
+                  {t("bet.addEvent")}
+                </button>
+              )}
+
+              <div>
+                <label className="mb-1 block text-xs text-slate-500">{t("bet.stakeLabel")}</label>
+                {/* USDC is this product's one fixed stake currency — see the
+                    identical SINGLE Stake block above for the full rationale. */}
+                <div
+                  className="flex items-center rounded-2xl px-3 py-3"
+                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}
+                >
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    min="0"
+                    step="0.01"
+                    value={expressStakeValue}
+                    onChange={(event) => handleExpressStakeChange(event.target.value)}
+                    placeholder="0"
+                    aria-label={t("bet.stakeLabel")}
+                    disabled={phase === "previewing"}
+                    className="w-full bg-transparent text-base text-white placeholder:text-slate-600 focus:outline-none"
+                  />
+                  <span className="shrink-0 pl-2 text-sm font-medium text-slate-400">USDC</span>
+                </div>
+              </div>
+            </div>
           )}
 
           <button
@@ -596,7 +760,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
             onClick={handlePreviewSubmit}
             disabled={!canSubmitPreview}
             aria-label={
-              isTimeoutError ? t("bet.tryAgain") : betTypeTab === "single" ? t("bet.reviewBet") : t("bet.preview")
+              isTimeoutError ? t("bet.tryAgain") : betTypeTab === "single" ? t("bet.reviewBet") : t("bet.reviewExpress")
             }
             className="mt-3 min-h-11 w-full rounded-2xl text-[15px] font-semibold disabled:opacity-50"
             style={{
@@ -610,7 +774,7 @@ export default function BetTextForm({ onBack, onConfirmed }: BetTextFormProps) {
                 ? t("bet.tryAgain")
                 : betTypeTab === "single"
                   ? t("bet.reviewBet")
-                  : t("bet.preview")}
+                  : t("bet.reviewExpress")}
           </button>
 
           {/* Step 15J.3 — a dedicated, non-alarming block for AI_TIMEOUT:

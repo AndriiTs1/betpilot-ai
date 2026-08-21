@@ -2,7 +2,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { isValidStakeInput, isSingleBetReady, buildSingleSubmissionText } from "./BetTextForm";
+import {
+  isValidStakeInput,
+  isSingleBetReady,
+  buildSingleSubmissionText,
+  isExpressLegComplete,
+  isExpressBetReady,
+  buildExpressSubmissionText,
+  MIN_EXPRESS_LEGS,
+  MAX_EXPRESS_LEGS,
+  type ExpressLegInput,
+} from "./BetTextForm";
 import { translate } from "@/lib/i18n/translations";
 
 // Stage M4.7 — SILENT CURRENT-ODDS PLAYER UX. This project deliberately has
@@ -95,17 +105,19 @@ test("BetTextForm: bet-type tab state exists, defaults to 'single', and both but
   assert.match(source, /aria-selected=\{betTypeTab === "express"\}[\s\S]{0,120}onClick=\{\(\) => handleBetTypeChange\("express"\)\}/);
 });
 
-// Structured SINGLE input pass — betTypeTab's literal value is still never
-// sent to the API (the AI parser remains the sole SINGLE/EXPRESS
-// authority), but it IS now read by handlePreviewSubmit to decide which
-// text to compose/send: SINGLE's three structured fields via
-// buildSingleSubmissionText, or EXPRESS's free-text message unchanged.
+// Structured input pass (SINGLE and EXPRESS both) — betTypeTab's literal
+// value is still never sent to the API (the AI parser remains the sole
+// SINGLE/EXPRESS authority), but it IS read by handlePreviewSubmit to
+// decide which structured fields to compose/send.
 test("BetTextForm: betTypeTab's literal value is never sent to the API — only the derived free-text is, composed per mode", () => {
   const submitFnMatch = source.match(/async function handlePreviewSubmit\(\) \{([\s\S]*?)\n  \}/);
   assert.ok(submitFnMatch, "expected handlePreviewSubmit to be found");
   const body = submitFnMatch![1];
 
-  assert.match(body, /betTypeTab === "single" \? buildSingleSubmissionText\(eventValue, selectionValue, stakeValue\) : message\.trim\(\)/);
+  assert.match(
+    body,
+    /betTypeTab === "single"\s*\?\s*buildSingleSubmissionText\(eventValue, selectionValue, stakeValue\)\s*:\s*buildExpressSubmissionText\(expressLegs, expressStakeValue\)/,
+  );
   assert.match(body, /fetchBetPreview\(tg\.initData, textToSubmit\)/);
   // betTypeTab is read to branch, but its own string value ("single"/
   // "express") never appears as an argument to fetchBetPreview.
@@ -120,15 +132,14 @@ test("BetTextForm: betTypeTab's literal value is never sent to the API — only 
 // proven by showing every one of the five named product strings is read
 // through t(), not a hardcoded literal, so re-render with a new `locale`
 // always reflects the current language (no per-string cache to invalidate).
-test("BetTextForm: Place a bet / bet-type labels / placeholder / Preview bet all come from centralized translation keys, never hardcoded literals", () => {
+test("BetTextForm: Place a bet / bet-type labels / Review express all come from centralized translation keys, never hardcoded literals", () => {
   assert.match(source, /import \{ useLocale \} from "\.\/LocaleProvider";/);
   assert.match(source, /const \{ t, locale \} = useLocale\(\);/);
   assert.match(source, /\{t\("bet\.placeBet"\)\}/);
   assert.match(source, /aria-label=\{t\("bet\.typeAriaLabel"\)\}/);
   assert.match(source, /\{t\("bet\.single"\)\}/);
   assert.match(source, /\{t\("bet\.express"\)\}/);
-  assert.match(source, /placeholder=\{t\("bet\.placeholder"\)\}/);
-  assert.match(source, /: t\("bet\.preview"\)/);
+  assert.match(source, /: t\("bet\.reviewExpress"\)/);
 
   // "Place a bet" legitimately still appears in this file's own prose
   // comments (naming the screen) — only the actual rendered JSX text node
@@ -136,28 +147,27 @@ test("BetTextForm: Place a bet / bet-type labels / placeholder / Preview bet all
   assert.equal(source.includes('>Place a bet<'), false);
   assert.equal(source.includes(">Ординар<"), false);
   assert.equal(source.includes(">Экспресс<"), false);
-  assert.equal(source.includes('placeholder="Команда'), false);
 });
 
 // Requirement 12 — the player's own typed text must remain byte-for-byte
-// unchanged when the UI locale switches: `message`/`setMessage` (the only
-// state backing the textarea's value) is never read or written by t()/
-// useLocale, and the textarea's `value` prop stays bound to `message`
-// alone — only its `placeholder` (shown when message is empty) is
+// unchanged when the UI locale switches: every EXPRESS field-change handler
+// only ever reads/writes the raw leg or stake state, never t()/useLocale —
+// only each input's `placeholder` (shown when the field is empty) is
 // locale-driven.
-test("BetTextForm: switching UI locale can never rewrite/translate the player's typed message — message state is fully independent of t()/locale", () => {
-  assert.match(source, /<textarea\s*\n\s*value=\{message\}/);
-  assert.match(source, /onChange=\{\(event\) => handleMessageChange\(event\.target\.value\)\}/);
+test("BetTextForm: switching UI locale can never rewrite/translate the player's typed EXPRESS fields — leg/stake state is fully independent of t()/locale", () => {
+  assert.match(source, /value=\{leg\.event\}/);
+  assert.match(source, /value=\{leg\.selection\}/);
+  assert.match(source, /value=\{expressStakeValue\}/);
 
-  const handleMessageChangeMatch = source.match(/function handleMessageChange\(value: string\) \{([\s\S]*?)\n {2}\}/);
-  assert.ok(handleMessageChangeMatch, "expected handleMessageChange to be found");
-  assert.equal(/\bt\(|useLocale|locale/.test(handleMessageChangeMatch![1]), false);
+  for (const handler of ["handleExpressLegEventChange", "handleExpressLegSelectionChange", "handleExpressStakeChange"]) {
+    const match = source.match(new RegExp(`function ${handler}\\([^)]*\\) \\{([\\s\\S]*?)\\n {2}\\}`));
+    assert.ok(match, `expected ${handler} to be found`);
+    assert.equal(/\bt\(|useLocale|locale/.test(match![1]), false);
+  }
 });
 
 // Requirement 13 — the parser/fetch payload carries the player's original
-// text verbatim; UI locale is never part of it. Already partly proven by
-// the "purely visual" test above (fetchBetPreview(tg.initData,
-// message.trim())) — this asserts the complementary fact that the
+// text verbatim; UI locale is never part of it. This asserts the
 // fetchBetPreview call ITSELF is never called with any t()/locale-derived
 // argument (handlePreviewSubmit's body legitimately references `locale`
 // elsewhere now, to localize the resulting error message on failure — that
@@ -168,7 +178,7 @@ test("BetTextForm: the preview request payload is (initData, composed text) — 
   const body = submitFnMatch![1];
 
   const textToSubmitMatch = body.match(
-    /const textToSubmit =\s*betTypeTab === "single" \? buildSingleSubmissionText\(eventValue, selectionValue, stakeValue\) : message\.trim\(\);/,
+    /const textToSubmit =\s*betTypeTab === "single"\s*\?\s*buildSingleSubmissionText\(eventValue, selectionValue, stakeValue\)\s*:\s*buildExpressSubmissionText\(expressLegs, expressStakeValue\);/,
   );
   assert.ok(textToSubmitMatch, "expected the textToSubmit composition to be found");
   assert.equal(/\bt\(|locale/.test(textToSubmitMatch![0]), false);
@@ -241,25 +251,21 @@ test("source: SINGLE renders Event/Selection/Stake as three structured inputs, e
   assert.equal(source.includes(">Selection<"), false);
 });
 
-// Requirement — no old combined SINGLE textarea remains. The free-text
-// <textarea> must now only render for EXPRESS (the `) : (` / `<>` branch),
-// never unconditionally.
-test("source: the old single combined textarea no longer renders unconditionally — it's EXPRESS-only, gated behind the same betTypeTab branch", () => {
-  // The textarea is the FIRST element inside the "express" branch of the
-  // `betTypeTab === "single" ? (...) : (<>...` conditional, never rendered
-  // outside it — i.e. exactly one <textarea> in the whole file, and it's
-  // reached only via that "express" branch.
-  assert.equal((source.match(/<textarea/g) ?? []).length, 1);
-  assert.match(source, /\) : \(\s*<>\s*<textarea/);
+// Requirement — no free-text <textarea> remains anywhere in this file: both
+// SINGLE and EXPRESS are fully structured input now.
+test("source: no <textarea> element remains — both SINGLE and EXPRESS render only structured <input> fields", () => {
+  assert.equal((source.match(/<textarea/g) ?? []).length, 0);
 });
 
-test("source: the primary button reads Review bet (bet.reviewBet) for SINGLE and Preview bet (bet.preview) for EXPRESS, never a hardcoded literal", () => {
+test("source: the primary button reads Review bet (bet.reviewBet) for SINGLE and Review express (bet.reviewExpress) for EXPRESS, never a hardcoded literal", () => {
   assert.match(
     source,
-    /isTimeoutError\s*\?\s*t\("bet\.tryAgain"\)\s*:\s*betTypeTab === "single"\s*\?\s*t\("bet\.reviewBet"\)\s*:\s*t\("bet\.preview"\)/,
+    /isTimeoutError\s*\?\s*t\("bet\.tryAgain"\)\s*:\s*betTypeTab === "single"\s*\?\s*t\("bet\.reviewBet"\)\s*:\s*t\("bet\.reviewExpress"\)/,
   );
   assert.equal(source.includes(">Review bet<"), false);
   assert.equal(source.includes(">Проверить ставку<"), false);
+  assert.equal(source.includes(">Review express<"), false);
+  assert.equal(source.includes(">Проверить экспресс<"), false);
 });
 
 test("source: USDC is a fixed literal (this product's one stake currency, matching Preview/Ticket elsewhere), not a new translation key or a currency selector", () => {
@@ -298,20 +304,223 @@ test("translations: the six new SINGLE-input keys resolve to the exact required 
 // EXPRESS behavior is not accidentally changed
 // ---------------------------------------------------------------------
 
-test("source: EXPRESS's free-text textarea/message state/placeholder/aria-label are all byte-for-byte the same as before this pass", () => {
-  assert.match(source, /<textarea\s*\n\s*value=\{message\}\s*\n\s*onChange=\{\(event\) => handleMessageChange\(event\.target\.value\)\}\s*\n\s*maxLength=\{MESSAGE_MAX_LENGTH\}\s*\n\s*placeholder=\{t\("bet\.placeholder"\)\}\s*\n\s*aria-label=\{t\("bet\.messageAriaLabel"\)\}/);
-  assert.match(source, /\{message\.length\} \/ \{MESSAGE_MAX_LENGTH\}/);
-});
-
-test("source: EXPRESS's own submit gating (message length) is untouched — canSubmitPreview still falls back to trimmedLength >= MESSAGE_MIN_LENGTH for the express branch", () => {
+test("source: EXPRESS's own submit gating comes from isExpressBetReady(expressLegs, expressStakeValue), not a leftover message-length check", () => {
   assert.match(
     source,
-    /betTypeTab === "single"\s*\?\s*isSingleBetReady\(eventValue, selectionValue, stakeValue\)\s*:\s*trimmedLength >= MESSAGE_MIN_LENGTH/,
+    /betTypeTab === "single"\s*\?\s*isSingleBetReady\(eventValue, selectionValue, stakeValue\)\s*:\s*isExpressBetReady\(expressLegs, expressStakeValue\)/,
   );
 });
 
-test("source: handleExcludeLeg/handleConfirm (Sector 1 EXPRESS recovery, confirm flow) are untouched by the SINGLE input change", () => {
+test("source: handleExcludeLeg/handleConfirm (Sector 1 EXPRESS recovery, confirm flow) are untouched by the EXPRESS builder change", () => {
   assert.match(source, /async function handleExcludeLeg\(legIndex: number\) \{/);
   assert.match(source, /fetchExpressLegExclusionPreview\(initDataValue, preview\.previewToken, \[legIndex\]\)/);
   assert.match(source, /async function handleConfirm\(\) \{/);
+});
+
+// ---------------------------------------------------------------------
+// Structured EXPRESS input — a variable-length list of legs + one shared
+// Stake. Lettered requirements A–P below mirror the task spec.
+// ---------------------------------------------------------------------
+
+function legs(...pairs: Array<[string, string]>): ExpressLegInput[] {
+  return pairs.map(([event, selection]) => ({ event, selection }));
+}
+
+// A — initial state: exactly two empty legs.
+test("A: expressLegs initial state is exactly two empty legs (id: 0, id: 1)", () => {
+  assert.match(
+    source,
+    /const \[expressLegs, setExpressLegs\] = useState<ExpressLeg\[\]>\(\(\) => \[\s*\{ id: 0, event: "", selection: "" \},\s*\{ id: 1, event: "", selection: "" \},\s*\]\);/,
+  );
+});
+
+// B — each leg renders an Event input and a Selection input, using
+// centralized translation keys for its title/placeholders/aria-labels.
+test("B: each EXPRESS leg renders a title, an Event input, and a Selection input, all via centralized translation keys", () => {
+  assert.match(source, /\{t\("bet\.expressLegTitle", \{ number: String\(index \+ 1\) \}\)\}/);
+  assert.match(source, /placeholder=\{t\("bet\.expressEventPlaceholder"\)\}/);
+  assert.match(source, /aria-label=\{t\("bet\.eventLabel"\)\}\s*\n\s*disabled=\{phase === "previewing"\}\s*\n\s*className="w-full rounded-xl/);
+  assert.match(source, /placeholder=\{t\("bet\.expressSelectionPlaceholder"\)\}/);
+  assert.match(source, /aria-label=\{t\("bet\.selectionLabel"\)\}/);
+  assert.equal(source.includes(">Событие 1<"), false, "leg title must come from t(), not a hardcoded literal");
+});
+
+// C — exactly one shared Stake field for the whole EXPRESS slip, not one
+// per leg.
+test("C: EXPRESS has exactly one shared Stake field (USDC), never a per-leg stake input", () => {
+  const mapStart = source.indexOf("expressLegs.map((leg, index) => (");
+  const addButtonStart = source.indexOf("onClick={handleAddExpressLeg}");
+  assert.ok(mapStart > -1 && addButtonStart > mapStart, "expected the leg-mapping JSX, followed later by the Add event button");
+  const legMapSection = source.slice(mapStart, addButtonStart);
+  assert.equal(/stakeLabel|USDC/.test(legMapSection), false, "no stake field inside the per-leg map");
+
+  assert.equal((source.match(/value=\{expressStakeValue\}/g) ?? []).length, 1);
+  assert.match(source, /value=\{expressStakeValue\}[\s\S]{0,600}USDC/);
+});
+
+// D — "+ Add event" appends a new, empty leg and is a real <button>.
+test("D: handleAddExpressLeg appends one new empty leg, guarded by MAX_EXPRESS_LEGS", () => {
+  const match = source.match(/function handleAddExpressLeg\(\) \{([\s\S]*?)\n {2}\}/);
+  assert.ok(match, "expected handleAddExpressLeg to be found");
+  assert.match(match![1], /if \(expressLegs\.length >= MAX_EXPRESS_LEGS\) return;/);
+  assert.match(match![1], /setExpressLegs\(\(legs\) => \[\.\.\.legs, \{ id: nextId, event: "", selection: "" \}\]\);/);
+  assert.match(match![1], /resetPreviewIfShown\(\);/);
+  assert.match(source, /<button\s*\n\s*type="button"\s*\n\s*onClick=\{handleAddExpressLeg\}/);
+  assert.match(source, /\{t\("bet\.addEvent"\)\}/);
+});
+
+// E — remove-leg control never drops below MIN_EXPRESS_LEGS, and is only
+// rendered once there are more than the minimum (so the first two legs are
+// never individually removable).
+test("E: handleRemoveExpressLeg is guarded by MIN_EXPRESS_LEGS, and the remove control only renders beyond the minimum", () => {
+  const match = source.match(/function handleRemoveExpressLeg\(id: number\) \{([\s\S]*?)\n {2}\}/);
+  assert.ok(match, "expected handleRemoveExpressLeg to be found");
+  assert.match(match![1], /if \(expressLegs\.length <= MIN_EXPRESS_LEGS\) return;/);
+  assert.match(match![1], /setExpressLegs\(\(legs\) => legs\.filter\(\(leg\) => leg\.id !== id\)\);/);
+  assert.match(match![1], /resetPreviewIfShown\(\);/);
+  assert.match(source, /\{expressLegs\.length > MIN_EXPRESS_LEGS && \(/);
+  assert.match(source, /aria-label=\{t\("bet\.removeEvent", \{ number: String\(index \+ 1\) \}\)\}/);
+});
+
+// F — max-leg enforcement: "+ Add event" itself disappears once the leg
+// count reaches MAX_EXPRESS_LEGS, on top of the handler's own guard (D).
+test("F: '+ Add event' is only rendered while expressLegs.length < MAX_EXPRESS_LEGS, and MAX_EXPRESS_LEGS matches the backend's own EXPRESS ceiling", () => {
+  assert.match(source, /\{expressLegs\.length < MAX_EXPRESS_LEGS && \(/);
+  assert.equal(MAX_EXPRESS_LEGS, 10, "must match MAX_EXPRESS_SELECTIONS in lib/bets/betSlipRules.ts / lib/betPreview/previewToken.ts");
+  assert.equal(MIN_EXPRESS_LEGS, 2, "must match MIN_EXPRESS_SELECTIONS in lib/bets/betSlipRules.ts / lib/betPreview/previewToken.ts");
+});
+
+// G — isExpressLegComplete / isExpressBetReady pure-function coverage
+// (button disabled/enabled logic).
+test("G: isExpressLegComplete requires both a non-empty event and a non-empty selection", () => {
+  assert.equal(isExpressLegComplete({ event: "", selection: "" }), false);
+  assert.equal(isExpressLegComplete({ event: "Arsenal — Chelsea", selection: "" }), false);
+  assert.equal(isExpressLegComplete({ event: "", selection: "Arsenal to win" }), false);
+  assert.equal(isExpressLegComplete({ event: "   ", selection: "Arsenal to win" }), false, "whitespace-only doesn't count");
+  assert.equal(isExpressLegComplete({ event: "Arsenal — Chelsea", selection: "Arsenal to win" }), true);
+});
+
+test("G: isExpressBetReady is false below MIN_EXPRESS_LEGS, above MAX_EXPRESS_LEGS, with any incomplete leg, or an invalid stake — true only when every condition holds", () => {
+  const complete = legs(["Arsenal — Chelsea", "Arsenal to win"], ["Real Madrid — Barcelona", "Real Madrid to win"]);
+
+  assert.equal(isExpressBetReady(legs(["Arsenal — Chelsea", "Arsenal to win"]), "100"), false, "only 1 leg, below MIN_EXPRESS_LEGS");
+  assert.equal(isExpressBetReady(complete, ""), false, "missing stake");
+  assert.equal(isExpressBetReady(complete, "0"), false, "invalid (zero) stake");
+  assert.equal(
+    isExpressBetReady(legs(["Arsenal — Chelsea", ""], ["Real Madrid — Barcelona", "Real Madrid to win"]), "100"),
+    false,
+    "one incomplete leg",
+  );
+  assert.equal(isExpressBetReady(complete, "100"), true);
+
+  const elevenLegs: ExpressLegInput[] = Array.from({ length: MAX_EXPRESS_LEGS + 1 }, (_, i) => ({
+    event: `Event ${i}`,
+    selection: `Selection ${i}`,
+  }));
+  assert.equal(isExpressBetReady(elevenLegs, "100"), false, "above MAX_EXPRESS_LEGS");
+});
+
+// H — composition into the preview request: buildExpressSubmissionText.
+test("H: buildExpressSubmissionText composes every leg plus the one shared stake into a single trimmed free-text string", () => {
+  assert.equal(
+    buildExpressSubmissionText(legs(["Arsenal — Chelsea", "Arsenal to win"], ["Real Madrid — Barcelona", "Real Madrid to win"]), "100"),
+    "Arsenal — Chelsea, Arsenal to win; Real Madrid — Barcelona, Real Madrid to win; stake 100",
+  );
+  assert.equal(
+    buildExpressSubmissionText(legs(["  Интер — Ювентус  ", "  Интер победит  "]), "  50  "),
+    "Интер — Ювентус, Интер победит; stake 50",
+  );
+});
+
+// I — editing any EXPRESS field, adding a leg, or removing a leg all
+// invalidate a stale preview, same safety principle as SINGLE.
+test("I: editing an EXPRESS leg field, changing the stake, adding a leg, or removing a leg all invalidate a stale preview", () => {
+  for (const handler of [
+    "handleExpressLegEventChange",
+    "handleExpressLegSelectionChange",
+    "handleExpressStakeChange",
+    "handleAddExpressLeg",
+    "handleRemoveExpressLeg",
+  ]) {
+    const match = source.match(new RegExp(`function ${handler}\\([^)]*\\) \\{([\\s\\S]*?)\\n  \\}`));
+    assert.ok(match, `expected ${handler} to be found`);
+    assert.match(match![1], /resetPreviewIfShown\(\);/);
+  }
+});
+
+// J — Single/Express state never leaks into each other: fully independent
+// state slices, already proven structurally (separate useState calls); this
+// spot-checks there is no shared/derived state between the two.
+test("J: SINGLE fields (eventValue/selectionValue/stakeValue) and EXPRESS state (expressLegs/expressStakeValue) are fully independent useState slices", () => {
+  assert.match(source, /const \[eventValue, setEventValue\] = useState\(""\);/);
+  assert.match(source, /const \[selectionValue, setSelectionValue\] = useState\(""\);/);
+  assert.match(source, /const \[stakeValue, setStakeValue\] = useState\(""\);/);
+  assert.match(source, /const \[expressLegs, setExpressLegs\] = useState<ExpressLeg\[\]>/);
+  assert.match(source, /const \[expressStakeValue, setExpressStakeValue\] = useState\(""\);/);
+});
+
+// K — SINGLE is byte-for-byte unaffected: re-assert its own composition and
+// gating are untouched by the EXPRESS builder work (belt-and-suspenders on
+// top of the dedicated SINGLE tests above).
+test("K: SINGLE's own submission composition and readiness gating are untouched by the EXPRESS builder change", () => {
+  assert.match(
+    source,
+    /betTypeTab === "single"\s*\?\s*buildSingleSubmissionText\(eventValue, selectionValue, stakeValue\)/,
+  );
+  assert.match(
+    source,
+    /betTypeTab === "single"\s*\?\s*isSingleBetReady\(eventValue, selectionValue, stakeValue\)/,
+  );
+});
+
+// L — RU/EN localization symmetry for every new EXPRESS-builder key.
+test("L: every new EXPRESS-builder translation key resolves to the exact required RU/EN copy", () => {
+  assert.equal(translate("en", "bet.expressLegTitle", { number: "1" }), "Event 1");
+  assert.equal(translate("ru", "bet.expressLegTitle", { number: "1" }), "Событие 1");
+  assert.equal(translate("en", "bet.expressEventPlaceholder"), "Example: Arsenal — Chelsea");
+  assert.equal(translate("ru", "bet.expressEventPlaceholder"), "Например: Арсенал — Челси");
+  assert.equal(translate("en", "bet.expressSelectionPlaceholder"), "Example: Arsenal to win");
+  assert.equal(translate("ru", "bet.expressSelectionPlaceholder"), "Например: Арсенал победит");
+  assert.equal(translate("en", "bet.addEvent"), "+ Add event");
+  assert.equal(translate("ru", "bet.addEvent"), "+ Добавить событие");
+  assert.equal(translate("en", "bet.removeEvent", { number: "2" }), "Remove event 2");
+  assert.equal(translate("ru", "bet.removeEvent", { number: "2" }), "Удалить событие 2");
+  assert.equal(translate("en", "bet.reviewExpress"), "Review express");
+  assert.equal(translate("ru", "bet.reviewExpress"), "Проверить экспресс");
+});
+
+// M — no second parser/API flow: the EXPRESS builder still funnels through
+// the exact same single fetchBetPreview call as SINGLE (already proven by
+// tests A/H above and the "betTypeTab's literal value is never sent"
+// test); this spot-checks no second fetch/endpoint reference was
+// introduced anywhere in the file.
+test("M: no second preview/parser endpoint was introduced — fetchBetPreview is still the only preview call in this file", () => {
+  assert.equal((source.match(/fetchBetPreview\(/g) ?? []).length, 1);
+});
+
+// N — existing Preview/Confirm/Sector 1 exclusion behavior is intact,
+// independent of which bet-type tab produced the preview being confirmed.
+test("N: canConfirm/handleConfirm/PreviewCard rendering are untouched — Confirm works identically regardless of which tab produced the preview", () => {
+  assert.match(source, /const canConfirm = canConfirmBetSlip\(phase === "ready", preview\) && excludingLegIndex === null;/);
+  assert.match(source, /<PreviewCard preview=\{preview\.preview\} onExcludeLeg=\{handleExcludeLeg\} excludingLegIndex=\{excludingLegIndex\} \/>/);
+});
+
+// O — no hardcoded EXPRESS strings / no `locale === "ru"` ternaries were
+// introduced by the builder.
+test("O: no hardcoded EXPRESS-builder strings and no locale === \"ru\" ternary anywhere in this file", () => {
+  assert.equal(/locale === ["']ru["']/.test(source), false);
+  assert.equal(source.includes(">Arsenal — Chelsea<"), false);
+  assert.equal(source.includes(">Арсенал — Челси<"), false);
+});
+
+// P — accessibility: mobile-friendly numeric stake input, real <button>
+// elements for Add/Remove, and per-input aria-labels (already partly
+// covered by B, D, E above) — this rounds out the stake input itself.
+test("P: the shared EXPRESS stake input is a mobile-friendly numeric field with its own aria-label", () => {
+  assert.match(
+    source,
+    /value=\{expressStakeValue\}\s*\n\s*onChange=\{\(event\) => handleExpressStakeChange\(event\.target\.value\)\}\s*\n\s*placeholder="0"\s*\n\s*aria-label=\{t\("bet\.stakeLabel"\)\}/,
+  );
+  const stakeInputMatch = source.match(/<input\s*\n\s*type="number"\s*\n\s*inputMode="decimal"[\s\S]{0,400}value=\{expressStakeValue\}/);
+  assert.ok(stakeInputMatch, "expected the shared EXPRESS stake input to be type=number/inputMode=decimal");
 });
