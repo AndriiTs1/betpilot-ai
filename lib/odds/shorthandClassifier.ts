@@ -528,7 +528,37 @@ export function classifyBettingSelectionText(
     if (lowerTrimmed.startsWith(lowerName) && nextChar !== undefined && /\s/.test(nextChar)) {
       const remainder = trimmed.slice(trimmedName.length).trim();
       const remainderResult = classifyOnce(remainder);
-      if (remainderResult) return remainderResult;
+      if (remainderResult) {
+        // Individual Team Totals, Stage 1 — production bug fix. A bare
+        // totals token (ТБ/ТМ/Over/Under, no participant of its own) that
+        // only classified at all because a REAL, known participant name was
+        // stripped off the front (e.g. "Марсель ТБ 2.5", "Marseille Over
+        // 1.5") is a TEAM total, not a MATCH total — the stripped name is
+        // who it applies to. Before this fix, this branch returned
+        // remainderResult unchanged: {marketType: "TOTALS", participantName:
+        // null}, silently discarding the team attribution and misclassifying
+        // it as the whole match's total — the verified root cause of the
+        // "Marseille Over 1.5 -> Not available" production bug (it queried
+        // the wrong market/line). This reconstruction fires ONLY for that
+        // one exact shape (remainder alone, unattributed, resolved to bare
+        // TOTALS) — every other remainder classification (MONEYLINE_3WAY,
+        // TEAM_TOTAL/SPREAD already carrying their own participant, or the
+        // generic PARTICIPANT winner-suffix fallback) is returned exactly as
+        // before, unreinterpreted. A bare, unattributed "ТБ 2.5"/"Over 2.5"
+        // (no known name is a prefix of it) never reaches this loop body at
+        // all — the direct classifyOnce(trimmed) call above already resolved
+        // it as MATCH TOTALS before the loop ever runs, so this change can
+        // never invent a participant for text that never named one.
+        if (remainderResult.marketType === "TOTALS" && remainderResult.participantName === null) {
+          return {
+            marketType: "TEAM_TOTAL",
+            selectionType: remainderResult.selectionType,
+            participantName: trimmedName,
+            embeddedLine: remainderResult.embeddedLine,
+          };
+        }
+        return remainderResult;
+      }
     }
   }
 

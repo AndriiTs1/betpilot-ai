@@ -339,7 +339,14 @@ function computeMarketIntentObservations(raw: RawBetSlipFields, originalText: st
   const participants = splitDraftEventParticipants(selection.event).map((participant) => participant.rawName);
   const claim = classifyMarketIntentClaim(selection, participants);
 
-  const evidence = extractMarketIntentEvidence(originalText);
+  // Individual Team Totals, Stage 1B — the SAME participants list the claim
+  // above was just built from is now also passed to the evidence side, so
+  // both read the player's own event's real team names identically. This is
+  // what lets "Марсель ТБ 2.5"/"Marseille Over 1.5" evidence correctly read
+  // as TEAM_TOTAL (matching the claim) instead of bare TOTALS — one shared
+  // classifier, one shared participant list, never two independently
+  // maintained readings of the same input.
+  const evidence = extractMarketIntentEvidence(originalText, participants);
   const verification = verifyMarketIntentClaim(claim, evidence);
 
   return [{ claim, verification }];

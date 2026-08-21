@@ -487,3 +487,128 @@ test("matchedText stays bounded to the matched window (<= MAX_WINDOW_TOKENS = 3 
   assert.ok(draw!.matchedText.length < text.length / 4, "matchedText must be a small bounded fragment, never a large chunk of the original text");
   assert.equal(draw!.matchedText.includes(padding.trim()), false);
 });
+
+/* -------------------------------------------------------------------------- */
+/* Individual Team Totals, Stage 1B — knownParticipantNames threaded through  */
+/* to the shared classifier (lib/odds/shorthandClassifier.ts), reusing the    */
+/* EXACT same participant-attribution contract shorthandClassifier.test.ts    */
+/* already proves — no second, independently-maintained TEAM_TOTAL grammar    */
+/* here. Optional and empty by default: every test ABOVE this section never   */
+/* passes it and is completely unaffected (proven by the "unchanged" tests    */
+/* below, which are the exact same fixtures re-run WITH participant names).   */
+/* -------------------------------------------------------------------------- */
+
+const MARSEILLE_STRASBOURG = ["Марсель", "Страсбург"];
+const MARSEILLE_STRASBOURG_EN = ["Marseille", "Strasbourg"];
+
+test("Stage 1B (1): bare 'ТБ 2.5' remains TOTALS evidence even when participant names are known — never invents a participant for text that named none", () => {
+  const evidence = extractMarketIntentEvidence("ТБ 2.5 ставка 10", MARSEILLE_STRASBOURG);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].classification.marketType, "TOTALS");
+  assert.equal(evidence[0].classification.selectionType, "OVER");
+  assert.equal(evidence[0].classification.participantName, null);
+  assert.equal(evidence[0].classification.embeddedLine, "2.5");
+});
+
+test("Stage 1B (1b): bare 'ТМ 2.5' remains TOTALS evidence even when participant names are known", () => {
+  const evidence = extractMarketIntentEvidence("ТМ 2.5 ставка 10", MARSEILLE_STRASBOURG);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].classification.marketType, "TOTALS");
+  assert.equal(evidence[0].classification.selectionType, "UNDER");
+  assert.equal(evidence[0].classification.participantName, null);
+});
+
+test("Stage 1B (2): 'Марсель ТБ 2.5 ставка 10' with known participants -> TEAM_TOTAL evidence, participant Марсель, line 2.5", () => {
+  const evidence = extractMarketIntentEvidence("Марсель ТБ 2.5 ставка 10", MARSEILLE_STRASBOURG);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].classification.marketType, "TEAM_TOTAL");
+  assert.equal(evidence[0].classification.selectionType, "OVER");
+  assert.equal(evidence[0].classification.participantName, "Марсель");
+  assert.equal(evidence[0].classification.embeddedLine, "2.5");
+});
+
+test("Stage 1B (2b): 'Марсель ТМ 2.5 ставка 10' with known participants -> TEAM_TOTAL evidence, UNDER", () => {
+  const evidence = extractMarketIntentEvidence("Марсель ТМ 2.5 ставка 10", MARSEILLE_STRASBOURG);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].classification.marketType, "TEAM_TOTAL");
+  assert.equal(evidence[0].classification.selectionType, "UNDER");
+  assert.equal(evidence[0].classification.participantName, "Марсель");
+});
+
+test("Stage 1B (3): 'Марсель ИТБ 1.5 ставка 10' -> TEAM_TOTAL evidence (dedicated token, already worked before Stage 1B — no regression, works with or without known participants)", () => {
+  const withParticipants = extractMarketIntentEvidence("Марсель ИТБ 1.5 ставка 10", MARSEILLE_STRASBOURG);
+  const withoutParticipants = extractMarketIntentEvidence("Марсель ИТБ 1.5 ставка 10");
+  for (const evidence of [withParticipants, withoutParticipants]) {
+    assert.equal(evidence.length, 1);
+    assert.equal(evidence[0].classification.marketType, "TEAM_TOTAL");
+    assert.equal(evidence[0].classification.selectionType, "OVER");
+    assert.equal(evidence[0].classification.participantName, "Марсель");
+    assert.equal(evidence[0].classification.embeddedLine, "1.5");
+  }
+});
+
+test("Stage 1B (4): EN 'Marseille Over 1.5 stake 10' with known participants -> TEAM_TOTAL evidence — the exact verified production bug input", () => {
+  const evidence = extractMarketIntentEvidence("Marseille Over 1.5 stake 10", MARSEILLE_STRASBOURG_EN);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].classification.marketType, "TEAM_TOTAL");
+  assert.equal(evidence[0].classification.selectionType, "OVER");
+  assert.equal(evidence[0].classification.participantName, "Marseille");
+  assert.equal(evidence[0].classification.embeddedLine, "1.5");
+});
+
+test("Stage 1B (5): both teams independently — 'Страсбург ТБ 1.5 ставка 10' and 'Marseille/Strasbourg Under 2.5' are each attributed to the RIGHT team, never cross-attributed", () => {
+  const strasbourgRu = extractMarketIntentEvidence("Страсбург ТБ 1.5 ставка 10", MARSEILLE_STRASBOURG);
+  assert.equal(strasbourgRu[0].classification.marketType, "TEAM_TOTAL");
+  assert.equal(strasbourgRu[0].classification.participantName, "Страсбург");
+
+  const strasbourgEn = extractMarketIntentEvidence("Strasbourg Under 2.5 stake 10", MARSEILLE_STRASBOURG_EN);
+  assert.equal(strasbourgEn[0].classification.marketType, "TEAM_TOTAL");
+  assert.equal(strasbourgEn[0].classification.selectionType, "UNDER");
+  assert.equal(strasbourgEn[0].classification.participantName, "Strasbourg");
+
+  const marseilleEn = extractMarketIntentEvidence("Marseille Over 1.5 stake 10", MARSEILLE_STRASBOURG_EN);
+  assert.equal(marseilleEn[0].classification.participantName, "Marseille");
+});
+
+test("Stage 1B (6): OVER and UNDER both resolve independently to TEAM_TOTAL for the same participant", () => {
+  const over = extractMarketIntentEvidence("Марсель ТБ 1.5 ставка 10", MARSEILLE_STRASBOURG);
+  const under = extractMarketIntentEvidence("Марсель ТМ 1.5 ставка 10", MARSEILLE_STRASBOURG);
+  assert.equal(over[0].classification.selectionType, "OVER");
+  assert.equal(under[0].classification.selectionType, "UNDER");
+  assert.equal(over[0].classification.marketType, "TEAM_TOTAL");
+  assert.equal(under[0].classification.marketType, "TEAM_TOTAL");
+});
+
+test("Stage 1B (7): exact line is preserved — whole-number '2' and decimal '1.5' are never altered by threading participant names through", () => {
+  const whole = extractMarketIntentEvidence("Марсель ТБ 2 ставка 10", MARSEILLE_STRASBOURG);
+  assert.equal(whole[0].classification.embeddedLine, "2");
+
+  const decimal = extractMarketIntentEvidence("Марсель ТБ 1.5 ставка 10", MARSEILLE_STRASBOURG);
+  assert.equal(decimal[0].classification.embeddedLine, "1.5");
+});
+
+test("Stage 1B (9): no participant fabrication — a knownParticipantNames entry that isn't actually present in the text has no effect", () => {
+  const evidence = extractMarketIntentEvidence("ТБ 2.5 ставка 10", ["Реал Мадрид", "Барселона"]);
+  assert.equal(evidence[0].classification.marketType, "TOTALS");
+  assert.equal(evidence[0].classification.participantName, null);
+});
+
+test("Stage 1B (10): existing MONEYLINE/TOTALS/SPREAD evidence behavior is byte-for-byte unchanged when knownParticipantNames is supplied but doesn't apply", () => {
+  const cases: Array<{ text: string; participants: readonly string[] }> = [
+    { text: "ничья Арсенал победа ставка 10", participants: MARSEILLE_STRASBOURG },
+    { text: "Арсенал Ф1(-1.5) ставка 10", participants: MARSEILLE_STRASBOURG },
+    { text: "ТБ 2.5 ТМ 3.5 ставка 10", participants: MARSEILLE_STRASBOURG },
+  ];
+  for (const { text, participants } of cases) {
+    const withParticipants = extractMarketIntentEvidence(text, participants);
+    const withoutParticipants = extractMarketIntentEvidence(text);
+    assert.deepEqual(withParticipants, withoutParticipants, text);
+  }
+});
+
+test("Stage 1B: 'Арсенал Ф1(-1.5)' SPREAD evidence is unaffected even when 'Арсенал' IS a known participant name — TEAM_TOTAL reattribution only ever applies to a bare TOTALS remainder, never broadly reinterprets SPREAD", () => {
+  const evidence = extractMarketIntentEvidence("Арсенал Ф1(-1.5) ставка 10", ["Арсенал", "Челси"]);
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].classification.marketType, "SPREAD");
+  assert.equal(evidence[0].classification.participantName, "Арсенал");
+});

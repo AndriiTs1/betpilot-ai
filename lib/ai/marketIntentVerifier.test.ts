@@ -4,8 +4,8 @@ import { extractMarketIntentEvidence } from "./marketIntentEvidence";
 import { verifyMarketIntentClaim, type MarketIntentClaim } from "./marketIntentVerifier";
 import type { MarketIntentEvidence } from "./marketIntentEvidence";
 
-function verify(text: string, claim: MarketIntentClaim) {
-  return verifyMarketIntentClaim(claim, extractMarketIntentEvidence(text));
+function verify(text: string, claim: MarketIntentClaim, knownParticipantNames: readonly string[] = []) {
+  return verifyMarketIntentClaim(claim, extractMarketIntentEvidence(text, knownParticipantNames));
 }
 
 /* ============================================================================
@@ -207,4 +207,39 @@ test("EXPRESS limitation: this verifier has no leg-attribution concept — it ca
   const expressLikeText = "Арсенал Ф1(-1.5) ставка 10 Челси ТБ 2.5 ставка 10";
   const result = verify(expressLikeText, { marketType: "SPREAD", selectionType: "PARTICIPANT" });
   assert.equal(result.verdict, "AMBIGUOUS");
+});
+
+/* ============================================================================
+ * Individual Team Totals, Stage 1B — contradiction-safety proof. The
+ * evidence-side participant-attribution fix (marketIntentEvidence.ts) must
+ * never weaken a GENUINE TOTALS-vs-TEAM_TOTAL disagreement into a false
+ * CORROBORATED. This file's own comparison logic (verifyMarketIntentClaim)
+ * is unchanged by Stage 1B — these tests prove the fix at the layer below it
+ * (participant-aware evidence extraction) still produces a real conflict
+ * when a real conflict exists.
+ * ============================================================================ */
+
+test("Stage 1B contradiction safety: claim TEAM_TOTAL/Марсель/OVER against text that only ever says bare 'ТБ 2.5' (no participant anywhere) -> CONTRADICTED, never silently accepted", () => {
+  // Even with Марсель/Страсбург supplied as known participants, the text
+  // itself never names one next to ТБ — evidence correctly stays bare
+  // TOTALS (see marketIntentEvidence.test.ts's own "no participant
+  // fabrication" tests), which genuinely disagrees with a TEAM_TOTAL claim.
+  const result = verify("ТБ 2.5 ставка 10", { marketType: "TEAM_TOTAL", selectionType: "OVER" }, ["Марсель", "Страсбург"]);
+  assert.equal(result.verdict, "CONTRADICTED");
+  assert.equal(result.conflictingEvidence[0].classification.marketType, "TOTALS");
+  assert.equal(result.conflictingEvidence[0].classification.participantName, null);
+});
+
+test("Stage 1B contradiction safety: claim TOTALS/OVER against text that clearly names a team next to ТБ ('Марсель ТБ 2.5') -> CONTRADICTED — a claim that drops real team attribution the text actually has is still wrong", () => {
+  const result = verify("Марсель ТБ 2.5 ставка 10", { marketType: "TOTALS", selectionType: "OVER" }, ["Марсель", "Страсбург"]);
+  assert.equal(result.verdict, "CONTRADICTED");
+  assert.equal(result.conflictingEvidence[0].classification.marketType, "TEAM_TOTAL");
+  assert.equal(result.conflictingEvidence[0].classification.participantName, "Марсель");
+});
+
+test("Stage 1B contradiction safety: claim TEAM_TOTAL/Марсель/OVER against text with a genuine same-market direction conflict ('Марсель ТМ 2.5') -> CONTRADICTED, not deferred, not corroborated", () => {
+  const result = verify("Марсель ТМ 2.5 ставка 10", { marketType: "TEAM_TOTAL", selectionType: "OVER" }, ["Марсель", "Страсбург"]);
+  assert.equal(result.verdict, "CONTRADICTED");
+  assert.equal(result.conflictingEvidence[0].classification.marketType, "TEAM_TOTAL");
+  assert.equal(result.conflictingEvidence[0].classification.selectionType, "UNDER");
 });

@@ -358,17 +358,35 @@ test("classifyBettingSelectionText: an UNATTRIBUTED bare signed line ('-1.5' alo
 /* knownParticipantNames — closes the anchor gap for a concatenated string    */
 /* -------------------------------------------------------------------------- */
 
-test("classifyBettingSelectionText: 'Арсенал ТБ 2.5' with knownParticipantNames resolves to TOTALS/OVER/2.5 — the exact production regression case", () => {
+// Individual Team Totals, Stage 1 — CONTRACT CHANGE. These two tests
+// previously asserted "Арсенал ТБ 2.5"/"Арсенал ТМ 2.5" resolve to bare
+// MATCH TOTALS (TOTALS, participantName null), labeled "the exact production
+// regression case" — that was the correct fix for a DIFFERENT, older bug
+// (a team-name-glued shorthand token falling back to a fabricated
+// MONEYLINE_2WAY/PARTICIPANT reading instead of being recognized as a
+// totals token at all). It was never correct for what this exact shape
+// actually means: a bettor who types a known team's name directly in front
+// of ТБ/ТМ is asking for THAT TEAM's total, not the match's — and silently
+// discarding the team name here was the verified root cause of the real
+// production bug "Marseille Over 1.5 -> Not available" (it caused the
+// selection to be queried as a match-total against the wrong line/market
+// entirely, rather than the correct team-total market). This is a
+// deliberate, intentional behavior change, not a regression: the contract
+// is now TEAM_TOTAL + the stripped participant, matching what
+// "Марсель ИТБ 2.5" already resolves to via the dedicated ИТБ/ИТМ token.
+test("classifyBettingSelectionText: 'Арсенал ТБ 2.5' with knownParticipantNames resolves to TEAM_TOTAL/Арсенал/OVER/2.5 (was TOTALS pre-Stage-1; see comment above)", () => {
   const result = classifyBettingSelectionText("Арсенал ТБ 2.5", ["Арсенал"]);
-  assert.equal(result.marketType, "TOTALS");
+  assert.equal(result.marketType, "TEAM_TOTAL");
   assert.equal(result.selectionType, "OVER");
+  assert.equal(result.participantName, "Арсенал");
   assert.equal(result.embeddedLine, "2.5");
 });
 
-test("classifyBettingSelectionText: 'Арсенал ТМ 2.5' with knownParticipantNames resolves to TOTALS/UNDER/2.5", () => {
+test("classifyBettingSelectionText: 'Арсенал ТМ 2.5' with knownParticipantNames resolves to TEAM_TOTAL/Арсенал/UNDER/2.5 (was TOTALS pre-Stage-1; see comment above)", () => {
   const result = classifyBettingSelectionText("Арсенал ТМ 2.5", ["Арсенал"]);
-  assert.equal(result.marketType, "TOTALS");
+  assert.equal(result.marketType, "TEAM_TOTAL");
   assert.equal(result.selectionType, "UNDER");
+  assert.equal(result.participantName, "Арсенал");
   assert.equal(result.embeddedLine, "2.5");
 });
 
@@ -392,6 +410,111 @@ test("classifyBettingSelectionText: knownParticipantNames does not falsely strip
   // must not be stripped, so this stays an ordinary (unresolved) fallback.
   assert.equal(result.marketType, "MONEYLINE_2WAY");
   assert.equal(result.selectionType, "PARTICIPANT");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Individual Team Totals, Stage 1 — deterministic input classification only. */
+/* Full RU/EN coverage for the required MATCH TOTAL vs TEAM TOTAL contract:   */
+/* explicit participant + ТБ/ТМ/Over/Under -> TEAM_TOTAL, participant         */
+/* attached, exact line preserved; no participant -> stays MATCH TOTALS;      */
+/* the dedicated ИТБ/ИТМ token continues to work unchanged (already correct  */
+/* before this stage — matchTeamTotal recognizes it directly, no             */
+/* knownParticipantNames needed); both event participants (Marseille AND     */
+/* Strasbourg) are proven independently, never cross-attributed.             */
+/* -------------------------------------------------------------------------- */
+
+const MARSEILLE_STRASBOURG = ["Марсель", "Страсбург"];
+
+test("Individual Team Totals Stage 1 (1): 'Марсель ТБ 1.5' -> TEAM_TOTAL/Марсель/OVER/1.5", () => {
+  const result = classifyBettingSelectionText("Марсель ТБ 1.5", MARSEILLE_STRASBOURG);
+  assert.equal(result.marketType, "TEAM_TOTAL");
+  assert.equal(result.selectionType, "OVER");
+  assert.equal(result.participantName, "Марсель");
+  assert.equal(result.embeddedLine, "1.5");
+});
+
+test("Individual Team Totals Stage 1 (2): 'Марсель ТМ 2.5' -> TEAM_TOTAL/Марсель/UNDER/2.5", () => {
+  const result = classifyBettingSelectionText("Марсель ТМ 2.5", MARSEILLE_STRASBOURG);
+  assert.equal(result.marketType, "TEAM_TOTAL");
+  assert.equal(result.selectionType, "UNDER");
+  assert.equal(result.participantName, "Марсель");
+  assert.equal(result.embeddedLine, "2.5");
+});
+
+test("Individual Team Totals Stage 1 (3): 'Marseille Over 1.5' -> TEAM_TOTAL/Marseille/OVER/1.5 (the exact verified production bug input)", () => {
+  const result = classifyBettingSelectionText("Marseille Over 1.5", ["Marseille", "Strasbourg"]);
+  assert.equal(result.marketType, "TEAM_TOTAL");
+  assert.equal(result.selectionType, "OVER");
+  assert.equal(result.participantName, "Marseille");
+  assert.equal(result.embeddedLine, "1.5");
+});
+
+test("Individual Team Totals Stage 1 (4): 'Marseille Under 2.5' -> TEAM_TOTAL/Marseille/UNDER/2.5", () => {
+  const result = classifyBettingSelectionText("Marseille Under 2.5", ["Marseille", "Strasbourg"]);
+  assert.equal(result.marketType, "TEAM_TOTAL");
+  assert.equal(result.selectionType, "UNDER");
+  assert.equal(result.participantName, "Marseille");
+  assert.equal(result.embeddedLine, "2.5");
+});
+
+test("Individual Team Totals Stage 1 (5): 'Страсбург ТБ 1.5' -> TEAM_TOTAL/Страсбург/OVER/1.5 (the OTHER team in the same event — never cross-attributed to Марсель)", () => {
+  const result = classifyBettingSelectionText("Страсбург ТБ 1.5", MARSEILLE_STRASBOURG);
+  assert.equal(result.marketType, "TEAM_TOTAL");
+  assert.equal(result.selectionType, "OVER");
+  assert.equal(result.participantName, "Страсбург");
+  assert.equal(result.embeddedLine, "1.5");
+});
+
+test("Individual Team Totals Stage 1 (6): 'Страсбург ТМ 2.5' -> TEAM_TOTAL/Страсбург/UNDER/2.5", () => {
+  const result = classifyBettingSelectionText("Страсбург ТМ 2.5", MARSEILLE_STRASBOURG);
+  assert.equal(result.marketType, "TEAM_TOTAL");
+  assert.equal(result.selectionType, "UNDER");
+  assert.equal(result.participantName, "Страсбург");
+  assert.equal(result.embeddedLine, "2.5");
+});
+
+test("Individual Team Totals Stage 1 (7): 'Марсель ИТБ 1.5' -> TEAM_TOTAL/Марсель/OVER/1.5 (dedicated token, already worked before Stage 1 — no regression)", () => {
+  const result = classifyBettingSelectionText("Марсель ИТБ 1.5", MARSEILLE_STRASBOURG);
+  assert.equal(result.marketType, "TEAM_TOTAL");
+  assert.equal(result.selectionType, "OVER");
+  assert.equal(result.participantName, "Марсель");
+  assert.equal(result.embeddedLine, "1.5");
+});
+
+test("Individual Team Totals Stage 1 (8): 'Марсель ИТМ 2.5' -> TEAM_TOTAL/Марсель/UNDER/2.5 (dedicated token, already worked before Stage 1 — no regression)", () => {
+  const result = classifyBettingSelectionText("Марсель ИТМ 2.5", MARSEILLE_STRASBOURG);
+  assert.equal(result.marketType, "TEAM_TOTAL");
+  assert.equal(result.selectionType, "UNDER");
+  assert.equal(result.participantName, "Марсель");
+  assert.equal(result.embeddedLine, "2.5");
+});
+
+test("Individual Team Totals Stage 1 (9): bare 'ТБ 2.5' (no participant in text) remains MATCH TOTALS — never invents a participant even when knownParticipantNames is non-empty", () => {
+  const result = classifyBettingSelectionText("ТБ 2.5", MARSEILLE_STRASBOURG);
+  assert.equal(result.marketType, "TOTALS");
+  assert.equal(result.selectionType, "OVER");
+  assert.equal(result.participantName, null);
+  assert.equal(result.embeddedLine, "2.5");
+});
+
+test("Individual Team Totals Stage 1 (10): bare 'ТМ 2.5' (no participant in text) remains MATCH TOTALS — never invents a participant even when knownParticipantNames is non-empty", () => {
+  const result = classifyBettingSelectionText("ТМ 2.5", MARSEILLE_STRASBOURG);
+  assert.equal(result.marketType, "TOTALS");
+  assert.equal(result.selectionType, "UNDER");
+  assert.equal(result.participantName, null);
+  assert.equal(result.embeddedLine, "2.5");
+});
+
+test("Individual Team Totals Stage 1 (11): exact whole-number line '2' is never altered — 'Марсель ТБ 2' keeps embeddedLine '2', not '2.0'/'2.5'", () => {
+  const result = classifyBettingSelectionText("Марсель ТБ 2", MARSEILLE_STRASBOURG);
+  assert.equal(result.marketType, "TEAM_TOTAL");
+  assert.equal(result.participantName, "Марсель");
+  assert.equal(result.embeddedLine, "2");
+});
+
+test("Individual Team Totals Stage 1 (12): decimal line '1.5' is never altered — 'Марсель ТБ 1.5' keeps embeddedLine '1.5' exactly", () => {
+  const result = classifyBettingSelectionText("Марсель ТБ 1.5", MARSEILLE_STRASBOURG);
+  assert.equal(result.embeddedLine, "1.5");
 });
 
 /* -------------------------------------------------------------------------- */
@@ -508,10 +631,11 @@ test("classifyBettingSelectionText: adversarial forms still lose nothing — the
   }
 });
 
-test("classifyBettingSelectionText: BA-2A concatenated-string production regression is unaffected by the widened separator grammar", () => {
+test("classifyBettingSelectionText: BA-2A concatenated-string case is unaffected by the widened separator grammar (Individual Team Totals Stage 1 — now resolves to TEAM_TOTAL/Арсенал, not bare TOTALS; see the dedicated contract-change tests above)", () => {
   const result = classifyBettingSelectionText("Арсенал ТБ 2.5", ["Арсенал"]);
-  assert.equal(result.marketType, "TOTALS");
+  assert.equal(result.marketType, "TEAM_TOTAL");
   assert.equal(result.selectionType, "OVER");
+  assert.equal(result.participantName, "Арсенал");
   assert.equal(result.embeddedLine, "2.5");
 });
 
@@ -1079,9 +1203,13 @@ test("classifyBettingSelectionTextWithMarketHint: knownParticipantNames still ap
   // "Арсенал ТБ 2.5" arriving as one concatenated selection field, "Арсенал"
   // known from the event split — the participant-stripping loop runs
   // BEFORE this function's own market-hint fallback, unaffected by it.
+  // Individual Team Totals, Stage 1 — resolves to TEAM_TOTAL/Арсенал now,
+  // not bare TOTALS (see the classifyBettingSelectionText tests above for
+  // the full contract-change rationale).
   const result = classifyBettingSelectionTextWithMarketHint("Арсенал ТБ 2.5", null, ["Арсенал", "Челси"]);
-  assert.equal(result.marketType, "TOTALS");
+  assert.equal(result.marketType, "TEAM_TOTAL");
   assert.equal(result.selectionType, "OVER");
+  assert.equal(result.participantName, "Арсенал");
   assert.equal(result.embeddedLine, "2.5");
 });
 

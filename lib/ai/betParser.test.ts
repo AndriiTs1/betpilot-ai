@@ -1277,6 +1277,75 @@ test("BA-2D Step 5 (7): correct UNDER AI output against 'ТМ 3' -> CORROBORATED
 });
 
 /* -------------------------------------------------------------------------- */
+/* Individual Team Totals, Stage 1B — end-to-end proof at the ACTUAL parse    */
+/* entry point (parseBetSlipMessage). Requirement 11: the real                */
+/* betDraftMapper/parser path must no longer reject "Марсель ТБ 2.5" /        */
+/* "Marseille Over 1.5" for the wrong TOTALS-vs-TEAM_TOTAL contradiction      */
+/* reason. This is Stage 1's own previously-surfaced gap, now closed by the   */
+/* evidence-side participant-attribution fix (marketIntentEvidence.ts) —     */
+/* NOT by weakening isUnreliableMarketClaim/isDeferrableLineMarketClaim.      */
+/* -------------------------------------------------------------------------- */
+
+test("Individual Team Totals Stage 1B: 'Марсель ТБ 2.5 ставка 10' — correct AI output (TEAM_TOTAL, via selection text) is accepted, no market_mismatch", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({ event: "Марсель vs Страсбург", market: null, selection: "Марсель ТБ 2.5", line: "2.5", stake: 10 }),
+    );
+
+  const result = await parseBetSlipMessage("Марсель ТБ 2.5 ставка 10", "CHAT");
+
+  assert.equal(result.valid, true);
+});
+
+test("Individual Team Totals Stage 1B: 'Marseille Over 1.5 stake 5' — the exact verified production bug input — is accepted end-to-end, no market_mismatch", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({ event: "Marseille vs Strasbourg", market: null, selection: "Marseille Over 1.5", line: "1.5", stake: 5 }),
+    );
+
+  const result = await parseBetSlipMessage("Marseille Over 1.5 stake 5", "CHAT");
+
+  assert.equal(result.valid, true);
+});
+
+test("Individual Team Totals Stage 1B: 'Страсбург ТМ 2.5 ставка 10' (the OTHER team, UNDER direction) is accepted end-to-end", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({ event: "Марсель vs Страсбург", market: null, selection: "Страсбург ТМ 2.5", line: "2.5", stake: 10 }),
+    );
+
+  const result = await parseBetSlipMessage("Страсбург ТМ 2.5 ставка 10", "CHAT");
+
+  assert.equal(result.valid, true);
+});
+
+test("Individual Team Totals Stage 1B: bare 'ТБ 2.5 ставка 10' (no participant, real two-team event) still passes as MATCH TOTALS — unaffected by the fix", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Марсель vs Страсбург", market: "Totals", selection: "Over", line: "2.5", stake: 10 }));
+
+  const result = await parseBetSlipMessage("ТБ 2.5 ставка 10", "CHAT");
+
+  assert.equal(result.valid, true);
+});
+
+test("Individual Team Totals Stage 1B: a GENUINE direction conflict for a team total (text says 'Марсель ТМ 2.5', AI claims Марсель OVER) is still rejected, market_mismatch — the fix never weakens real contradiction protection", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse(
+      "extract_bet",
+      singleToolInput({ event: "Марсель vs Страсбург", market: null, selection: "Марсель ТБ 2.5", line: "2.5", stake: 10 }),
+    );
+
+  const result = await parseBetSlipMessage("Марсель ТМ 2.5 ставка 10", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+/* -------------------------------------------------------------------------- */
 /* 8-12. DRAW / 1X2 — RU / UA / EN, and correct winner phrasing              */
 /* -------------------------------------------------------------------------- */
 

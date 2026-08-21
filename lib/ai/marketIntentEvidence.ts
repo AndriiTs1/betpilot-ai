@@ -164,7 +164,12 @@ interface WindowMatch {
 // would include an already-claimed index, regardless of size-ordering
 // preference. See this file's own extractMarketIntentEvidence() comment
 // for that full walk-through.
-function findBackwardMatch(tokens: readonly Token[], endIndex: number, consumed: ReadonlySet<number>): WindowMatch | null {
+function findBackwardMatch(
+  tokens: readonly Token[],
+  endIndex: number,
+  consumed: ReadonlySet<number>,
+  knownParticipantNames: readonly string[],
+): WindowMatch | null {
   if (consumed.has(endIndex)) return null;
 
   for (let windowSize = MAX_WINDOW_TOKENS; windowSize >= 1; windowSize -= 1) {
@@ -186,7 +191,19 @@ function findBackwardMatch(tokens: readonly Token[], endIndex: number, consumed:
 
     const windowTokens = tokens.slice(startIndex, endIndex + 1);
     const windowText = windowTokens.map((token) => token.text).join(" ");
-    const classified = classifyBettingSelectionText(windowText);
+    // Individual Team Totals, Stage 1B — the SAME knownParticipantNames the
+    // caller already passes to the claim-side classifier
+    // (classifyMarketIntentClaim in betDraftMapper.ts, and
+    // legacySelectionToCanonicalRequest for the real provider request) is
+    // now also threaded into this evidence-side call — one shared
+    // deterministic classifier, one shared participant-attribution rule,
+    // never a second independently-maintained TEAM_TOTAL grammar here. This
+    // is what lets a window like "Марсель ТБ 2.5" resolve to TEAM_TOTAL
+    // evidence (not bare TOTALS) whenever the caller knows the event's real
+    // participant names — and, symmetrically, changes nothing for a caller
+    // that passes none (defaults to `[]`, byte-for-byte the same behavior
+    // as before this stage — see this function's own tests).
+    const classified = classifyBettingSelectionText(windowText, knownParticipantNames);
     if (isGenericFallback(classified, windowText)) continue;
 
     const consumedIndices: number[] = [];
@@ -226,7 +243,20 @@ function isBareDigitWindow(match: WindowMatch): boolean {
 // order. Multiple independent occurrences are always preserved separately
 // (e.g. "ТБ 2.5 ТМ 3.5" -> two entries) — this function makes no
 // contradiction/ambiguity decision of its own; that is Step 3's job.
-export function extractMarketIntentEvidence(originalText: string): readonly MarketIntentEvidence[] {
+export function extractMarketIntentEvidence(
+  originalText: string,
+  // Individual Team Totals, Stage 1B — optional, empty by default so every
+  // existing caller that never passes this (and every test written before
+  // this stage) stays byte-for-byte unaffected. When supplied (the event's
+  // real home/away names, the exact same list the claim side already
+  // derives from raw.event via splitDraftEventParticipants — see
+  // betDraftMapper.ts's computeMarketIntentObservations), a window like
+  // "Марсель ТБ 2.5" or "Marseille Over 1.5" can be correctly attributed to
+  // TEAM_TOTAL instead of being read as bare match TOTALS. Never invents a
+  // participant of its own — this is exactly classifyBettingSelectionText's
+  // own existing knownParticipantNames contract, reused unmodified.
+  knownParticipantNames: readonly string[] = [],
+): readonly MarketIntentEvidence[] {
   const tokens = tokenize(originalText);
   // MASTER STAGE M3, Phase 2 — pre-seed `consumed` with every token that is
   // part of a detected UI-control row (quick-add/quick-stake presets, info
@@ -258,7 +288,7 @@ export function extractMarketIntentEvidence(originalText: string): readonly Mark
   // correctly "2.5") before ever separately considering "ТБ" alone.
   for (let i = 0; i < tokens.length; i += 1) {
     if (!isPureNumberToken(tokens[i].text)) continue;
-    const match = findBackwardMatch(tokens, i, consumed);
+    const match = findBackwardMatch(tokens, i, consumed, knownParticipantNames);
     if (!match) continue;
     evidence.push({
       classification: match.classification,
@@ -289,7 +319,7 @@ export function extractMarketIntentEvidence(originalText: string): readonly Mark
   // fabricated result.
   for (let i = 0; i < tokens.length; i += 1) {
     if (consumed.has(i)) continue;
-    const match = findBackwardMatch(tokens, i, consumed);
+    const match = findBackwardMatch(tokens, i, consumed, knownParticipantNames);
     if (!match) continue;
     evidence.push({
       classification: match.classification,

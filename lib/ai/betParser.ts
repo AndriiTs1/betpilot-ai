@@ -638,6 +638,27 @@ function classifyReconcilable1X2Mismatch(
 // to exactly the four claim shapes this stage's own brief names as
 // supported — every other market/selection combination is untouched and
 // still rejected immediately, exactly as before.
+// Individual Team Totals, Stage 1B — TEAM_TOTAL joins TOTALS/SPREAD here,
+// for the identical semantic reason TOTALS was already included, not merely
+// to unblock a failing test. Once Stage 1B's evidence-side fix (this file's
+// own MarketIntentObservation now reads TEAM_TOTAL evidence correctly, via
+// marketIntentEvidence.ts/betDraftMapper.ts) is in place, a CORRECTLY
+// classified TEAM_TOTAL claim (e.g. "Марсель ТБ 2.5") already CORROBORATES
+// against matching TEAM_TOTAL evidence — it never reaches this function at
+// all, since isDeferrableLineMarketClaim only ever runs on CONTRADICTED/
+// AMBIGUOUS verdicts. What remains, for TEAM_TOTAL exactly as for TOTALS, is
+// the CROSS-market-type-noise case this function exists to rescue: a
+// genuinely correct TEAM_TOTAL claim sitting next to unrelated evidence
+// elsewhere in the same message/screenshot (a quick-add control row, a
+// different market's token) that happens to classify as some OTHER
+// marketType — the exact production incident (M1.2/M3 Phase 1/2) that
+// motivated this whole mechanism for TOTALS/SPREAD in the first place.
+// Excluding TEAM_TOTAL here would leave that identical false-rejection risk
+// unfixed for team totals alone, for no principled reason — the shared
+// hasSameMarketTypeConflict check below still rejects a GENUINE same-market
+// disagreement (e.g. claimed OVER, but the text's own TEAM_TOTAL evidence is
+// UNDER) exactly as it already does for TOTALS/SPREAD; only the cross-market
+// noise case is ever deferred.
 function isDeferrableLineMarketClaim(observation: MarketIntentObservation, rawSelection: RawBetSelectionFields | undefined): boolean {
   const verdict = observation.verification.verdict;
   if (verdict !== "CONTRADICTED" && verdict !== "AMBIGUOUS") return false;
@@ -645,16 +666,19 @@ function isDeferrableLineMarketClaim(observation: MarketIntentObservation, rawSe
   const { marketType, selectionType } = observation.claim;
   const isSupportedShape =
     (marketType === "TOTALS" && (selectionType === "OVER" || selectionType === "UNDER")) ||
+    (marketType === "TEAM_TOTAL" && (selectionType === "OVER" || selectionType === "UNDER")) ||
     (marketType === "SPREAD" && selectionType === "PARTICIPANT");
   if (!isSupportedShape) return false;
 
-  // Structurally complete: a claim with no line, or (for SPREAD) no
-  // participant text, is not a "one concrete canonical claim" — it is
-  // incomplete, and incompleteness is never something provider verification
-  // can resolve on its own. Still rejected immediately, unchanged.
+  // Structurally complete: a claim with no line, or (for SPREAD/TEAM_TOTAL,
+  // both of which require a participant — lib/odds/domain.ts's
+  // validateCanonicalSelection) no selection text to carry that participant
+  // in, is not a "one concrete canonical claim" — it is incomplete, and
+  // incompleteness is never something provider verification can resolve on
+  // its own. Still rejected immediately, unchanged.
   const claimedLine = rawSelection?.line?.trim();
   if (!claimedLine) return false;
-  if (marketType === "SPREAD" && !rawSelection?.selection?.trim()) return false;
+  if ((marketType === "SPREAD" || marketType === "TEAM_TOTAL") && !rawSelection?.selection?.trim()) return false;
 
   // Only CROSS-market-type ambiguity is safe to defer — proven real by a
   // production incident (M1.2/M3 Phase 1/2: a quick-add control row

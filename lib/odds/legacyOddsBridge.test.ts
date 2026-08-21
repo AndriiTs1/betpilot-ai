@@ -706,11 +706,114 @@ test("request mapping: DRAW ('X'/'Draw'/'Ничья') is completely unaffected b
   }
 });
 
-test("request mapping: team totals ('Arsenal Over 1.5') are not classified as TOTALS yet — falls back to PARTICIPANT", () => {
+test("request mapping: 'Arsenal Over 1.5' with NO matching event participant (generic 'A vs B') still falls back to PARTICIPANT — team-total reattribution only ever fires for a name the event actually knows", () => {
+  // Unlike the Individual Team Totals Stage 1 tests below, this event's
+  // participants ("A", "B") never match "Arsenal" as a whitespace-bounded
+  // prefix, so the known-participant-prefix loop never fires here at all —
+  // this exercises the unrelated final lossless PARTICIPANT fallback, not
+  // team-total classification, and is unaffected by Stage 1.
   const request = legacySelectionToCanonicalRequest({ sport: "Football", event: "A vs B", selection: "Arsenal Over 1.5", submittedOdds: 1.9 });
 
   assert.notEqual(request.selection.marketType, "TOTALS");
+  assert.notEqual(request.selection.marketType, "TEAM_TOTAL");
   assert.equal(request.selection.selectionType, "PARTICIPANT");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Individual Team Totals, Stage 1 — production bridge coverage. Proves the   */
+/* REAL request-construction path (legacySelectionToCanonicalRequest, the     */
+/* function buildBetSlipPreview.ts actually calls) delivers TEAM_TOTAL +      */
+/* participant + OVER/UNDER + the exact, unaltered line to                   */
+/* VerifySelectionRequest, for BOTH teams of a real event — this is the       */
+/* verified production bug's own fixture (Marseille — Strasbourg,            */
+/* "Marseille Over 1.5" -> "Not available"): before Stage 1, this same call   */
+/* produced marketType "TOTALS" with participant undefined (a match-total     */
+/* query against the wrong market/line); it now produces TEAM_TOTAL with the  */
+/* correct participant attached. No provider adapter is wired up for          */
+/* TEAM_TOTAL yet (later stage) — this only proves the request the provider   */
+/* WOULD receive is now correct.                                              */
+/* -------------------------------------------------------------------------- */
+
+test("Individual Team Totals Stage 1: 'Marseille Over 1.5' against the real Marseille — Strasbourg event -> TEAM_TOTAL/Marseille/OVER/1.5 (the exact verified production bug fixture)", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Marseille vs Strasbourg",
+    selection: "Marseille Over 1.5",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.selectionType, "OVER");
+  assert.equal(request.selection.participant?.name, "Marseille");
+  assert.equal(request.selection.line, "1.5");
+});
+
+test("Individual Team Totals Stage 1: 'Strasbourg Under 2.5' against the SAME event -> TEAM_TOTAL/Strasbourg/UNDER/2.5 — the other team, never cross-attributed to Marseille", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Marseille vs Strasbourg",
+    selection: "Strasbourg Under 2.5",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.selectionType, "UNDER");
+  assert.equal(request.selection.participant?.name, "Strasbourg");
+  assert.equal(request.selection.line, "2.5");
+});
+
+test("Individual Team Totals Stage 1: RU 'Марсель ТБ 1.5' against the real event -> TEAM_TOTAL/Марсель/OVER/1.5", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Марсель vs Страсбург",
+    selection: "Марсель ТБ 1.5",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.selectionType, "OVER");
+  assert.equal(request.selection.participant?.name, "Марсель");
+  assert.equal(request.selection.line, "1.5");
+});
+
+test("Individual Team Totals Stage 1: RU 'Страсбург ТМ 2.5' against the real event -> TEAM_TOTAL/Страсбург/UNDER/2.5", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Марсель vs Страсбург",
+    selection: "Страсбург ТМ 2.5",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.selectionType, "UNDER");
+  assert.equal(request.selection.participant?.name, "Страсбург");
+  assert.equal(request.selection.line, "2.5");
+});
+
+test("Individual Team Totals Stage 1: bare 'ТБ 2.5' against the real event -> stays MATCH TOTALS, no participant invented", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Марсель vs Страсбург",
+    selection: "ТБ 2.5",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.selectionType, "OVER");
+  assert.equal(request.selection.participant, undefined);
+  assert.equal(request.selection.line, "2.5");
+});
+
+test("Individual Team Totals Stage 1: whole-number line 'Марсель ТБ 2' is never altered to '2.0' or any other value", () => {
+  const request = legacySelectionToCanonicalRequest({
+    sport: "Football",
+    event: "Марсель vs Страсбург",
+    selection: "Марсель ТБ 2",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.line, "2");
 });
 
 test("request mapping: spreads/handicaps ('-1.5') are not classified as TOTALS yet — falls back to PARTICIPANT", () => {
@@ -820,20 +923,39 @@ test("H3 request mapping: existing markets (MONEYLINE/TOTALS) and existing Ф1 s
   const win = legacySelectionToCanonicalRequest({ sport: "Football", event: "Арсенал vs Челси", selection: "Арсенал победа", submittedOdds: 1.9 });
   assert.equal(win.selection.marketType, "MONEYLINE_2WAY");
 
+  // Individual Team Totals, Stage 1 — "Арсенал ТБ 2.5" against a real event
+  // that knows "Арсенал" now resolves to TEAM_TOTAL (participant attached),
+  // not bare TOTALS; see the dedicated Stage 1 tests below for the full
+  // contract-change rationale. A truly unattributed bare "ТБ 2.5" (no known
+  // participant prefix) still resolves to plain TOTALS — proven separately.
   const totals = legacySelectionToCanonicalRequest({ sport: "Football", event: "Арсенал vs Челси", selection: "Арсенал ТБ 2.5", submittedOdds: 1.9 });
-  assert.equal(totals.selection.marketType, "TOTALS");
+  assert.equal(totals.selection.marketType, "TEAM_TOTAL");
+  assert.equal(totals.selection.participant?.name, "Арсенал");
 
   const shortForm = legacySelectionToCanonicalRequest({ sport: "Football", event: "Арсенал vs Челси", selection: "Арсенал Ф1(-1.5)", submittedOdds: 1.9 });
   assert.equal(shortForm.selection.marketType, "SPREAD");
   assert.equal(shortForm.selection.participant?.name, "Арсенал");
 });
 
-test("request mapping: a shorthand token concatenated with a team name (no separate event/selection split) still classifies correctly via the event's own split participants — the exact production regression case", () => {
+test("request mapping: a shorthand token concatenated with a team name (no separate event/selection split) still classifies correctly via the event's own split participants — the exact anchor-gap regression case (Individual Team Totals Stage 1 — now TEAM_TOTAL, not bare TOTALS; see comment)", () => {
   // The event string is split into participants by legacyEventToCanonical
   // BEFORE classification, so "Арсенал" is already a knownParticipantName
   // by the time the selection text is classified — closing the anchor gap
   // that let "Арсенал ТБ 2.5" (arriving as one concatenated field) fall
   // back to a fabricated MONEYLINE PARTICIPANT guess.
+  //
+  // Individual Team Totals Stage 1 — CONTRACT CHANGE. This test previously
+  // asserted the recovered classification is bare MATCH TOTALS
+  // (marketType "TOTALS", no participant assertion). That was correct for
+  // the anchor-gap bug this test is named for (recognizing ТБ/ТМ as a totals
+  // token AT ALL, instead of a fabricated MONEYLINE PARTICIPANT guess), but
+  // it was never the right FINAL answer for what "Арсенал ТБ 2.5" means: a
+  // named team directly in front of ТБ is that team's own total, not the
+  // match's. This is the verified root cause of the real production bug
+  // "Marseille Over 1.5 -> Not available" (queried as a match total against
+  // the wrong market/line). Now correctly resolves to TEAM_TOTAL with the
+  // participant attached — same fix as lib/odds/shorthandClassifier.ts's own
+  // updated tests.
   const request = legacySelectionToCanonicalRequest({
     sport: "Football",
     event: "Арсенал vs Челси",
@@ -841,8 +963,9 @@ test("request mapping: a shorthand token concatenated with a team name (no separ
     submittedOdds: 1.9,
   });
 
-  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
   assert.equal(request.selection.selectionType, "OVER");
+  assert.equal(request.selection.participant?.name, "Арсенал");
   assert.equal(request.selection.line, "2.5");
 });
 

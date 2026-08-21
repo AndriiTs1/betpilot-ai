@@ -752,7 +752,7 @@ test("BA-2D Step 4: AI drops the totals shape ('Arsenal' alone) against 'Арс�
   assert.equal(observations[0].verification.conflictingEvidence[0]?.classification.marketType, "TOTALS");
 });
 
-test("BA-2D Step 4: correct TOTALS AI output ('Арсенал ТБ 2.5') -> CORROBORATED", () => {
+test("BA-2D Step 4: 'Арсенал ТБ 2.5' -> claim TEAM_TOTAL/Арсенал, evidence ALSO TEAM_TOTAL/Арсенал (Individual Team Totals Stage 1B) -> CORROBORATED", () => {
   // Unlike SPREAD_TOKEN_PARTICIPANT_PATTERN (which has its own built-in lazy
   // prefix match), shorthandClassifier.ts's TOTALS pattern requires the
   // string to literally START with the token — stripping a leading "Арсенал
@@ -763,12 +763,72 @@ test("BA-2D Step 4: correct TOTALS AI output ('Арсенал ТБ 2.5') -> CORR
   // generic PARTICIPANT fallback instead — a real, pre-existing classifier
   // limitation (not something BA-2D introduces or should paper over), so
   // this test uses a realistic two-team event, exactly like production.
+  //
+  // Individual Team Totals — history of this test across two stages:
+  //   Pre-Stage-1:  claim TOTALS,     verdict CORROBORATED (WRONG: team
+  //                 attribution silently discarded — the verified root
+  //                 cause of "Marseille Over 1.5 -> Not available").
+  //   Stage 1:      claim TEAM_TOTAL, verdict CONTRADICTED (a real, surfaced
+  //                 gap: the evidence side — lib/ai/marketIntentEvidence.ts —
+  //                 didn't yet know the event's participant names, so it
+  //                 still read the same text as bare TOTALS; claim and
+  //                 evidence disagreed).
+  //   Stage 1B (this test, current): computeMarketIntentObservations
+  //   (betDraftMapper.ts) now threads the SAME participants list into
+  //   extractMarketIntentEvidence that it already used to build the claim —
+  //   one shared classifier, one shared participant list, reused rather than
+  //   duplicated. The evidence side now ALSO reads TEAM_TOTAL/Арсенал for
+  //   this text, so claim and evidence agree again -> CORROBORATED, exactly
+  //   as a correctly-parsed team-total claim should be. This test never even
+  //   reaches betParser.ts's isDeferrableLineMarketClaim deferral path — it
+  //   is fully resolved one layer earlier, by correct evidence extraction.
   const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Арсенал vs Ковентри", selection: "Арсенал ТБ 2.5", odds: null })] };
   const { observations } = observeMarket(raw, "Арсенал ТБ 2.5 ставка 10");
 
-  assert.equal(observations[0].claim.marketType, "TOTALS");
+  assert.equal(observations[0].claim.marketType, "TEAM_TOTAL");
   assert.equal(observations[0].claim.selectionType, "OVER");
   assert.equal(observations[0].verification.verdict, "CORROBORATED");
+  assert.equal(observations[0].verification.supportingEvidence[0]?.classification.marketType, "TEAM_TOTAL");
+  assert.equal(observations[0].verification.supportingEvidence[0]?.classification.participantName, "Арсенал");
+});
+
+test("Individual Team Totals Stage 1B: 'Marseille Over 1.5' against the real Marseille — Strasbourg event -> claim and evidence both TEAM_TOTAL/Marseille -> CORROBORATED (the exact verified production bug input)", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 5,
+    selections: [football({ event: "Marseille vs Strasbourg", selection: "Marseille Over 1.5", odds: null })],
+  };
+  const { observations } = observeMarket(raw, "Marseille Over 1.5 stake 5");
+
+  assert.equal(observations[0].claim.marketType, "TEAM_TOTAL");
+  assert.equal(observations[0].claim.selectionType, "OVER");
+  assert.equal(observations[0].verification.verdict, "CORROBORATED");
+});
+
+test("Individual Team Totals Stage 1B: bare 'ТБ 2.5' against a real two-team event -> claim and evidence both stay MATCH TOTALS, no participant fabricated on either side -> CORROBORATED", () => {
+  const raw: RawBetSlipFields = { type: "SINGLE", stake: 10, selections: [football({ event: "Арсенал vs Ковентри", selection: "ТБ 2.5", odds: null })] };
+  const { observations } = observeMarket(raw, "ТБ 2.5 ставка 10");
+
+  assert.equal(observations[0].claim.marketType, "TOTALS");
+  assert.equal(observations[0].verification.verdict, "CORROBORATED");
+});
+
+test("Individual Team Totals Stage 1B: a GENUINE same-market-type contradiction (claim says Марсель OVER, text says Марсель UNDER) is still CONTRADICTED — evidence-layer fix never weakens real contradiction protection", () => {
+  const raw: RawBetSlipFields = {
+    type: "SINGLE",
+    stake: 10,
+    selections: [football({ event: "Марсель vs Страсбург", selection: "Марсель ТБ 2.5", odds: null })],
+  };
+  // originalText disagrees with raw.selection: the player's own message says
+  // ТМ (UNDER), not ТБ (OVER) — a genuine direction conflict, not evidence-
+  // layer noise. Must still be reported as CONTRADICTED.
+  const { observations } = observeMarket(raw, "Марсель ТМ 2.5 ставка 10");
+
+  assert.equal(observations[0].claim.marketType, "TEAM_TOTAL");
+  assert.equal(observations[0].claim.selectionType, "OVER");
+  assert.equal(observations[0].verification.verdict, "CONTRADICTED");
+  assert.equal(observations[0].verification.conflictingEvidence[0]?.classification.marketType, "TEAM_TOTAL");
+  assert.equal(observations[0].verification.conflictingEvidence[0]?.classification.selectionType, "UNDER");
 });
 
 /* -------------------------------------------------------------------------- */
