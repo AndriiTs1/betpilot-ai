@@ -74,6 +74,25 @@ test("mapper: missing canonicalMarketType -> null", () => {
   assert.equal(mapSingleBetToCanonicalSelection(fields({ canonicalMarketType: null })), null);
 });
 
+// Individual Team Totals, Stage 4 — no changes were needed to this mapper
+// for TEAM_TOTAL: isMarketType/isSelectionType already accept it (Phase 0),
+// and canonicalParticipant/line are already fully generic fields.
+test("mapper: TEAM_TOTAL maps correctly — marketType, participant, and line all carried through", () => {
+  const selection = mapSingleBetToCanonicalSelection(
+    fields({
+      canonicalMarketType: "TEAM_TOTAL",
+      canonicalSelectionType: "OVER",
+      canonicalParticipant: "Marseille",
+      line: new Prisma.Decimal("1.5"),
+    }),
+  );
+  assert.ok(selection);
+  assert.equal(selection?.marketType, "TEAM_TOTAL");
+  assert.equal(selection?.selectionType, "OVER");
+  assert.deepEqual(selection?.participant, { name: "Marseille" });
+  assert.equal(selection?.line, "1.5");
+});
+
 test("mapper: invalid (unrecognized) canonicalMarketType -> null", () => {
   assert.equal(mapSingleBetToCanonicalSelection(fields({ canonicalMarketType: "NOT_A_REAL_MARKET" })), null);
 });

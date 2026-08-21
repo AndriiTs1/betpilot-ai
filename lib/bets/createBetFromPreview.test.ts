@@ -7,6 +7,8 @@ import {
 } from "./createBetFromPreview";
 import { Prisma, type PrismaClient } from "@/lib/generated/prisma/client";
 import type { PreviewTokenPayload, ExpressPreviewTokenPayload, ExpressPreviewTokenSelection } from "@/lib/betPreview/previewToken";
+import { mapSingleBetToCanonicalSelection } from "./settlement/mapSingleBetToCanonicalSelection";
+import { evaluateSelectionOutcome } from "./settlement/evaluateSelectionOutcome";
 
 // ---------------------------------------------------------------------
 // In-memory fake Prisma client — this file's only test helper. Implements
@@ -1117,6 +1119,75 @@ test("Betting Markets V1 Phase 3.3 SINGLE: confirmation persists canonicalSelect
   assert.equal(result.bet.canonicalMarketType, "TOTALS");
   assert.equal(result.bet.canonicalSelectionType, "UNDER");
   assert.equal(result.bet.line?.toString(), "3.5");
+});
+
+// ---------------------------------------------------------------------
+// Individual Team Totals, Stage 4 — Step 6's own required proof: no changes
+// were made to createBetFromPreview.ts for TEAM_TOTAL (confirmed by fresh
+// inspection before this stage's implementation — the persistence layer
+// already treats canonicalMarketType/canonicalParticipant/
+// canonicalSelectionType/line entirely generically, with no market-type
+// filtering anywhere). These tests confirm that already-generic,
+// UNMODIFIED persistence path correctly carries a genuine TEAM_TOTAL
+// payload's participant through, alongside marketType/selectionType/line —
+// the exact metadata evaluateSelectionOutcome() now needs to settle it.
+// ---------------------------------------------------------------------
+
+test("Individual Team Totals Stage 4: confirmation persists canonicalMarketType=TEAM_TOTAL, canonicalParticipant=Marseille, canonicalSelectionType=OVER, line=1.5 — no createBetFromPreview.ts change was needed for this", async () => {
+  const db = createFakeDb();
+  const payload = singlePayload({
+    providerEventId: "evt-team-total-confirm",
+    providerSportKey: "soccer_france_ligue_one",
+    canonicalMarketType: "TEAM_TOTAL",
+    canonicalSelectionType: "OVER",
+    canonicalParticipant: "Marseille",
+    canonicalLine: "1.5",
+  });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  assert.equal(result.bet.canonicalMarketType, "TEAM_TOTAL");
+  assert.equal(result.bet.canonicalSelectionType, "OVER");
+  assert.equal(result.bet.canonicalParticipant, "Marseille");
+  assert.equal(result.bet.line?.toString(), "1.5");
+});
+
+test("Individual Team Totals Stage 4: end-to-end Preview -> persistence -> mapper -> evaluator — a persisted TEAM_TOTAL Bet settles correctly, proving no required metadata is dropped anywhere along the real chain", async () => {
+  const db = createFakeDb();
+  const payload = singlePayload({
+    providerEventId: "evt-team-total-e2e",
+    providerSportKey: "soccer_france_ligue_one",
+    canonicalMarketType: "TEAM_TOTAL",
+    canonicalSelectionType: "OVER",
+    canonicalParticipant: "Marseille",
+    canonicalPeriod: "FULL_GAME",
+    canonicalLine: "1.5",
+  });
+
+  const result = await createBetFromPreview(payload, fakeOptions(db));
+
+  // Step 6 — the exact chain the task specifies: persisted Bet fields ->
+  // mapSingleBetToCanonicalSelection -> evaluateSelectionOutcome.
+  const canonicalSelection = mapSingleBetToCanonicalSelection({
+    canonicalMarketType: result.bet.canonicalMarketType,
+    canonicalSelectionType: result.bet.canonicalSelectionType,
+    canonicalParticipant: result.bet.canonicalParticipant,
+    canonicalPeriod: result.bet.canonicalPeriod,
+    line: result.bet.line,
+  });
+
+  assert.ok(canonicalSelection, "the persisted Bet must map to a real CanonicalSelection — nothing required for settlement was dropped");
+  assert.equal(canonicalSelection?.marketType, "TEAM_TOTAL");
+  assert.equal(canonicalSelection?.participant?.name, "Marseille");
+  assert.equal(canonicalSelection?.line, "1.5");
+
+  const evaluation = evaluateSelectionOutcome(
+    { status: "COMPLETED", homeParticipant: { name: "Marseille" }, awayParticipant: { name: "Strasbourg" }, homeScore: 2, awayScore: 1 },
+    canonicalSelection as NonNullable<typeof canonicalSelection>,
+  );
+
+  assert.equal(evaluation.kind, "WIN");
+  assert.equal(evaluation.reasonCode, "WIN_TEAM_TOTAL_HOME_OVER");
 });
 
 test("Betting Markets V1 Phase 3.3 EXPRESS: each BetSelection stores its own market type, direction and line independently, per leg", async () => {

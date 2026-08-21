@@ -1124,3 +1124,219 @@ test("TOTALS invariant: OVER and UNDER on the identical fixture/line never agree
   assert.equal(over.kind, "WIN");
   assert.equal(under.kind, "LOSS");
 });
+
+/* -------------------------------------------------------------------------- */
+/* Individual Team Totals, Stage 4                                            */
+/* -------------------------------------------------------------------------- */
+
+function teamTotalSelection(
+  participantName: string,
+  direction: "OVER" | "UNDER",
+  line: string | undefined,
+  overrides: Partial<CanonicalSelection> = {},
+): CanonicalSelection {
+  return selection({
+    marketType: "TEAM_TOTAL",
+    selectionType: direction,
+    participant: { name: participantName },
+    line,
+    ...overrides,
+  });
+}
+
+// Marseille (home) 2–1 Strasbourg (away) — the task's own worked example.
+function marseilleStrasbourgResult(homeScore: number, awayScore: number): CanonicalEventResult {
+  return eventResult({ homeParticipant: { name: "Marseille" }, awayParticipant: { name: "Strasbourg" }, homeScore, awayScore });
+}
+
+test("TEAM_TOTAL: market/period gates — TEAM_TOTAL is no longer UNSUPPORTED_MARKET", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(2, 1), teamTotalSelection("Marseille", "OVER", "1.5"));
+  assert.notEqual(r.kind, "UNSUPPORTED");
+});
+
+test("TEAM_TOTAL: a non-OVER/UNDER selectionType is UNSUPPORTED_SELECTION, mirroring TOTALS' own rule", () => {
+  const r = evaluateSelectionOutcome(
+    marseilleStrasbourgResult(2, 1),
+    teamTotalSelection("Marseille", "OVER", "1.5", { selectionType: "PARTICIPANT" }),
+  );
+  assertOutcome(r, "UNSUPPORTED", "UNSUPPORTED_SELECTION");
+});
+
+test("TEAM_TOTAL: wrong period is still UNSUPPORTED_PERIOD", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(2, 1), teamTotalSelection("Marseille", "OVER", "1.5", { period: "FIRST_HALF" }));
+  assertOutcome(r, "UNSUPPORTED", "UNSUPPORTED_PERIOD");
+});
+
+/* --- HOME team (Marseille) — required cases 1-6 -------------------------- */
+
+test("TEAM_TOTAL (1) HOME: 'Marseille OVER 1.5', Marseille scores 2 -> WIN", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(2, 1), teamTotalSelection("Marseille", "OVER", "1.5"));
+  assertOutcome(r, "WIN", "WIN_TEAM_TOTAL_HOME_OVER");
+});
+
+test("TEAM_TOTAL (2) HOME: 'Marseille OVER 1.5', Marseille scores 1 -> LOSS", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(1, 3), teamTotalSelection("Marseille", "OVER", "1.5"));
+  assertOutcome(r, "LOSS", "LOSS_TEAM_TOTAL_HOME_OVER");
+});
+
+test("TEAM_TOTAL (2b) HOME: 'Marseille OVER 1.5', Marseille scores 0 -> LOSS", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(0, 0), teamTotalSelection("Marseille", "OVER", "1.5"));
+  assertOutcome(r, "LOSS", "LOSS_TEAM_TOTAL_HOME_OVER");
+});
+
+test("TEAM_TOTAL (3) HOME: 'Marseille UNDER 1.5', Marseille scores 1 -> WIN", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(1, 0), teamTotalSelection("Marseille", "UNDER", "1.5"));
+  assertOutcome(r, "WIN", "WIN_TEAM_TOTAL_HOME_UNDER");
+});
+
+test("TEAM_TOTAL (3b) HOME: 'Marseille UNDER 1.5', Marseille scores 0 -> WIN", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(0, 2), teamTotalSelection("Marseille", "UNDER", "1.5"));
+  assertOutcome(r, "WIN", "WIN_TEAM_TOTAL_HOME_UNDER");
+});
+
+test("TEAM_TOTAL (4) HOME: 'Marseille UNDER 1.5', Marseille scores 2 -> LOSS", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(2, 1), teamTotalSelection("Marseille", "UNDER", "1.5"));
+  assertOutcome(r, "LOSS", "LOSS_TEAM_TOTAL_HOME_UNDER");
+});
+
+test("TEAM_TOTAL (5) HOME: whole-number line — 'Marseille OVER 2', Marseille scores exactly 2 -> PUSH/VOID", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(2, 0), teamTotalSelection("Marseille", "OVER", "2"));
+  assertOutcome(r, "VOID", "VOID_PUSH_TEAM_TOTAL");
+});
+
+test("TEAM_TOTAL (5b) HOME: 'Marseille OVER 2', Marseille scores 1 -> LOSS; scores 3 -> WIN", () => {
+  const loss = evaluateSelectionOutcome(marseilleStrasbourgResult(1, 0), teamTotalSelection("Marseille", "OVER", "2"));
+  const win = evaluateSelectionOutcome(marseilleStrasbourgResult(3, 0), teamTotalSelection("Marseille", "OVER", "2"));
+  assert.equal(loss.kind, "LOSS");
+  assert.equal(win.kind, "WIN");
+});
+
+test("TEAM_TOTAL (6) HOME: whole-number line — 'Marseille UNDER 2', Marseille scores exactly 2 -> PUSH/VOID", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(2, 0), teamTotalSelection("Marseille", "UNDER", "2"));
+  assertOutcome(r, "VOID", "VOID_PUSH_TEAM_TOTAL");
+});
+
+test("TEAM_TOTAL (6b) HOME: 'Marseille UNDER 2', Marseille scores 0/1 -> WIN; scores 3+ -> LOSS", () => {
+  const win0 = evaluateSelectionOutcome(marseilleStrasbourgResult(0, 0), teamTotalSelection("Marseille", "UNDER", "2"));
+  const win1 = evaluateSelectionOutcome(marseilleStrasbourgResult(1, 0), teamTotalSelection("Marseille", "UNDER", "2"));
+  const loss = evaluateSelectionOutcome(marseilleStrasbourgResult(3, 0), teamTotalSelection("Marseille", "UNDER", "2"));
+  assert.equal(win0.kind, "WIN");
+  assert.equal(win1.kind, "WIN");
+  assert.equal(loss.kind, "LOSS");
+});
+
+/* --- AWAY team (Strasbourg) — required cases 7-11, proven independently -- */
+
+test("TEAM_TOTAL (7) AWAY: 'Strasbourg OVER 1.5', Strasbourg scores 2 -> WIN", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(0, 2), teamTotalSelection("Strasbourg", "OVER", "1.5"));
+  assertOutcome(r, "WIN", "WIN_TEAM_TOTAL_AWAY_OVER");
+});
+
+test("TEAM_TOTAL (8) AWAY: 'Strasbourg OVER 1.5', Strasbourg scores 1 -> LOSS", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(2, 1), teamTotalSelection("Strasbourg", "OVER", "1.5"));
+  assertOutcome(r, "LOSS", "LOSS_TEAM_TOTAL_AWAY_OVER");
+});
+
+test("TEAM_TOTAL (9) AWAY: 'Strasbourg UNDER 1.5', Strasbourg scores 1 -> WIN", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(2, 1), teamTotalSelection("Strasbourg", "UNDER", "1.5"));
+  assertOutcome(r, "WIN", "WIN_TEAM_TOTAL_AWAY_UNDER");
+});
+
+test("TEAM_TOTAL (10) AWAY: 'Strasbourg UNDER 1.5', Strasbourg scores 2 -> LOSS", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(0, 2), teamTotalSelection("Strasbourg", "UNDER", "1.5"));
+  assertOutcome(r, "LOSS", "LOSS_TEAM_TOTAL_AWAY_UNDER");
+});
+
+test("TEAM_TOTAL (11) AWAY: integer-line push — 'Strasbourg OVER 2', Strasbourg scores exactly 2 -> PUSH/VOID", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(0, 2), teamTotalSelection("Strasbourg", "OVER", "2"));
+  assertOutcome(r, "VOID", "VOID_PUSH_TEAM_TOTAL");
+});
+
+/* --- Task's own worked example: Marseille 2-1 Strasbourg ----------------- */
+
+test("TEAM_TOTAL worked example: Marseille 2-1 Strasbourg — 'Marseille OVER 1.5' -> WIN, 'Strasbourg OVER 1.5' -> LOSS, 'Marseille UNDER 2.5' -> WIN, 'Strasbourg UNDER 1.5' -> WIN", () => {
+  const result = marseilleStrasbourgResult(2, 1);
+  assert.equal(evaluateSelectionOutcome(result, teamTotalSelection("Marseille", "OVER", "1.5")).kind, "WIN");
+  assert.equal(evaluateSelectionOutcome(result, teamTotalSelection("Strasbourg", "OVER", "1.5")).kind, "LOSS");
+  assert.equal(evaluateSelectionOutcome(result, teamTotalSelection("Marseille", "UNDER", "2.5")).kind, "WIN");
+  assert.equal(evaluateSelectionOutcome(result, teamTotalSelection("Strasbourg", "UNDER", "1.5")).kind, "WIN");
+});
+
+/* --- SAFETY: cases 12-14 -------------------------------------------------- */
+
+test("TEAM_TOTAL (12) SAFETY: participant cannot cross-match home/away — Marseille's own OVER 1.5 never reads Strasbourg's score, and vice versa, against the SAME final score", () => {
+  const result = marseilleStrasbourgResult(2, 1); // Marseille 2, Strasbourg 1
+  const marseille = evaluateSelectionOutcome(result, teamTotalSelection("Marseille", "OVER", "1.5"));
+  const strasbourg = evaluateSelectionOutcome(result, teamTotalSelection("Strasbourg", "OVER", "1.5"));
+  // Marseille (2) clears 1.5 -> WIN; Strasbourg (1) does not -> LOSS. If the
+  // evaluator ever cross-matched, these would incorrectly come out equal.
+  assert.equal(marseille.kind, "WIN");
+  assert.equal(strasbourg.kind, "LOSS");
+  assert.notEqual(marseille.kind, strasbourg.kind);
+});
+
+test("TEAM_TOTAL (13) SAFETY: an unknown participant does not settle using the wrong score — PARTICIPANT_MISMATCH, never a guess", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(2, 1), teamTotalSelection("Real Madrid", "OVER", "1.5"));
+  assertOutcome(r, "INVALID_DATA", "PARTICIPANT_MISMATCH");
+});
+
+test("TEAM_TOTAL (13b) SAFETY: an ambiguous participant name (matches both sides) never guesses a side", () => {
+  const result = eventResult({ homeParticipant: { name: "Real Madrid" }, awayParticipant: { name: "Real Madrid Castilla" }, homeScore: 2, awayScore: 1 });
+  const r = evaluateSelectionOutcome(result, teamTotalSelection("Real Madrid Castilla B", "OVER", "1.5"));
+  // "Real Madrid Castilla B" fuzzily overlaps both "Real Madrid" (shared
+  // "Real"+"Madrid") and "Real Madrid Castilla" (shared majority) without a
+  // decisive exact match on either — must never guess.
+  assert.ok(r.kind === "INVALID_DATA");
+});
+
+test("TEAM_TOTAL (13c) SAFETY: missing participant name -> MISSING_PARTICIPANT_NAME, never guessed as home", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(2, 1), teamTotalSelection("", "OVER", "1.5", { participant: undefined }));
+  assertOutcome(r, "INVALID_DATA", "MISSING_PARTICIPANT_NAME");
+});
+
+test("TEAM_TOTAL (14) SAFETY: malformed line fails safely — INVALID_LINE, never coerced/rounded", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(2, 1), teamTotalSelection("Marseille", "OVER", "not-a-number"));
+  assertOutcome(r, "INVALID_DATA", "INVALID_LINE");
+});
+
+test("TEAM_TOTAL (14b) SAFETY: missing line -> MISSING_LINE", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(2, 1), teamTotalSelection("Marseille", "OVER", undefined));
+  assertOutcome(r, "INVALID_DATA", "MISSING_LINE");
+});
+
+test("TEAM_TOTAL (14c) SAFETY: a line outside the supported .00/.25/.50/.75 grid -> INVALID_LINE, never rounded to the nearest supported line", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(2, 1), teamTotalSelection("Marseille", "OVER", "1.33"));
+  assertOutcome(r, "INVALID_DATA", "INVALID_LINE");
+});
+
+/* --- Quarter-line TEAM_TOTAL (reuses splitAsianHandicapLine unmodified) --- */
+
+test("TEAM_TOTAL quarter-line: 'Marseille OVER 1.25', Marseille scores exactly 1 -> HALF_LOSS", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(1, 0), teamTotalSelection("Marseille", "OVER", "1.25"));
+  assertOutcome(r, "HALF_LOSS", "HALF_LOSS_TEAM_TOTAL_HOME_OVER");
+});
+
+test("TEAM_TOTAL quarter-line: 'Marseille OVER 0.75', Marseille scores exactly 1 -> HALF_WIN", () => {
+  const r = evaluateSelectionOutcome(marseilleStrasbourgResult(1, 0), teamTotalSelection("Marseille", "OVER", "0.75"));
+  assertOutcome(r, "HALF_WIN", "HALF_WIN_TEAM_TOTAL_HOME_OVER");
+});
+
+/* --- Existing markets unchanged: cases 15-17 ------------------------------ */
+
+test("TEAM_TOTAL Stage 4 regression (15): existing TOTALS (match total) behavior is completely unaffected by the TEAM_TOTAL addition", () => {
+  const r = evaluateSelectionOutcome(totalsResult(2, 1), totalsSelection("OVER", "2.5"));
+  assertOutcome(r, "WIN", "WIN_TOTALS_OVER");
+});
+
+test("TEAM_TOTAL Stage 4 regression (16): existing SPREAD behavior is completely unaffected by the TEAM_TOTAL addition", () => {
+  const r = evaluateSelectionOutcome(
+    eventResult({ homeParticipant: { name: "Arsenal" }, awayParticipant: { name: "Coventry City" }, homeScore: 2, awayScore: 0 }),
+    spreadSelection("Arsenal", "-1.5"),
+  );
+  assertOutcome(r, "WIN", "WIN_SPREAD_HOME_PARTICIPANT");
+});
+
+test("TEAM_TOTAL Stage 4 regression (17): existing MONEYLINE behavior is completely unaffected by the TEAM_TOTAL addition", () => {
+  const r = evaluateSelectionOutcome(eventResult({ homeScore: 2, awayScore: 1 }), selection({ marketType: "MONEYLINE_3WAY", selectionType: "HOME" }));
+  assertOutcome(r, "WIN", "WIN_HOME_PARTICIPANT");
+});

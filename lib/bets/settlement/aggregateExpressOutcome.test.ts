@@ -885,3 +885,159 @@ test("X3B fail-closed: a real full LOSS leg is still terminal even alongside a c
   if (result.kind !== "LOSS") return;
   assert.deepEqual(result.losingSelectionIds, ["loser"]);
 });
+
+/* ============================================================================
+ * Individual Team Totals, Stage 4 — EXPRESS aggregation. No changes were
+ * needed to aggregateExpressOutcome.ts itself for this — it already
+ * dispatches purely on evaluateSelectionOutcome()'s returned `kind`
+ * (WIN/LOSS/VOID/HALF_WIN/HALF_LOSS/...), with zero market-type-specific
+ * branching. These tests prove that generic dispatch already correctly
+ * carries TEAM_TOTAL legs through EXPRESS settlement, exactly like any
+ * other market.
+ * ============================================================================ */
+
+function teamTotalSelection(participantName: string, direction: "OVER" | "UNDER", line: string): CanonicalSelection {
+  return {
+    sport: "UNKNOWN",
+    event: { sport: "UNKNOWN", name: "", participants: [], period: "FULL_GAME" },
+    marketType: "TEAM_TOTAL",
+    period: "FULL_GAME",
+    selectionType: direction,
+    participant: { name: participantName },
+    line,
+  };
+}
+
+test("Individual Team Totals Stage 4 (18): a winning TEAM_TOTAL leg participates correctly in an all-WIN EXPRESS", () => {
+  const legs = [
+    leg({ id: "l1", providerEventId: "e1", selection: teamTotalSelection("Marseille", "OVER", "1.5"), odds: new Prisma.Decimal("1.9") }),
+    leg({ id: "l2", providerEventId: "e2", selection: selection("HOME"), odds: new Prisma.Decimal("2.0") }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeParticipant: { name: "Marseille" }, awayParticipant: { name: "Strasbourg" }, homeScore: 2, awayScore: 1 })],
+    ["e2", eventResult({ homeScore: 1, awayScore: 0 })],
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+
+  assert.equal(result.kind, "WIN");
+  if (result.kind !== "WIN") return;
+  assert.deepEqual([...result.winningSelectionIds].sort(), ["l1", "l2"]);
+});
+
+test("Individual Team Totals Stage 4 (19): a losing TEAM_TOTAL leg loses the WHOLE express, even with an otherwise-winning MONEYLINE leg", () => {
+  const legs = [
+    leg({ id: "l1", providerEventId: "e1", selection: teamTotalSelection("Marseille", "OVER", "1.5"), odds: new Prisma.Decimal("1.9") }),
+    leg({ id: "l2", providerEventId: "e2", selection: selection("HOME"), odds: new Prisma.Decimal("2.0") }),
+  ];
+  const results = lookup([
+    // Marseille scores only 1 -> LOSS for "OVER 1.5".
+    ["e1", eventResult({ homeParticipant: { name: "Marseille" }, awayParticipant: { name: "Strasbourg" }, homeScore: 1, awayScore: 0 })],
+    ["e2", eventResult({ homeScore: 1, awayScore: 0 })],
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+
+  assert.equal(result.kind, "LOSS");
+  if (result.kind !== "LOSS") return;
+  assert.deepEqual(result.losingSelectionIds, ["l1"]);
+});
+
+test("Individual Team Totals Stage 4 (20): a pushed/void TEAM_TOTAL leg follows existing EXPRESS void-leg rules — voided, never counted as a losing or contributing leg, remaining legs still decide the outcome", () => {
+  const legs = [
+    leg({ id: "l1", providerEventId: "e1", selection: teamTotalSelection("Marseille", "OVER", "2"), odds: new Prisma.Decimal("1.9") }),
+    leg({ id: "l2", providerEventId: "e2", selection: selection("HOME"), odds: new Prisma.Decimal("2.0") }),
+  ];
+  const results = lookup([
+    // Marseille scores exactly 2 -> PUSH/VOID for "OVER 2".
+    ["e1", eventResult({ homeParticipant: { name: "Marseille" }, awayParticipant: { name: "Strasbourg" }, homeScore: 2, awayScore: 0 })],
+    ["e2", eventResult({ homeScore: 1, awayScore: 0 })],
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+
+  assert.equal(result.kind, "WIN", "the express still wins on its one real WIN leg, with the pushed leg simply excluded from the odds product");
+  if (result.kind !== "WIN") return;
+  assert.deepEqual(result.winningSelectionIds, ["l2"]);
+  assert.deepEqual(result.voidedSelectionIds, ["l1"]);
+  // Same rule proven elsewhere in this file for SPREAD/TOTALS pushes: the
+  // voided leg contributes NOTHING to the odds product (never a 1.0
+  // multiplier, never dropped silently without being reported).
+  assert.equal(result.effectiveOdds?.toString(), "2");
+});
+
+test("Individual Team Totals Stage 4 (20b): an EXPRESS made ENTIRELY of pushed legs (including TEAM_TOTAL) is a whole-bet VOID, same existing rule as an all-push SPREAD/TOTALS express", () => {
+  const legs = [leg({ id: "l1", providerEventId: "e1", selection: teamTotalSelection("Marseille", "OVER", "2"), odds: new Prisma.Decimal("1.9") })];
+  const results = lookup([
+    ["e1", eventResult({ homeParticipant: { name: "Marseille" }, awayParticipant: { name: "Strasbourg" }, homeScore: 2, awayScore: 0 })],
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+
+  assert.equal(result.kind, "VOID");
+});
+
+test("Individual Team Totals Stage 4 (21): mixed EXPRESS — MONEYLINE + TOTALS + TEAM_TOTAL — settles correctly as a WIN when all three legs win independently", () => {
+  const legs = [
+    leg({ id: "moneyline", providerEventId: "e1", selection: selection("HOME"), odds: new Prisma.Decimal("1.8") }),
+    leg({ id: "totals", providerEventId: "e2", selection: totalsSelection("OVER", "2.5"), odds: new Prisma.Decimal("1.9") }),
+    leg({
+      id: "teamTotal",
+      providerEventId: "e3",
+      selection: teamTotalSelection("Marseille", "UNDER", "2.5"),
+      odds: new Prisma.Decimal("2.0"),
+    }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 2, awayScore: 0 })], // MONEYLINE HOME wins
+    ["e2", eventResult({ homeScore: 2, awayScore: 1 })], // TOTALS: 3 goals > 2.5 -> WIN
+    ["e3", eventResult({ homeParticipant: { name: "Marseille" }, awayParticipant: { name: "Strasbourg" }, homeScore: 2, awayScore: 1 })], // Marseille 2 < 2.5 -> WIN
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+
+  assert.equal(result.kind, "WIN");
+  if (result.kind !== "WIN") return;
+  assert.deepEqual([...result.winningSelectionIds].sort(), ["moneyline", "teamTotal", "totals"]);
+  // 1.8 * 1.9 * 2.0 = 6.84
+  assert.equal(result.effectiveOdds?.toString(), "6.84");
+});
+
+test("Individual Team Totals Stage 4 (21b): the SAME mixed EXPRESS loses correctly when only the TEAM_TOTAL leg fails", () => {
+  const legs = [
+    leg({ id: "moneyline", providerEventId: "e1", selection: selection("HOME"), odds: new Prisma.Decimal("1.8") }),
+    leg({ id: "totals", providerEventId: "e2", selection: totalsSelection("OVER", "2.5"), odds: new Prisma.Decimal("1.9") }),
+    leg({
+      id: "teamTotal",
+      providerEventId: "e3",
+      selection: teamTotalSelection("Marseille", "UNDER", "1.5"),
+      odds: new Prisma.Decimal("2.0"),
+    }),
+  ];
+  const results = lookup([
+    ["e1", eventResult({ homeScore: 2, awayScore: 0 })],
+    ["e2", eventResult({ homeScore: 2, awayScore: 1 })],
+    // Marseille scores 2, requested UNDER 1.5 -> LOSS.
+    ["e3", eventResult({ homeParticipant: { name: "Marseille" }, awayParticipant: { name: "Strasbourg" }, homeScore: 2, awayScore: 1 })],
+  ]);
+
+  const result = aggregateExpressOutcome(legs, results, DEFAULT_STAKE);
+
+  assert.equal(result.kind, "LOSS");
+  if (result.kind !== "LOSS") return;
+  assert.deepEqual(result.losingSelectionIds, ["teamTotal"]);
+});
+
+test("Individual Team Totals Stage 4: both Marseille and Strasbourg TEAM_TOTAL legs against the SAME final score prove participant attribution inside EXPRESS too, not just in evaluateSelectionOutcome directly", () => {
+  const sameResult = eventResult({ homeParticipant: { name: "Marseille" }, awayParticipant: { name: "Strasbourg" }, homeScore: 2, awayScore: 1 });
+
+  const marseilleLegs = [leg({ id: "l1", providerEventId: "e1", selection: teamTotalSelection("Marseille", "OVER", "1.5"), odds: new Prisma.Decimal("1.9") })];
+  const strasbourgLegs = [leg({ id: "l1", providerEventId: "e1", selection: teamTotalSelection("Strasbourg", "OVER", "1.5"), odds: new Prisma.Decimal("1.9") })];
+  const results = lookup([["e1", sameResult]]);
+
+  const marseilleResult = aggregateExpressOutcome(marseilleLegs, results, DEFAULT_STAKE);
+  const strasbourgResult = aggregateExpressOutcome(strasbourgLegs, results, DEFAULT_STAKE);
+
+  assert.equal(marseilleResult.kind, "WIN", "Marseille (2 goals) clears OVER 1.5");
+  assert.equal(strasbourgResult.kind, "LOSS", "Strasbourg (1 goal) does not clear OVER 1.5");
+});

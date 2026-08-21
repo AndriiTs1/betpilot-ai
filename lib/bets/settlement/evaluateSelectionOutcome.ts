@@ -59,7 +59,18 @@ export type WinReasonCode =
   // combined match total covered OVER/UNDER the line", not a per-team
   // outcome — there is no home/away side at all for TOTALS.
   | "WIN_TOTALS_OVER"
-  | "WIN_TOTALS_UNDER";
+  | "WIN_TOTALS_UNDER"
+  // Individual Team Totals, Stage 4 — TEAM_TOTAL full win. Distinct from
+  // BOTH the SPREAD codes (which have a side but no OVER/UNDER direction —
+  // a handicap line has an implicit direction baked into its sign) and the
+  // TOTALS codes above (which have a direction but no side — there is no
+  // "which team" for a combined match total): TEAM_TOTAL genuinely has
+  // both dimensions, so all four side+direction combinations are named
+  // explicitly, never collapsed into one axis.
+  | "WIN_TEAM_TOTAL_HOME_OVER"
+  | "WIN_TEAM_TOTAL_HOME_UNDER"
+  | "WIN_TEAM_TOTAL_AWAY_OVER"
+  | "WIN_TEAM_TOTAL_AWAY_UNDER";
 export type LossReasonCode =
   | "LOSS_HOME_PARTICIPANT"
   | "LOSS_AWAY_PARTICIPANT"
@@ -67,7 +78,11 @@ export type LossReasonCode =
   | "LOSS_SPREAD_HOME_PARTICIPANT"
   | "LOSS_SPREAD_AWAY_PARTICIPANT"
   | "LOSS_TOTALS_OVER"
-  | "LOSS_TOTALS_UNDER";
+  | "LOSS_TOTALS_UNDER"
+  | "LOSS_TEAM_TOTAL_HOME_OVER"
+  | "LOSS_TEAM_TOTAL_HOME_UNDER"
+  | "LOSS_TEAM_TOTAL_AWAY_OVER"
+  | "LOSS_TEAM_TOTAL_AWAY_UNDER";
 
 // H4-B2 — quarter-line Asian handicap "won half the stake, pushed the
 // other half" outcome (one component WIN, the other PUSH). This is a
@@ -83,14 +98,25 @@ export type HalfWinReasonCode =
   | "HALF_WIN_HOME_PARTICIPANT"
   | "HALF_WIN_AWAY_PARTICIPANT"
   | "HALF_WIN_TOTALS_OVER"
-  | "HALF_WIN_TOTALS_UNDER";
+  | "HALF_WIN_TOTALS_UNDER"
+  // Individual Team Totals, Stage 4 — TEAM_TOTAL quarter-line half win,
+  // same side+direction granularity as WinReasonCode's own TEAM_TOTAL
+  // members above.
+  | "HALF_WIN_TEAM_TOTAL_HOME_OVER"
+  | "HALF_WIN_TEAM_TOTAL_HOME_UNDER"
+  | "HALF_WIN_TEAM_TOTAL_AWAY_OVER"
+  | "HALF_WIN_TEAM_TOTAL_AWAY_UNDER";
 // H4-B2 — the mirror image of HalfWinReasonCode: one component LOSS, the
 // other PUSH.
 export type HalfLossReasonCode =
   | "HALF_LOSS_HOME_PARTICIPANT"
   | "HALF_LOSS_AWAY_PARTICIPANT"
   | "HALF_LOSS_TOTALS_OVER"
-  | "HALF_LOSS_TOTALS_UNDER";
+  | "HALF_LOSS_TOTALS_UNDER"
+  | "HALF_LOSS_TEAM_TOTAL_HOME_OVER"
+  | "HALF_LOSS_TEAM_TOTAL_HOME_UNDER"
+  | "HALF_LOSS_TEAM_TOTAL_AWAY_OVER"
+  | "HALF_LOSS_TEAM_TOTAL_AWAY_UNDER";
 
 // VOID here is a pure domain classification only — this function never
 // calls settleBet()/settlementRules.ts, moves Bet.status, or touches money.
@@ -117,7 +143,15 @@ export type VoidReasonCode =
   // total lands exactly on a whole/half line, or (defensively,
   // mathematically unreachable for a genuine quarter split) both
   // components of a quarter total push.
-  | "VOID_PUSH_TOTALS";
+  | "VOID_PUSH_TOTALS"
+  // Individual Team Totals, Stage 4 — the TEAM_TOTAL equivalent of
+  // VOID_PUSH_TOTALS: the resolved participant's OWN score lands exactly
+  // on a whole/half line. One code regardless of side/direction, same
+  // convention as VOID_PUSH_SPREAD/VOID_PUSH_TOTALS — a push doesn't need
+  // the same side+direction granularity WIN/LOSS do, since "this leg is
+  // voided" is a single financial fact regardless of which side or
+  // direction produced it.
+  | "VOID_PUSH_TEAM_TOTAL";
 
 // NOT_STARTED/IN_PROGRESS/POSTPONED all mean "no result yet, ask again
 // later" — but POSTPONED keeps its own reason code (distinct from the
@@ -163,7 +197,11 @@ export type InvalidDataReasonCode =
   // H5-A2 — the TOTALS equivalent of INVALID_SPREAD_COMBINATION: same
   // defensive, mathematically-unreachable WIN/LOSS pair, for a quarter
   // total instead of a per-team handicap line.
-  | "INVALID_TOTALS_COMBINATION";
+  | "INVALID_TOTALS_COMBINATION"
+  // Individual Team Totals, Stage 4 — the TEAM_TOTAL equivalent: same
+  // defensive, mathematically-unreachable WIN/LOSS pair, for a
+  // participant's own quarter-line team total.
+  | "INVALID_TEAM_TOTAL_COMBINATION";
 
 export type SelectionOutcomeEvaluation =
   | { readonly kind: "WIN"; readonly reasonCode: WinReasonCode }
@@ -380,6 +418,108 @@ function evaluateTotalsOutcome(
   return invalidData("INVALID_TOTALS_COMBINATION");
 }
 
+/* -------------------------------------------------------------------------- */
+/* Individual Team Totals, Stage 4 — TEAM_TOTAL evaluation                   */
+/* -------------------------------------------------------------------------- */
+
+// Reuses evaluateTotalsComponent() and splitAsianHandicapLine() COMPLETELY
+// UNMODIFIED — no duplicated Over/Under math. evaluateTotalsComponent's own
+// second parameter is generically named `totalGoals`, but its arithmetic
+// (diff = value - componentLine, compared against zero) has no idea whether
+// that value is the COMBINED match total (TOTALS' own call) or a single
+// PARTICIPANT's own score (TEAM_TOTAL's call, here) — the exact same
+// OVER/UNDER-vs-line comparison applies identically either way, so passing
+// participantScore straight through is not a coincidental reuse, it is the
+// correct reuse: "does this number clear the line in the requested
+// direction" is genuinely the same question for both markets, only WHICH
+// number differs.
+//
+// side is the effective HOME/AWAY side the (already-resolved) participant
+// is on — never assumed, always the output of resolveParticipantSide() (see
+// evaluateSelectionOutcome() below), the exact same participant-resolution
+// mechanism SPREAD/MONEYLINE PARTICIPANT already use. Mirrors
+// evaluateSpreadOutcome()'s own side-parameter convention exactly.
+function evaluateTeamTotalOutcome(
+  side: "HOME" | "AWAY",
+  direction: "OVER" | "UNDER",
+  participantScore: number,
+  line: Prisma.Decimal,
+): SelectionOutcomeEvaluation {
+  const split = splitAsianHandicapLine(line);
+
+  if (split.kind === "INVALID_GRID") {
+    return invalidData("INVALID_LINE");
+  }
+
+  const winCode: WinReasonCode =
+    side === "HOME"
+      ? direction === "OVER"
+        ? "WIN_TEAM_TOTAL_HOME_OVER"
+        : "WIN_TEAM_TOTAL_HOME_UNDER"
+      : direction === "OVER"
+        ? "WIN_TEAM_TOTAL_AWAY_OVER"
+        : "WIN_TEAM_TOTAL_AWAY_UNDER";
+  const lossCode: LossReasonCode =
+    side === "HOME"
+      ? direction === "OVER"
+        ? "LOSS_TEAM_TOTAL_HOME_OVER"
+        : "LOSS_TEAM_TOTAL_HOME_UNDER"
+      : direction === "OVER"
+        ? "LOSS_TEAM_TOTAL_AWAY_OVER"
+        : "LOSS_TEAM_TOTAL_AWAY_UNDER";
+  const halfWinCode: HalfWinReasonCode =
+    side === "HOME"
+      ? direction === "OVER"
+        ? "HALF_WIN_TEAM_TOTAL_HOME_OVER"
+        : "HALF_WIN_TEAM_TOTAL_HOME_UNDER"
+      : direction === "OVER"
+        ? "HALF_WIN_TEAM_TOTAL_AWAY_OVER"
+        : "HALF_WIN_TEAM_TOTAL_AWAY_UNDER";
+  const halfLossCode: HalfLossReasonCode =
+    side === "HOME"
+      ? direction === "OVER"
+        ? "HALF_LOSS_TEAM_TOTAL_HOME_OVER"
+        : "HALF_LOSS_TEAM_TOTAL_HOME_UNDER"
+      : direction === "OVER"
+        ? "HALF_LOSS_TEAM_TOTAL_AWAY_OVER"
+        : "HALF_LOSS_TEAM_TOTAL_AWAY_UNDER";
+
+  if (split.kind === "NO_SPLIT") {
+    const result = evaluateTotalsComponent(direction, participantScore, line);
+    if (result === "WIN") return win(winCode);
+    if (result === "LOSS") return loss(lossCode);
+    return voidOutcome("VOID_PUSH_TEAM_TOTAL");
+  }
+
+  // Quarter line — identical combination table to SPREAD/TOTALS above:
+  //   WIN + WIN     -> full WIN
+  //   LOSS + LOSS   -> full LOSS
+  //   WIN + PUSH    -> HALF_WIN   (order-independent — checked both ways)
+  //   LOSS + PUSH   -> HALF_LOSS  (order-independent — checked both ways)
+  //   PUSH + PUSH   -> VOID       (defensive; unreachable for a genuine
+  //                                 quarter split — see asianHandicapLine.ts)
+  //   WIN + LOSS    -> INVALID_DATA (defensive; equally unreachable — never
+  //                                   silently resolved toward either side)
+  const [componentA, componentB] = split.components;
+  const resultA = evaluateTotalsComponent(direction, participantScore, componentA);
+  const resultB = evaluateTotalsComponent(direction, participantScore, componentB);
+
+  if (resultA === "WIN" && resultB === "WIN") return win(winCode);
+  if (resultA === "LOSS" && resultB === "LOSS") return loss(lossCode);
+  if ((resultA === "WIN" && resultB === "PUSH") || (resultA === "PUSH" && resultB === "WIN")) {
+    return halfWin(halfWinCode);
+  }
+  if ((resultA === "LOSS" && resultB === "PUSH") || (resultA === "PUSH" && resultB === "LOSS")) {
+    return halfLoss(halfLossCode);
+  }
+  if (resultA === "PUSH" && resultB === "PUSH") {
+    return voidOutcome("VOID_PUSH_TEAM_TOTAL");
+  }
+  // resultA/resultB are WIN+LOSS or LOSS+WIN — mathematically unreachable
+  // for a genuine quarter split, never silently resolved either way.
+  return invalidData("INVALID_TEAM_TOTAL_COMBINATION");
+}
+
 // PARTICIPANT is accepted for BOTH market shapes (Stage 3.5C-FIX) — once
 // resolved to an effective HOME/AWAY side (see resolveParticipantSide()
 // usage in evaluateSelectionOutcome() below), a 3-way event ending in a
@@ -434,11 +574,13 @@ export function evaluateSelectionOutcome(
   selection: CanonicalSelection,
 ): SelectionOutcomeEvaluation {
   // H4-B2 — SPREAD joins MONEYLINE_2WAY/MONEYLINE_3WAY as a supported
-  // market. H5-A2 — TOTALS joins them too. Every other market type is
-  // still UNSUPPORTED_MARKET, unchanged.
+  // market. H5-A2 — TOTALS joins them too. Individual Team Totals, Stage 4
+  // — TEAM_TOTAL joins them too. Every other market type is still
+  // UNSUPPORTED_MARKET, unchanged.
   const isSpread = selection.marketType === "SPREAD";
   const isTotals = selection.marketType === "TOTALS";
-  if (!isSpread && !isTotals && !isSupportedMoneylineMarket(selection.marketType)) {
+  const isTeamTotal = selection.marketType === "TEAM_TOTAL";
+  if (!isSpread && !isTotals && !isTeamTotal && !isSupportedMoneylineMarket(selection.marketType)) {
     return unsupported("UNSUPPORTED_MARKET");
   }
   if (selection.period !== SUPPORTED_PERIOD) {
@@ -449,13 +591,17 @@ export function evaluateSelectionOutcome(
   // the only shape lib/odds/domain.ts's validateCanonicalSelection allows
   // to carry the participant a line applies to. TOTALS is only supported
   // as OVER/UNDER — the only two selectionTypes validateCanonicalSelection
-  // permits for it. Anything else is UNSUPPORTED_SELECTION, same
-  // fail-closed pattern as MONEYLINE below.
+  // permits for it. TEAM_TOTAL is likewise only OVER/UNDER (same rule as
+  // TOTALS — validateCanonicalSelection's own TEAM_TOTAL case), but ALSO
+  // always carries a participant (checked below, alongside SPREAD/
+  // PARTICIPANT's own participant requirement — see the
+  // MISSING_PARTICIPANT_NAME branch). Anything else is UNSUPPORTED_SELECTION,
+  // same fail-closed pattern as MONEYLINE below.
   if (isSpread) {
     if (selection.selectionType !== "PARTICIPANT") {
       return unsupported("UNSUPPORTED_SELECTION");
     }
-  } else if (isTotals) {
+  } else if (isTotals || isTeamTotal) {
     if (selection.selectionType !== "OVER" && selection.selectionType !== "UNDER") {
       return unsupported("UNSUPPORTED_SELECTION");
     }
@@ -486,11 +632,23 @@ export function evaluateSelectionOutcome(
   // NEVER actually read for TOTALS: the isTotals dispatch further down
   // returns before either the SPREAD or MONEYLINE branches — the only two
   // readers of this variable — are ever reached.
+  //
+  // Individual Team Totals, Stage 4 — TEAM_TOTAL is the opposite of TOTALS
+  // here: it ABSOLUTELY has a participant/side (whose own score the line
+  // applies to — "Marseille OVER 1.5" is meaningless without knowing which
+  // team "Marseille" is), so it is grouped with the PARTICIPANT-resolution
+  // branch below, NOT the TOTALS placeholder branch, even though its own
+  // selectionType is OVER/UNDER (not literally "PARTICIPANT" — that string
+  // is SPREAD/MONEYLINE's own selectionType spelling for "a participant is
+  // attached"). Reuses resolveParticipantSide() identically — same
+  // fuzzy/Cyrillic-aware matcher, same NO_MATCH/AMBIGUOUS fail-closed
+  // behavior, same "never guess" discipline as every other participant
+  // resolution in this file.
   let effectiveSelectionType: "HOME" | "AWAY" | "DRAW";
 
   if (isTotals) {
     effectiveSelectionType = "HOME";
-  } else if (selection.selectionType === "PARTICIPANT") {
+  } else if (isTeamTotal || selection.selectionType === "PARTICIPANT") {
     // Fuzzy, Cyrillic-aware resolution — this is the actual fix: a
     // player's free-text team name (possibly Cyrillic, possibly a
     // near-spelling of the provider's own name) is resolved against the
@@ -567,6 +725,34 @@ export function evaluateSelectionOutcome(
     const direction = selection.selectionType as "OVER" | "UNDER";
     const totalGoals = homeScore + awayScore;
     return evaluateTotalsOutcome(direction, totalGoals, line);
+  }
+
+  // Individual Team Totals, Stage 4 — TEAM_TOTAL dispatch.
+  // effectiveSelectionType is guaranteed HOME or AWAY here (never DRAW —
+  // resolveParticipantSide() never resolves to DRAW), resolved above via
+  // the exact same participant-resolution path SPREAD/MONEYLINE PARTICIPANT
+  // already use. NEVER match match-total goals here — participantScore
+  // below is deliberately the resolved side's OWN score alone (homeScore or
+  // awayScore, never their sum, which is TOTALS' own, structurally
+  // different question).
+  if (isTeamTotal) {
+    if (selection.line === undefined) {
+      return invalidData("MISSING_LINE");
+    }
+    let line: Prisma.Decimal;
+    try {
+      line = new Prisma.Decimal(selection.line);
+    } catch {
+      return invalidData("INVALID_LINE");
+    }
+    if (!line.isFinite()) {
+      return invalidData("INVALID_LINE");
+    }
+
+    const direction = selection.selectionType as "OVER" | "UNDER";
+    const side = effectiveSelectionType as "HOME" | "AWAY";
+    const participantScore = side === "HOME" ? homeScore : awayScore;
+    return evaluateTeamTotalOutcome(side, direction, participantScore, line);
   }
 
   // H4-B2 — SPREAD dispatch. effectiveSelectionType is guaranteed HOME or
