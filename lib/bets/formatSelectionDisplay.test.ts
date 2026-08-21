@@ -128,3 +128,35 @@ test("Team/participant names are never translated or mutated, in either script",
   assert.equal(formatSelectionDisplay("Arsenal Win", null, "ru").selection, "Arsenal · Победа");
   assert.equal(formatSelectionDisplay("Carlos Alcaraz Win", null, "ru").selection, "Carlos Alcaraz · Победа");
 });
+
+
+test("RU totals preserve the numeric line in the user-facing label", () => {
+  assert.deepEqual(
+    formatSelectionDisplay("Over 2.5 Goals", "Total Goals", "ru"),
+    { selection: "Тотал больше 2.5", market: "Тотал голов" },
+  );
+
+  assert.deepEqual(
+    formatSelectionDisplay("Under 2.5 Goals", "Total Goals", "ru"),
+    { selection: "Тотал меньше 2.5", market: "Тотал голов" },
+  );
+});
+
+test("RU totals preserve different valid lines instead of hardcoding 2.5", () => {
+  assert.equal(
+    formatSelectionDisplay("Over 3.5 Goals", "Totals", "ru").selection,
+    "Тотал больше 3.5",
+  );
+
+  assert.equal(
+    formatSelectionDisplay("Under 1.5 Goals", "Totals", "ru").selection,
+    "Тотал меньше 1.5",
+  );
+});
+
+test("EN totals remain byte-for-byte unchanged", () => {
+  assert.deepEqual(
+    formatSelectionDisplay("Over 2.5 Goals", "Total Goals", "en"),
+    { selection: "Over 2.5 Goals", market: "Total Goals" },
+  );
+});

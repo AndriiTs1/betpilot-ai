@@ -130,9 +130,9 @@ function ruSelectionText(classified: SelectionKind, original: string): string {
     case "bttsNo":
       return "Обе забьют — Нет";
     case "over":
-      return `Больше ${classified.line}`;
+      return `Тотал больше ${classified.line}`;
     case "under":
-      return `Меньше ${classified.line}`;
+      return `Тотал меньше ${classified.line}`;
     case "unknown":
       // Fallback safety — an unrecognized selection (a SPREAD's
       // "<Name> <signed line>", or any future/unknown phrasing) is never
