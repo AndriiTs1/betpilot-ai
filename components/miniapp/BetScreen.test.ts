@@ -212,15 +212,16 @@ test("BetScreen: BetTextForm and BetScreenshotForm are both wired to the exact s
 });
 
 // ---------------------------------------------------------------------
-// Stage M5.5B — SUBMITTED TICKET TOP-SPACING POLISH. The shared shell
-// (app/miniapp/page.tsx's DataScreen) applies a `mt-4` on top of its own
-// `py-6` top padding above whatever BetScreen renders — appropriate for
-// the dashboard/preview forms, but doubling that gap above a full-screen
-// ticket read as an oversized empty band on a real device. The
-// confirmedBet branch now cancels that known, documented `mt-4` with its
-// own wrapper, leaving only the shell's `py-6` as breathing room. Scoped
-// to only that branch — the dashboard/BetTextForm/BetScreenshotForm
-// branches keep inheriting the ancestor's `mt-4` exactly as before.
+// Regression: confirmed-ticket top-overlap bug. The old Stage M5.5B
+// "compact top-spacing" wrapper (-mt-4 around the confirmedBet branch's
+// BetTicket) was written against an earlier shell that applied a larger
+// mt-4 gap above BetScreen. The shell's own top offset has since shrunk to
+// a single mt-2 (app/miniapp/page.tsx's global h-8 header + mt-2 before
+// BetScreen) — the same -mt-4 then over-cancelled that smaller gap and
+// pulled the ticket up into the header, overlapping the LanguageSwitcher
+// (most visible on a tall EXPRESS ticket). The global header now owns top
+// spacing; a confirmed ticket must stay in normal document flow below it,
+// with no negative-top-margin/translate-y offset of its own.
 // ---------------------------------------------------------------------
 
 test("source: submitted BetTicket still renders from the confirmedBet branch, wired to the same ticket/onDone/onViewHistory as before", () => {
@@ -231,10 +232,27 @@ test("source: submitted BetTicket still renders from the confirmedBet branch, wi
   assert.match(source, /onViewHistory=\{\(\) => \{\s*closeToDashboard\(\);\s*onNavigateToHistory\(\);\s*\}\}/);
 });
 
-test("source: the confirmedBet branch wraps BetTicket in the new compact-top-spacing wrapper (-mt-4, canceling the shell's known mt-4)", () => {
+test("source: the confirmedBet branch renders BetTicket directly — no -mt-4 (or any other negative top-margin/translate-y) wrapper around it", () => {
   const source = readFileSync(fileURLToPath(new URL("./BetScreen.tsx", import.meta.url)), "utf8");
 
-  assert.match(source, /if \(confirmedBet\) \{[\s\S]{0,2000}?<div className="-mt-4">\s*<BetTicket/);
+  const branchMatch = source.match(/if \(confirmedBet\) \{([\s\S]*?)\n  \}/);
+  assert.ok(branchMatch, "expected the confirmedBet branch to be found");
+  const branchBody = branchMatch![1];
+
+  // Strip this file's own regression-comment prose (which legitimately
+  // mentions "-mt-4" in explaining the bug) before scanning for the actual
+  // offending className — same convention as localization.test.ts's
+  // stripComments() helper.
+  const codeOnly = branchBody.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+
+  assert.equal(codeOnly.includes("-mt-4"), false, "must not reintroduce the stale -mt-4 wrapper");
+  assert.equal(/-mt-\d/.test(codeOnly), false, "must not introduce any other negative top margin");
+  assert.equal(/-translate-y/.test(codeOnly), false, "must not introduce a translate-y workaround");
+  assert.equal(/\babsolute\b|\bfixed\b/.test(codeOnly), false, "must not introduce absolute/fixed positioning");
+
+  // BetTicket is returned directly (no wrapping <div> at all) — the exact
+  // structure this bug's fix restores.
+  assert.match(branchBody, /return \(\s*<BetTicket/);
 });
 
 // Status sync fix — the open ticket must reconcile its status from

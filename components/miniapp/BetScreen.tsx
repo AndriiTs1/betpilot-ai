@@ -194,28 +194,27 @@ export default function BetScreen({
     const liveTicket = recentBets.find((bet) => bet.id === confirmedBet.id);
     const liveStatus = liveTicket ? resolveLiveTicketStatus(liveTicket.status) : null;
 
+    // Regression note (supersedes the old Stage M5.5B compact-spacing
+    // wrapper): the global Mini App header (app/miniapp/page.tsx) owns top
+    // spacing for every tab — its own h-8 header row plus a single mt-2
+    // before BetScreen. A confirmed ticket must stay in normal document
+    // flow below that, with no negative top offset of its own — the old
+    // -mt-4 wrapper here was written against an earlier shell that used a
+    // larger mt-4 gap; once the shell's own offset shrank to mt-2, that
+    // same -mt-4 over-cancelled it and pulled the ticket up into the
+    // header, overlapping the LanguageSwitcher (most visibly on a tall
+    // EXPRESS ticket). The shell's own py-6/h-8/mt-2 tokens are the single
+    // source of vertical layout here — this branch must not reintroduce a
+    // second one.
     return (
-      // Stage M5.5B — SUBMITTED TICKET TOP-SPACING POLISH. The shared shell
-      // (app/miniapp/page.tsx's DataScreen) wraps every BetScreen state in
-      // its own `mt-4` (16px), on top of its own `py-6` (24px) top padding —
-      // a sensible offset for the dashboard/preview forms, but stacking
-      // both on top of a full-screen ticket read as an oversized empty band
-      // above it on a real device. This cancels exactly that known,
-      // documented `mt-4` (not an arbitrary guess), leaving only the
-      // shell's own `py-6` top padding as the ticket's breathing room — a
-      // real, existing spacing token, not a new invented one. Scoped to
-      // only this branch, so the dashboard and both preview forms below
-      // keep their untouched `mt-4` offset.
-      <div className="-mt-4">
-        <BetTicket
-          ticket={toBetTicketData(confirmedBet, playerName, availableCredit, liveStatus ?? undefined)}
-          onDone={closeToDashboard}
-          onViewHistory={() => {
-            closeToDashboard();
-            onNavigateToHistory();
-          }}
-        />
-      </div>
+      <BetTicket
+        ticket={toBetTicketData(confirmedBet, playerName, availableCredit, liveStatus ?? undefined)}
+        onDone={closeToDashboard}
+        onViewHistory={() => {
+          closeToDashboard();
+          onNavigateToHistory();
+        }}
+      />
     );
   }
 
