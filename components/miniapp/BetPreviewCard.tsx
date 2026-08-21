@@ -5,6 +5,7 @@ import { getOddsStatusBadge } from "@/lib/bets/oddsStatusBadge";
 import type { DisplaySelection } from "@/lib/bets/mapBetForDisplay";
 import { formatAmount } from "@/lib/bets/formatAmount";
 import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
+import { formatSelectionDisplay } from "@/lib/bets/formatSelectionDisplay";
 import { formatFullEventName } from "@/lib/bets/formatFullEventName";
 import { formatEventDateTime } from "@/lib/bets/formatEventDateTime";
 import { hasUnverifiedOddsStatus, isSingleSelectionOddsUnavailable, isRecoverableLeg } from "./canConfirmBetSlip";
@@ -149,15 +150,29 @@ export function PreviewCard({
         {eventDateTime && <PreviewRow label={t("preview.date")} value={eventDateTime} />}
         <PreviewRow
           label={t("preview.selection")}
-          value={normalizeSelectionToEnglish({
-            selection: selection.selection,
-            sport: selection.sport,
-            event: selection.event,
-            market: selection.market,
-            marketType: selection.marketType,
-            participant: selection.participant,
-            line: selection.line,
-          })}
+          value={
+            // RU betting-terminology consistency fix — same
+            // normalizeSelectionToEnglish() call as before (untouched),
+            // now followed by the exact same lib/bets/formatSelectionDisplay.ts
+            // pass BetTicket.tsx's final ticket already applies. This row
+            // has never shown a separate market value (SINGLE has no
+            // market row, in either locale) — only `.selection` is read
+            // here, so EN output is byte-for-byte unchanged and RU gets
+            // the same outcome-wording rule as the final ticket.
+            formatSelectionDisplay(
+              normalizeSelectionToEnglish({
+                selection: selection.selection,
+                sport: selection.sport,
+                event: selection.event,
+                market: selection.market,
+                marketType: selection.marketType,
+                participant: selection.participant,
+                line: selection.line,
+              }),
+              selection.market,
+              locale,
+            ).selection
+          }
           wrap
         />
         <PreviewRow label={t("preview.stake")} value={formatAmount(preview.stake)} />
@@ -184,11 +199,8 @@ export function PreviewCard({
   // SelectionRow/SelectionList expect — no id exists yet pre-confirmation,
   // so the selection's own index stands in for it (stable for this
   // render's lifetime, never re-sorted).
-  const selections: DisplaySelection[] = preview.selections.map((selection, index) => ({
-    id: String(index),
-    sport: selection.sport,
-    event: formatFullEventName(selection.event, selection.homeTeamName, selection.awayTeamName),
-    outcome: normalizeSelectionToEnglish({
+  const selections: DisplaySelection[] = preview.selections.map((selection, index) => {
+    const normalizedOutcome = normalizeSelectionToEnglish({
       selection: selection.selection,
       sport: selection.sport,
       event: selection.event,
@@ -196,14 +208,26 @@ export function PreviewCard({
       marketType: selection.marketType,
       participant: selection.participant,
       line: selection.line,
-    }),
-    market: selection.market,
-    odds: selection.submittedOdds !== null ? String(selection.submittedOdds) : null,
-    currentOdds: selection.currentOdds !== null ? String(selection.currentOdds) : null,
-    oddsStatus: selection.oddsStatus,
-    competitionName: selection.competitionName,
-    eventStartTime: selection.eventStartTime,
-  }));
+    });
+    // Same {selection, market} presentation pass BetTicket.tsx's final
+    // ticket already applies — this is that one shared formatter, called
+    // per leg, independently, at the same point normalizeSelectionToEnglish
+    // itself already runs.
+    const display = formatSelectionDisplay(normalizedOutcome, selection.market, locale);
+
+    return {
+      id: String(index),
+      sport: selection.sport,
+      event: formatFullEventName(selection.event, selection.homeTeamName, selection.awayTeamName),
+      outcome: display.selection,
+      market: display.market,
+      odds: selection.submittedOdds !== null ? String(selection.submittedOdds) : null,
+      currentOdds: selection.currentOdds !== null ? String(selection.currentOdds) : null,
+      oddsStatus: selection.oddsStatus,
+      competitionName: selection.competitionName,
+      eventStartTime: selection.eventStartTime,
+    };
+  });
 
   return (
     <div

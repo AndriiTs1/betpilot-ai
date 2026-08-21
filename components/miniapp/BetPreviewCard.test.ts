@@ -11,6 +11,8 @@ import {
   ODDS_UNAVAILABLE_NOTICE,
 } from "./BetPreviewCard";
 import type { BetSelectionOddsStatus } from "./betPreviewApi";
+import { normalizeSelectionToEnglish } from "@/lib/bets/normalizeSelectionToEnglish";
+import { formatSelectionDisplay } from "@/lib/bets/formatSelectionDisplay";
 
 const source = readFileSync(fileURLToPath(new URL("./BetPreviewCard.tsx", import.meta.url)), "utf8");
 
@@ -182,4 +184,124 @@ test("BetPreviewCard EXPRESS leg localization: RU resolves 'Коэффициен
   // localization.test.ts's own getOddsStatusBadge coverage, repeated here
   // in the exact context this component actually calls it from.
   assert.equal(enBadge.color, ruBadge.color);
+});
+
+/* -------------------------------------------------------------------------- */
+/* RU betting-terminology preview consistency fix — the SAME                  */
+/* lib/bets/formatSelectionDisplay.ts pass BetTicket.tsx's final ticket       */
+/* already applies is now wired into PreviewCard's SINGLE row and EXPRESS    */
+/* per-leg SelectionRow data, right after the existing (untouched)           */
+/* normalizeSelectionToEnglish() call. No DOM-rendering harness exists (this */
+/* file's own header comment) — these tests compose the exact same pure      */
+/* functions PreviewCard.tsx itself calls, in the exact same order, to prove */
+/* the resulting value without rendering; the source-regex tests below prove */
+/* those pure calls are actually wired into the two JSX branches.            */
+/* -------------------------------------------------------------------------- */
+
+// Requirement 1 — RU EXPRESS preview: a named participant WIN localizes and
+// suppresses the redundant Match Winner market, exactly like BetTicket.tsx's
+// final ticket.
+test("RU EXPRESS preview composition: 'Марсель Win' / 'Match Winner' -> selection 'Марсель · Победа', market suppressed", () => {
+  const normalized = normalizeSelectionToEnglish({ selection: "Марсель Win" });
+  const display = formatSelectionDisplay(normalized, "Match Winner", "ru");
+  assert.equal(display.selection, "Марсель · Победа");
+  assert.equal(display.market, null);
+});
+
+// Requirement 2 — RU EXPRESS DRAW: market is kept (not redundant without a
+// named winner), matching the final ticket's own asymmetric rule.
+test("RU EXPRESS preview composition: 'Draw' / 'Match Winner' -> selection 'Ничья', market 'Победитель матча'", () => {
+  const normalized = normalizeSelectionToEnglish({ selection: "Draw" });
+  const display = formatSelectionDisplay(normalized, "Match Winner", "ru");
+  assert.equal(display.selection, "Ничья");
+  assert.equal(display.market, "Победитель матча");
+});
+
+// Requirement 3 — every EXPRESS leg is localized independently: composing
+// each leg's own (selection, market) pair never leaks state between legs.
+test("RU EXPRESS preview composition: three mixed legs (named win / named win / draw) each localize independently", () => {
+  const legs = [
+    { selection: "Марсель Win", market: "Match Winner" },
+    { selection: "Арсенал Win", market: "Match Winner" },
+    { selection: "Draw", market: "Match Winner" },
+  ].map(({ selection, market }) => formatSelectionDisplay(normalizeSelectionToEnglish({ selection }), market, "ru"));
+
+  assert.deepEqual(legs[0], { selection: "Марсель · Победа", market: null });
+  assert.deepEqual(legs[1], { selection: "Арсенал · Победа", market: null });
+  assert.deepEqual(legs[2], { selection: "Ничья", market: "Победитель матча" });
+});
+
+// Requirement 4 — RU SINGLE preview uses the exact same presentation rule
+// (same formatter, same composition order) as EXPRESS.
+test("RU SINGLE preview composition: 'Марсель Win' localizes the same way as an EXPRESS leg", () => {
+  const normalized = normalizeSelectionToEnglish({ selection: "Марсель Win" });
+  const display = formatSelectionDisplay(normalized, "Match Winner", "ru");
+  assert.equal(display.selection, "Марсель · Победа");
+});
+
+// Requirement 5 — EN preview remains unchanged: formatSelectionDisplay is
+// the identity function for EN, so composing it after
+// normalizeSelectionToEnglish() must return exactly what
+// normalizeSelectionToEnglish() alone already produced.
+test("EN preview composition: formatSelectionDisplay never alters normalizeSelectionToEnglish's own EN output", () => {
+  for (const selection of ["Марсель Win", "Draw", "Over 2.5 Goals"]) {
+    const normalized = normalizeSelectionToEnglish({ selection });
+    const display = formatSelectionDisplay(normalized, "Match Winner", "en");
+    assert.equal(display.selection, normalized);
+    assert.equal(display.market, "Match Winner");
+  }
+});
+
+// Requirement 7 — an unrecognized/future selection or market still falls
+// back safely (never blank, never thrown) in the exact composition order
+// PreviewCard.tsx uses.
+test("Fallback safety: an unrecognized selection/market composes safely through both calls, RU and EN", () => {
+  const normalized = normalizeSelectionToEnglish({ selection: "Some Future Phrasing" });
+  assert.equal(formatSelectionDisplay(normalized, "Some Future Market", "ru").selection, "Some Future Phrasing");
+  assert.equal(formatSelectionDisplay(normalized, "Some Future Market", "en").selection, "Some Future Phrasing");
+});
+
+// ---------------------------------------------------------------------
+// Source-wiring proof — both JSX branches actually call
+// formatSelectionDisplay at the right point, not just in theory.
+// ---------------------------------------------------------------------
+
+test("source: formatSelectionDisplay is imported and used by both the SINGLE row and the EXPRESS per-leg mapping", () => {
+  assert.match(source, /import \{ formatSelectionDisplay \} from "@\/lib\/bets\/formatSelectionDisplay";/);
+  // Exactly two call sites: the SINGLE PreviewRow value, and the EXPRESS
+  // selections.map() building each leg's DisplaySelection.
+  assert.equal((source.match(/formatSelectionDisplay\(/g) ?? []).length, 2);
+});
+
+test("source: the SINGLE Selection row reads only .selection from formatSelectionDisplay (no market row exists for SINGLE, in either locale — zero EN behavior change)", () => {
+  assert.match(
+    source,
+    /formatSelectionDisplay\(\s*normalizeSelectionToEnglish\(\{[\s\S]{0,500}\}\),\s*selection\.market,\s*locale,\s*\)\.selection/,
+  );
+});
+
+test("source: the EXPRESS per-leg mapping feeds normalizeSelectionToEnglish's output through formatSelectionDisplay, then uses .selection/.market for outcome/market", () => {
+  const mapMatch = source.match(/preview\.selections\.map\(\(selection, index\) => \{([\s\S]*?)return \{/);
+  assert.ok(mapMatch, "expected the EXPRESS selections.map callback to be found");
+  const mapBody = mapMatch![1];
+
+  assert.match(mapBody, /const normalizedOutcome = normalizeSelectionToEnglish\(\{/);
+  assert.match(mapBody, /const display = formatSelectionDisplay\(normalizedOutcome, selection\.market, locale\);/);
+
+  const returnMatch = source.match(/return \{\s*id: String\(index\),[\s\S]*?\};\s*\}\);/);
+  assert.ok(returnMatch, "expected the EXPRESS leg's returned DisplaySelection object to be found");
+  assert.match(returnMatch![1] ?? returnMatch[0], /outcome: display\.selection,/);
+  assert.match(returnMatch![1] ?? returnMatch[0], /market: display\.market,/);
+});
+
+// Requirement 6 — final BetTicket behavior remains unchanged: this file
+// (BetPreviewCard.tsx) never imports/re-exports/duplicates
+// formatSelectionDisplay's own logic — it calls the exact same function
+// components/miniapp/BetTicket.tsx already calls, so any behavior change
+// would show up in formatSelectionDisplay.test.ts, not as a second,
+// divergent implementation here.
+test("source: no second/local selection-market translation table exists in this file — only the shared formatSelectionDisplay is used", () => {
+  assert.equal(source.includes("Победа"), false, "no hardcoded RU betting terminology in this component — only in the shared formatter");
+  assert.equal(source.includes("Победитель матча"), false);
+  assert.equal(source.includes("Ничья"), false);
 });
