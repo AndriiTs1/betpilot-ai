@@ -2,8 +2,30 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { toBetTicketData } from "./BetScreen";
+import { toBetTicketData, resolveLiveTicketStatus } from "./BetScreen";
 import type { ConfirmedBet, ConfirmedExpressBet, ConfirmedExpressSelection } from "./betConfirmApi";
+import type { RecentBet } from "./types";
+
+function recentBet(overrides: Partial<RecentBet> = {}): RecentBet {
+  return {
+    id: "bet-1",
+    type: "SINGLE",
+    sport: "Football",
+    event: "Real Madrid vs Barcelona",
+    outcome: "Real Madrid Win",
+    stake: "100",
+    odds: "2.1",
+    status: "PENDING",
+    createdAt: "2026-07-21T12:00:00.000Z",
+    totalOdds: "2.1",
+    homeTeamName: null,
+    awayTeamName: null,
+    competitionName: null,
+    eventStartTime: null,
+    selections: [],
+    ...overrides,
+  };
+}
 
 function singleBet(overrides: Partial<ConfirmedBet> = {}): ConfirmedBet {
   return {
@@ -204,15 +226,35 @@ test("BetScreen: BetTextForm and BetScreenshotForm are both wired to the exact s
 test("source: submitted BetTicket still renders from the confirmedBet branch, wired to the same ticket/onDone/onViewHistory as before", () => {
   const source = readFileSync(fileURLToPath(new URL("./BetScreen.tsx", import.meta.url)), "utf8");
 
-  assert.match(source, /if \(confirmedBet\) \{\s*return \(/);
-  assert.match(source, /<BetTicket\s*\n\s*ticket=\{toBetTicketData\(confirmedBet, playerName, availableCredit\)\}\s*\n\s*onDone=\{closeToDashboard\}/);
+  assert.match(source, /if \(confirmedBet\) \{\s*\/\/ Status sync fix/);
+  assert.match(source, /<BetTicket\s*\n\s*ticket=\{toBetTicketData\(confirmedBet, playerName, availableCredit, liveStatus \?\? undefined\)\}\s*\n\s*onDone=\{closeToDashboard\}/);
   assert.match(source, /onViewHistory=\{\(\) => \{\s*closeToDashboard\(\);\s*onNavigateToHistory\(\);\s*\}\}/);
 });
 
 test("source: the confirmedBet branch wraps BetTicket in the new compact-top-spacing wrapper (-mt-4, canceling the shell's known mt-4)", () => {
   const source = readFileSync(fileURLToPath(new URL("./BetScreen.tsx", import.meta.url)), "utf8");
 
-  assert.match(source, /if \(confirmedBet\) \{\s*return \(\s*\/\/[\s\S]{0,900}?<div className="-mt-4">\s*<BetTicket/);
+  assert.match(source, /if \(confirmedBet\) \{[\s\S]{0,2000}?<div className="-mt-4">\s*<BetTicket/);
+});
+
+// Status sync fix — the open ticket must reconcile its status from
+// `recentBets` (already kept fresh by app/miniapp/page.tsx's own existing
+// polling), by the exact same bet id, before rendering — never from the
+// frozen `confirmedBet` snapshot alone. See the dedicated test suite below
+// this file's toBetTicketData/resolveLiveTicketStatus tests for the full
+// behavioral proof; this is the structural wiring check.
+test("source: the confirmedBet branch derives liveStatus from recentBets by matching confirmedBet.id, via the existing page-level polling — no second fetch/interval introduced here", () => {
+  const source = readFileSync(fileURLToPath(new URL("./BetScreen.tsx", import.meta.url)), "utf8");
+
+  const branchMatch = source.match(/if \(confirmedBet\) \{([\s\S]*?)return \(/);
+  assert.ok(branchMatch, "expected the confirmedBet branch to be found");
+  const body = branchMatch![1];
+
+  assert.match(body, /const liveTicket = recentBets\.find\(\(bet\) => bet\.id === confirmedBet\.id\);/);
+  assert.match(body, /const liveStatus = liveTicket \? resolveLiveTicketStatus\(liveTicket\.status\) : null;/);
+  // No fetch/setInterval/setTimeout is introduced in this branch — it only
+  // ever reads the `recentBets` prop it's already given.
+  assert.equal(/\bfetch\(|setInterval\(|setTimeout\(/.test(body), false);
 });
 
 test("source: the old bare (unwrapped) BetTicket return is gone — BetTicket is no longer the direct JSX child of the confirmedBet return", () => {
@@ -246,12 +288,12 @@ test("source: Done / View History wiring into BetTicket is byte-for-byte unchang
 // .../> call, so those internals' own regression coverage in
 // BetTicket.test.ts (unmodified by this stage) remains the proof they are
 // unaffected.
-test("source: BetTicket itself is imported and invoked exactly as before — no new props, no prop removed", () => {
+test("source: BetTicket itself is imported and invoked exactly as before — no new BetTicket props added or removed (ticket/onDone/onViewHistory only; the status sync fix only changes toBetTicketData's own arguments, not BetTicket's props)", () => {
   const source = readFileSync(fileURLToPath(new URL("./BetScreen.tsx", import.meta.url)), "utf8");
 
-  assert.match(source, /import BetTicket, \{ type BetTicketData \} from "\.\/BetTicket";/);
+  assert.match(source, /import BetTicket, \{ type BetTicketData, type BetTicketStatus \} from "\.\/BetTicket";/);
   const betTicketCall = source.match(
-    /<BetTicket\s*\n\s*ticket=\{toBetTicketData\(confirmedBet, playerName, availableCredit\)\}\s*\n\s*onDone=\{closeToDashboard\}\s*\n\s*onViewHistory=\{\(\) => \{\s*\n\s*closeToDashboard\(\);\s*\n\s*onNavigateToHistory\(\);\s*\n\s*\}\}\s*\n\s*\/>/,
+    /<BetTicket\s*\n\s*ticket=\{toBetTicketData\(confirmedBet, playerName, availableCredit, liveStatus \?\? undefined\)\}\s*\n\s*onDone=\{closeToDashboard\}\s*\n\s*onViewHistory=\{\(\) => \{\s*\n\s*closeToDashboard\(\);\s*\n\s*onNavigateToHistory\(\);\s*\n\s*\}\}\s*\n\s*\/>/,
   );
   assert.ok(betTicketCall, "expected BetTicket to still be called with exactly ticket/onDone/onViewHistory, nothing added or removed");
 });
@@ -290,4 +332,103 @@ test("BetScreen: home-screen strings are translated via t(), not hardcoded Russi
   assert.equal(source.includes('"Готов проверить вашу ставку"'), false);
   assert.equal(source.includes('"Отправить ставку"'), false);
   assert.equal(source.includes('"Доступно"'), false);
+});
+
+// ---------------------------------------------------------------------
+// Status sync fix — the open BetTicket must reconcile its status from the
+// fresh `recentBets` entry matching confirmedBet.id (the exact array
+// app/miniapp/page.tsx's existing polling already keeps up to date),
+// instead of the frozen confirmedBet snapshot's own (always-PENDING)
+// status. These tests exercise the exact same two-step resolution
+// BetScreen.tsx's confirmedBet branch performs — recentBets.find(...) then
+// resolveLiveTicketStatus(...) then toBetTicketData(..., liveStatus ??
+// undefined) — as pure functions, without needing this project's
+// deliberately absent DOM-rendering test infra.
+// ---------------------------------------------------------------------
+
+function resolveOpenTicketStatus(bet: ConfirmedBet | ConfirmedExpressBet, allRecentBets: RecentBet[]) {
+  const liveTicket = allRecentBets.find((entry) => entry.id === bet.id);
+  const liveStatus = liveTicket ? resolveLiveTicketStatus(liveTicket.status) : null;
+  return toBetTicketData(bet, "Andrii", "9390", liveStatus ?? undefined).status;
+}
+
+// Requirement 1 — freshly submitted PENDING ticket initially renders
+// submitted/awaiting state.
+test("status sync: a freshly submitted bet (recentBets has it as PENDING) renders 'submitted'", () => {
+  const bet = singleBet();
+  const status = resolveOpenTicketStatus(bet, [recentBet({ id: bet.id, status: "PENDING" })]);
+  assert.equal(status, "submitted");
+});
+
+// Also covers the brief instant before the optimistic merge has landed in
+// recentBets at all — must never crash, must fall back to "submitted"
+// (byte-for-byte the original, pre-fix behavior), never show a wrong or
+// blank status.
+test("status sync: if the bet id isn't in recentBets yet, the ticket safely falls back to 'submitted' — never crashes, never shows a stale/wrong status", () => {
+  const bet = singleBet();
+  const status = resolveOpenTicketStatus(bet, []);
+  assert.equal(status, "submitted");
+});
+
+// Requirement 2 — when the same bet id is later reconciled as CONFIRMED,
+// the open ticket resolves to CONFIRMED.
+test("status sync: once recentBets reconciles the same id as CONFIRMED, the open ticket resolves to 'confirmed'", () => {
+  const bet = singleBet();
+  const status = resolveOpenTicketStatus(bet, [recentBet({ id: bet.id, status: "CONFIRMED" })]);
+  assert.equal(status, "confirmed");
+});
+
+// Requirement 3 — REJECTED, not only CONFIRMED.
+test("status sync: once recentBets reconciles the same id as REJECTED, the open ticket resolves to 'rejected'", () => {
+  const bet = singleBet();
+  const status = resolveOpenTicketStatus(bet, [recentBet({ id: bet.id, status: "REJECTED" })]);
+  assert.equal(status, "rejected");
+});
+
+test("status sync: SETTLED_WIN/SETTLED_LOSS/VOID reconcile too, via the same mapping BetTicket.tsx's STATUS_CONFIG already supports", () => {
+  const bet = singleBet();
+  assert.equal(resolveOpenTicketStatus(bet, [recentBet({ id: bet.id, status: "SETTLED_WIN" })]), "settled_won");
+  assert.equal(resolveOpenTicketStatus(bet, [recentBet({ id: bet.id, status: "SETTLED_LOSS" })]), "settled_lost");
+  assert.equal(resolveOpenTicketStatus(bet, [recentBet({ id: bet.id, status: "VOID" })]), "void");
+});
+
+test("resolveLiveTicketStatus: a status with no existing BetTicket visual state (e.g. SETTLED_HALF_WIN) returns null rather than fabricating one", () => {
+  assert.equal(resolveLiveTicketStatus("SETTLED_HALF_WIN"), null);
+  assert.equal(resolveLiveTicketStatus("SETTLED_HALF_LOSS"), null);
+  assert.equal(resolveLiveTicketStatus("SOME_FUTURE_STATUS"), null);
+});
+
+// Requirement 4 — unrelated recent bets cannot change the open ticket.
+test("status sync: an unrelated recent bet (different id) — even one with a different status — never affects the open ticket", () => {
+  const bet = singleBet({ id: "bet-open" });
+  const status = resolveOpenTicketStatus(bet, [
+    recentBet({ id: "bet-open", status: "PENDING" }),
+    recentBet({ id: "bet-unrelated-1", status: "CONFIRMED" }),
+    recentBet({ id: "bet-unrelated-2", status: "REJECTED" }),
+  ]);
+  assert.equal(status, "submitted", "only the entry whose id matches the open ticket may affect it");
+});
+
+// Requirement 5 — EXPRESS works the same way.
+test("status sync: EXPRESS reconciles identically — PENDING -> submitted, then CONFIRMED -> confirmed, then REJECTED -> rejected, keyed on the same bet id", () => {
+  const bet = expressBet();
+  assert.equal(resolveOpenTicketStatus(bet, [recentBet({ id: bet.id, type: "EXPRESS", status: "PENDING" })]), "submitted");
+  assert.equal(resolveOpenTicketStatus(bet, [recentBet({ id: bet.id, type: "EXPRESS", status: "CONFIRMED" })]), "confirmed");
+  assert.equal(resolveOpenTicketStatus(bet, [recentBet({ id: bet.id, type: "EXPRESS", status: "REJECTED" })]), "rejected");
+});
+
+// Requirement 7 (structural half already covered above in "source:" tests)
+// — the fix must never touch how selections/stake/totalOdds are derived,
+// only `status`. Reusing this file's own pre-existing EXPRESS assertions
+// proves the rest of toBetTicketData's output is unaffected by the new
+// 4th parameter.
+test("status sync: reconciling status leaves every other ticket field (selections/stake/totalOdds) exactly as toBetTicketData already produced it", () => {
+  const bet = expressBet();
+  const withoutLiveStatus = toBetTicketData(bet, "Andrii", "9390");
+  const withLiveStatus = toBetTicketData(bet, "Andrii", "9390", "confirmed");
+
+  assert.notEqual(withoutLiveStatus.status, withLiveStatus.status);
+  assert.deepEqual(withoutLiveStatus.selections, withLiveStatus.selections);
+  assert.equal(withoutLiveStatus.stake, withLiveStatus.stake);
+  assert.equal(withoutLiveStatus.totalOdds, withLiveStatus.totalOdds);
 });

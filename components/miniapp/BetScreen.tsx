@@ -6,7 +6,7 @@ import { STATUS_BADGES } from "@/components/bets/StatusBadge";
 import BetActionSheet from "./BetActionSheet";
 import BetTextForm from "./BetTextForm";
 import BetScreenshotForm from "./BetScreenshotForm";
-import BetTicket, { type BetTicketData } from "./BetTicket";
+import BetTicket, { type BetTicketData, type BetTicketStatus } from "./BetTicket";
 import type { AnyConfirmedBet } from "./betConfirmApi";
 import type { RecentBet } from "./types";
 import { SportIcon, ExpressIcon } from "./sportIcons";
@@ -45,11 +45,24 @@ interface BetScreenProps {
 // every other number as a plain JS number) — no precision-sensitive
 // storage or calculation happens here, the exact values already came from
 // the server as strings and are shown, not recomputed.
-export function toBetTicketData(bet: AnyConfirmedBet, playerName: string, availableCredit: string): BetTicketData {
+//
+// Status sync fix — `liveStatus`, when supplied, overrides the "submitted"
+// default. `bet` (AnyConfirmedBet) itself is a frozen snapshot from the
+// moment of confirm and can never carry anything but PENDING — the actual,
+// possibly-since-changed status has to come from the caller, which derives
+// it from `recentBets` (see resolveLiveTicketStatus below). Omitted (the
+// default, used by every pre-existing call site/test), this is
+// byte-for-byte the original always-"submitted" behavior.
+export function toBetTicketData(
+  bet: AnyConfirmedBet,
+  playerName: string,
+  availableCredit: string,
+  liveStatus?: BetTicketStatus,
+): BetTicketData {
   if (bet.type === "SINGLE") {
     return {
       id: bet.id,
-      status: "submitted",
+      status: liveStatus ?? "submitted",
       player: playerName,
       createdAt: bet.createdAt,
       selections: [{ sport: bet.sport, league: null, event: bet.event, selection: bet.outcome, odds: bet.odds }],
@@ -61,7 +74,7 @@ export function toBetTicketData(bet: AnyConfirmedBet, playerName: string, availa
 
   return {
     id: bet.id,
-    status: "submitted",
+    status: liveStatus ?? "submitted",
     player: playerName,
     createdAt: bet.createdAt,
     selections: bet.selections.map((selection) => ({
@@ -78,6 +91,39 @@ export function toBetTicketData(bet: AnyConfirmedBet, playerName: string, availa
     totalOdds: bet.totalOdds !== null ? Number(bet.totalOdds) : null,
     availableCredit,
   };
+}
+
+// Status sync fix — root cause: the open BetTicket rendered exclusively
+// from `confirmedBet`, a local snapshot frozen at submit time (always
+// PENDING), and never looked at `recentBets` at all — even though
+// `recentBets` was already being kept fresh by app/miniapp/page.tsx's own
+// existing background polling (refreshIfIdle, gated on hasPendingBet, see
+// that file's own PENDING_BET_POLL_INTERVAL_MS effect) the whole time.
+// This maps a fresh, reconciled RecentBet.status (server truth) onto the
+// existing BetTicketStatus vocabulary BetTicket.tsx's STATUS_CONFIG already
+// renders. Only PENDING/CONFIRMED/REJECTED/SETTLED_WIN/SETTLED_LOSS/VOID
+// have a real, existing ticket visual state — SETTLED_HALF_WIN/
+// SETTLED_HALF_LOSS (and anything unrecognized) return null, meaning "keep
+// whatever this ticket already shows" rather than fabricate a status this
+// ticket has no visual representation for (adding one would be a redesign,
+// explicitly out of this fix's scope).
+export function resolveLiveTicketStatus(status: string): BetTicketStatus | null {
+  switch (status) {
+    case "PENDING":
+      return "submitted";
+    case "CONFIRMED":
+      return "confirmed";
+    case "REJECTED":
+      return "rejected";
+    case "SETTLED_WIN":
+      return "settled_won";
+    case "SETTLED_LOSS":
+      return "settled_lost";
+    case "VOID":
+      return "void";
+    default:
+      return null;
+  }
 }
 
 const RECENT_ACTIVITY_LIMIT = 2;
@@ -134,6 +180,20 @@ export default function BetScreen({
   };
 
   if (confirmedBet) {
+    // Status sync fix — `recentBets` is the exact same array
+    // app/miniapp/page.tsx's existing polling (refreshIfIdle, every
+    // PENDING_BET_POLL_INTERVAL_MS while any bet is PENDING) already keeps
+    // reconciled with the backend; no second polling loop is started here.
+    // The optimistic merge that runs in the same state update as
+    // `setConfirmedBet` (see handleConfirmed above / page.tsx's
+    // handleBetConfirmed → mergeConfirmedBetIntoRecentBets) means this bet's
+    // id is present in `recentBets` from the very first render onward, so
+    // `liveTicket` is only ever undefined in the single, brief instant
+    // before that merge has run — toBetTicketData's own `liveStatus ??
+    // "submitted"` fallback covers exactly that instant safely.
+    const liveTicket = recentBets.find((bet) => bet.id === confirmedBet.id);
+    const liveStatus = liveTicket ? resolveLiveTicketStatus(liveTicket.status) : null;
+
     return (
       // Stage M5.5B — SUBMITTED TICKET TOP-SPACING POLISH. The shared shell
       // (app/miniapp/page.tsx's DataScreen) wraps every BetScreen state in
@@ -148,7 +208,7 @@ export default function BetScreen({
       // keep their untouched `mt-4` offset.
       <div className="-mt-4">
         <BetTicket
-          ticket={toBetTicketData(confirmedBet, playerName, availableCredit)}
+          ticket={toBetTicketData(confirmedBet, playerName, availableCredit, liveStatus ?? undefined)}
           onDone={closeToDashboard}
           onViewHistory={() => {
             closeToDashboard();
