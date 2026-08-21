@@ -207,8 +207,14 @@ test("source: EXPRESS leg rendering (event/selection/market/odds/badge) is uncha
   assert.match(source, /resolveTicketSelectionOdds\(selection\)/);
   assert.match(source, /resolveTicketStatusBadge\(selection\)/);
   assert.match(source, /\{selection\.event\}/);
-  assert.match(source, /\{selection\.selection\}/);
-  assert.match(source, /selection\.market \? ` · \$\{selection\.market\}` : ""/);
+  // RU betting-terminology localization pass — selection.selection/.market
+  // now flow through formatSelectionDisplay(selection, market, locale)
+  // before rendering (see that module's own tests for the RU/EN mapping
+  // itself); the underlying selection.selection/selection.market fields
+  // and displayOdds computation are otherwise untouched.
+  assert.match(source, /const display = formatSelectionDisplay\(selection\.selection, selection\.market, locale\);/);
+  assert.match(source, /\{display\.selection\}/);
+  assert.match(source, /display\.market \? ` · \$\{display\.market\}` : ""/);
   assert.match(source, /displayOdds !== null \? ` · \$\{formatAmount\(displayOdds\)\}` : ""/);
 });
 
@@ -536,9 +542,16 @@ test("source: both legs' sport/Leg-N metadata is combined onto one line — both
 });
 
 test("source: event name, selection, and odds remain present and unchanged in the leg block", () => {
+  // NOTE: this assertion's exact <p> className is pre-existing/unrelated
+  // stale drift (a later external commit re-wrapped this element with
+  // line-clamp-2/leading-5 without updating this test) — not touched here,
+  // out of scope for the RU betting-terminology localization pass.
   assert.match(source, /<p className="mt-0\.5 text-\[15px\] font-semibold text-white break-words">\{selection\.event\}<\/p>/);
-  assert.match(source, /\{selection\.selection\}/);
-  assert.match(source, /\{selection\.market \? ` · \$\{selection\.market\}` : ""\}/);
+  // RU betting-terminology localization pass — see the sibling "EXPRESS leg
+  // rendering... is unchanged by this stage" test above for the full
+  // formatSelectionDisplay wiring assertion.
+  assert.match(source, /\{display\.selection\}/);
+  assert.match(source, /\{display\.market \? ` · \$\{display\.market\}` : ""\}/);
   assert.match(source, /\{displayOdds !== null \? ` · \$\{formatAmount\(displayOdds\)\}` : ""\}/);
 });
 

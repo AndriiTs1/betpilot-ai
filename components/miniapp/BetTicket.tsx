@@ -4,6 +4,7 @@ import { Ban, Barcode, CircleCheckBig, CircleX, Trophy, Zap } from "lucide-react
 import { SportIcon } from "./sportIcons";
 import { getOddsStatusBadge } from "@/lib/bets/oddsStatusBadge";
 import { formatAmount } from "@/lib/bets/formatAmount";
+import { formatSelectionDisplay } from "@/lib/bets/formatSelectionDisplay";
 import { getOddsPresentation } from "@/components/bets/SelectionRow";
 import { formatPotentialWin } from "./BetPreviewCard";
 import { useLocale } from "./LocaleProvider";
@@ -322,6 +323,13 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
             // confirmable price to show at all.
             const displayOdds = resolveTicketSelectionOdds(selection);
             const statusBadge = resolveTicketStatusBadge(selection);
+            // Presentation-only RU localization of the selection/market
+            // terminology (e.g. "Марсель Win" -> "Марсель · Победа") — see
+            // formatSelectionDisplay's own header for why this never
+            // touches the underlying canonical/provider values. EN is the
+            // identity function, so selection.selection/.market pass
+            // through unchanged for EN.
+            const display = formatSelectionDisplay(selection.selection, selection.market, locale);
 
             return (
               <div
@@ -349,8 +357,8 @@ const BetTicket = forwardRef<HTMLDivElement, BetTicketProps>(function BetTicket(
                   className="mt-0.5 line-clamp-2 break-words text-sm leading-5"
                   style={{ color: "#60E84A" }}
                 >
-                  {selection.selection}
-                  {selection.market ? ` · ${selection.market}` : ""}
+                  {display.selection}
+                  {display.market ? ` · ${display.market}` : ""}
                   {displayOdds !== null ? ` · ${formatAmount(displayOdds)}` : ""}
                 </p>
                 {statusBadge && (
