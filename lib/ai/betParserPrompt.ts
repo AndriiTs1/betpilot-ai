@@ -20,6 +20,8 @@ Call "reject_bet" if the message does not look like a bet request.
 
 Players are never required to state odds — the odds provider always supplies and verifies the real price for each selection. A missing odds value is never a reason to reject the message; only a missing sport, event, selection, or stake is. If odds for a leg are not mentioned, pass odds as null. If odds ARE mentioned, pass them exactly as stated — never invent, guess, or infer an odds value that was not actually written in the message.
 
+Bookmaker shorthand must stay exactly as written inside "selection", together with whatever participant name and number it's attached to — never split it into separate fields. This includes: П1/П2 (home/away win), Ф1/Ф2 (handicap), ТБ/ТМ (the MATCH's total over/under, e.g. "ТБ 2,5"), and ИТБ/ИТМ (one TEAM's own total over/under — e.g. "Интер ТБ 1,5" and "Интер ИТБ 1,5" both mean Inter's own total, over 1.5). A bare "ТБ 2,5" with no name attached is the whole match's total, not one team's — never attach a participant to it.
+
 Each selection also has four optional fields: league, market, period, and line. Extract each ONLY when it is explicitly stated in the message:
 - "league": the competition name, e.g. "Premier League", "La Liga" — never derive it from a team name or your own knowledge of which league a team plays in.
 - "market": the bet type, e.g. "Match Winner", "Total Goals", "Both Teams to Score" — only when named or unambiguous from context.
@@ -52,6 +54,8 @@ From what remains, identify only the actual bet: bookmaker name, bet type (singl
 Do not confuse:
 - an account balance, a promotional/bonus figure, or a "potential payout" figure with the actual stake the player placed;
 - the combined/total odds of a multi-selection slip with the odds of any single leg within it.
+
+Bookmaker shorthand must stay exactly as written inside "selection", together with whatever participant name and number it's attached to — never split it into separate fields. This includes: П1/П2 (home/away win), Ф1/Ф2 (handicap), ТБ/ТМ (the MATCH's total over/under, e.g. "ТБ 2,5"), and ИТБ/ИТМ (one TEAM's own total over/under — e.g. "Интер ТБ 1,5" and "Интер ИТБ 1,5" both mean Inter's own total, over 1.5). A bare "ТБ 2,5" with no name attached is the whole match's total, not one team's — never attach a participant to it.
 
 Four additional fields are optional on each selection: league, market, period, and line. Extract each ONLY when it is legibly visible in the text:
 - "league": the competition name, e.g. "Premier League", "La Liga" — never derive it from a team name.

@@ -11,7 +11,10 @@ import { normalizeOcrParticipantClaim } from "./ocrParticipantClaimNormalizer";
 import { logScreenshotQa1Diagnostic, type Qa1NumericEvidenceEntry, type Qa1MarketIntentEvidenceEntry } from "@/lib/logging/screenshotQa1Diagnostic";
 import { logScreenshotPipelineEvent } from "@/lib/logging/structuredLog";
 import type { NumericRoleEvidence } from "./numericRoleEvidence";
-import type { MarketIntentEvidence } from "./marketIntentEvidence";
+import { extractMarketIntentEvidence, type MarketIntentEvidence } from "./marketIntentEvidence";
+import { verifyMarketIntentClaim } from "./marketIntentVerifier";
+import { classifyBettingSelectionTextWithMarketHint } from "@/lib/odds/shorthandClassifier";
+import { splitDraftEventParticipants } from "@/lib/bets/draft/normalize";
 
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "llama3.2";
@@ -232,7 +235,11 @@ export const extractBetTool: Anthropic.Beta.BetaTool = {
         description:
           "The market or bet type, e.g. Match Winner, Total Goals, Both Teams to Score — only when explicitly stated or unambiguous from context. Null if not identifiable.",
       },
-      selection: { type: "string", description: "The outcome the player is betting on, e.g. Real Madrid Win." },
+      selection: {
+        type: "string",
+        description:
+          "The outcome the player is betting on, e.g. Real Madrid Win. Bookmaker shorthand (П1/П2, Ф1/Ф2, ТБ/ТМ, ИТБ/ИТМ) attached to a name and number, e.g. Интер ТБ 1,5, must stay together here exactly as written — never split into market/line.",
+      },
       period: {
         type: ["string", "null"],
         description: "The period the bet applies to, e.g. First Half, Full Game — only when explicitly stated. Null if not mentioned.",
@@ -456,7 +463,11 @@ export const extractExpressBetTool: Anthropic.Beta.BetaTool = {
               type: ["string", "null"],
               description: "The market or bet type — only when explicitly stated or unambiguous from context. Null if not identifiable.",
             },
-            selection: { type: "string" },
+            selection: {
+              type: "string",
+              description:
+                "The outcome for this leg. Bookmaker shorthand (П1/П2, Ф1/Ф2, ТБ/ТМ, ИТБ/ИТМ) attached to a name and number must stay together here exactly as written — never split into market/line.",
+            },
             period: {
               type: ["string", "null"],
               description: "The period the bet applies to — only when explicitly stated. Null if not mentioned.",
@@ -697,6 +708,96 @@ function isDeferrableLineMarketClaim(observation: MarketIntentObservation, rawSe
   return true;
 }
 
+// Individual Team Totals, Stage 5C — the narrowest safe recovery point for a
+// claim isDeferrableLineMarketClaim above cannot rescue: a claim that isn't
+// TOTALS/TEAM_TOTAL/SPREAD-shaped AT ALL, because Claude's own field split
+// lost the shorthand token before it ever reached
+// classifyBettingSelectionTextWithMarketHint (root cause, proven via a real
+// production log: "Интер ТБ 1,5" -> Claude's selection field came back as
+// bare "Интер", with "ТБ"/"1,5" dropped or moved into market/line, where
+// neither field carries market-shape meaning on its own — see
+// lib/ai/betParserPrompt.ts's own new shorthand guidance, added alongside
+// this function as the first line of defense; this function is the
+// deterministic backstop for when that guidance alone isn't enough, since
+// the model is inherently nondeterministic).
+//
+// Deliberately narrow, mirroring classifyReconcilable1X2Mismatch's own "one
+// exact signature, never a general escape hatch" discipline:
+//   claim  = { MONEYLINE_2WAY, PARTICIPANT } — the ONLY shape a bare
+//            participant name (no shorthand token attached) can ever
+//            produce from classifyBettingSelectionTextWithMarketHint. A
+//            claim that is ALREADY TOTALS/TEAM_TOTAL/SPREAD-shaped (the AI
+//            DID keep a shorthand token, just possibly the wrong one) is
+//            NEVER touched here — that is isDeferrableLineMarketClaim's own
+//            job above, whose existing hasSameMarketTypeConflict check must
+//            keep rejecting a genuine same-market direction disagreement
+//            (e.g. claimed OVER, text says ТМ/UNDER) exactly as before.
+//   verdict = CONTRADICTED only (never AMBIGUOUS — a source with two
+//             distinct high-confidence signatures is genuinely ambiguous
+//             and must still fail closed, exactly like every other
+//             deferral in this file).
+//   every qualifying conflicting evidence entry must independently agree on
+//             marketType=TEAM_TOTAL, selectionType (OVER/UNDER), participant
+//             name, AND embedded line — this function never picks a "first"
+//             entry among genuinely different team-total claims for the
+//             same leg (the raw-text-contains-conflicting-team-total-
+//             selections case must still be rejected, unchanged).
+//   the evidence's own participant name must exactly equal the CLAIM's own
+//             already-extracted participant name (classified.participantName,
+//             a real value the AI itself supplied via `selection`) — never a
+//             different team, never invented. This is what keeps recovery
+//             from ever attaching a participant the AI never actually
+//             named (a bare "ТБ 2,5" with no participant anywhere classifies
+//             with participantName: null, which fails the `!classified.
+//             participantName` guard below before evidence is even
+//             consulted), and what keeps an EXPRESS slip's separate legs
+//             from ever cross-attributing each other's evidence — different
+//             legs claim different participants, so a mismatch here simply
+//             yields no recovery for that leg, never someone else's.
+//
+// Returns the evidence's own matchedText (e.g. "Интер ТБ 1,5") — the exact
+// substring lib/ai/marketIntentEvidence.ts's deterministic scanner found in
+// the player's own original message — never a hand-built string, never a
+// new regex. The caller feeds this back into
+// classifyBettingSelectionTextWithMarketHint (via a corrected raw selection)
+// exactly as this function itself just did, reaching the identical
+// TEAM_TOTAL/participant/OVER-UNDER/line result the evidence extractor
+// already computed — reusing the one shared classifier this codebase
+// already trusts everywhere else, never a second, parallel one.
+function findRecoverableTeamTotalMatchedText(selection: RawBetSelectionFields, originalText: string): string | null {
+  const participants = splitDraftEventParticipants(selection.event).map((participant) => participant.rawName);
+  const classified = classifyBettingSelectionTextWithMarketHint(selection.selection, selection.market, participants);
+
+  if (classified.marketType !== "MONEYLINE_2WAY" || classified.selectionType !== "PARTICIPANT") return null;
+  if (!classified.participantName) return null;
+
+  const evidence = extractMarketIntentEvidence(originalText, participants);
+  const verification = verifyMarketIntentClaim(
+    { marketType: classified.marketType, selectionType: classified.selectionType },
+    evidence,
+  );
+  if (verification.verdict !== "CONTRADICTED") return null;
+
+  const matches = verification.conflictingEvidence.filter(
+    (entry) =>
+      entry.classification.marketType === "TEAM_TOTAL" &&
+      (entry.classification.selectionType === "OVER" || entry.classification.selectionType === "UNDER") &&
+      entry.classification.participantName === classified.participantName &&
+      entry.classification.embeddedLine !== null,
+  );
+  if (matches.length === 0) return null;
+
+  const [first, ...rest] = matches;
+  const allAgree = rest.every(
+    (entry) =>
+      entry.classification.selectionType === first.classification.selectionType &&
+      entry.classification.embeddedLine === first.classification.embeddedLine,
+  );
+  if (!allAgree) return null;
+
+  return first.matchedText;
+}
+
 // CORE BETTING PIPELINE STABILIZATION (Stage S2), Phase 3 — evaluated and
 // deliberately NOT implemented. The obvious version (defer a numeric-role
 // LINE ambiguity whenever the corresponding market-intent claim is an
@@ -865,6 +966,41 @@ function buildParsedBetSlipResult(
         return { valid: true, ...parsedSlip };
       }
 
+      // Individual Team Totals, Stage 5C — the narrowest safe recovery
+      // point, tried only after every existing deferral above has already
+      // failed to apply. raw.type is guaranteed "SINGLE" here
+      // (marketIntentObservations is only ever non-empty for SINGLE — see
+      // computeMarketIntentObservations in betDraftMapper.ts), so
+      // raw.selections[0] is THE selection this claim came from.
+      const recoveredMatchedText = findRecoverableTeamTotalMatchedText(raw.selections[0], text);
+      if (recoveredMatchedText !== null) {
+        const recoveredRaw = {
+          ...raw,
+          selections: [{ ...raw.selections[0], selection: recoveredMatchedText }, ...raw.selections.slice(1)],
+        };
+        let recoveredMarketIntentObservations: readonly MarketIntentObservation[] = [];
+        const recoveredParsedSlip = mapRawBetSlipToParsedBetSlip(recoveredRaw, {
+          originalText: text,
+          sourceType: mode,
+          onMarketIntentObservation: (observations) => {
+            recoveredMarketIntentObservations = observations;
+          },
+        });
+        // Defense-in-depth: never trust the recovery blindly. Re-verify the
+        // CORRECTED claim is genuinely reliable now (it always should be,
+        // by construction — the substituted text is exactly the deterministic
+        // evidence extractor's own matchedText, fed back through the same
+        // classifier) before returning it; if it somehow still isn't, fall
+        // through to the existing, unmodified rejection below rather than
+        // silently guessing. numeric-role observations are deliberately not
+        // re-checked here — only `selection` text changed, never line/odds/
+        // stake, and the numeric gate above already passed on this exact
+        // raw before this branch was ever reached.
+        if (!recoveredMarketIntentObservations.some(isUnreliableMarketClaim)) {
+          return { valid: true, ...recoveredParsedSlip };
+        }
+      }
+
       // Same internal-diagnostic-only discipline as numeric_mismatch above
       // — never sent to the client, never exposes CONTRADICTED/AMBIGUOUS/
       // MarketIntentVerdict or the claimed marketType/selectionType to the
@@ -874,6 +1010,37 @@ function buildParsedBetSlipResult(
         error: `Market claim not corroborated by message text (marketType=${unreliableMarketClaim.claim.marketType}, selectionType=${unreliableMarketClaim.claim.selectionType}, verdict=${unreliableMarketClaim.verification.verdict})`,
         code: "market_mismatch",
       };
+    }
+
+    // Individual Team Totals, Stage 5C — EXPRESS per-leg recovery. Unlike
+    // the SINGLE branch above, EXPRESS never runs the market-intent
+    // rejection check at all (computeMarketIntentObservations is SINGLE-only
+    // by design — see that function's own header on per-leg attribution
+    // ambiguity across a shared originalText), so an EXPRESS leg with the
+    // exact same weak-selection problem is never rejected today — it is
+    // silently mis-verified downstream instead. This block can only ever
+    // IMPROVE a leg (upgrade a weak claim to one uniquely corroborated by
+    // participant-matched evidence); it never has the power to reject
+    // anything EXPRESS wasn't already silently accepting, so it cannot
+    // regress any existing EXPRESS behavior. Each leg is recovered
+    // completely independently — findRecoverableTeamTotalMatchedText's own
+    // participant-equality requirement is what keeps one leg's evidence from
+    // ever being attributed to a different leg (see that function's own
+    // header for why).
+    if (raw.type === "EXPRESS" && raw.selections.length > 0) {
+      let changed = false;
+      const recoveredSelections = raw.selections.map((selection) => {
+        const recoveredMatchedText = findRecoverableTeamTotalMatchedText(selection, text);
+        if (recoveredMatchedText === null) return selection;
+        changed = true;
+        return { ...selection, selection: recoveredMatchedText };
+      });
+
+      if (changed) {
+        const recoveredRaw = { ...raw, selections: recoveredSelections };
+        const recoveredParsedSlip = mapRawBetSlipToParsedBetSlip(recoveredRaw, { originalText: text, sourceType: mode });
+        return { valid: true, ...recoveredParsedSlip };
+      }
     }
 
     return { valid: true, ...parsedSlip };

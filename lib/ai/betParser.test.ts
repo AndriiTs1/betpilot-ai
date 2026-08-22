@@ -4,6 +4,9 @@ import { extractBetTool, rejectBetTool, extractExpressBetTool, parseBetSlipMessa
 import { chatPrompt, ocrPrompt } from "./betParserPrompt";
 import { SCREENSHOT_QA1_DIAGNOSTIC_MARKER } from "@/lib/logging/screenshotQa1Diagnostic";
 import { extractMarketIntentEvidence } from "./marketIntentEvidence";
+import { classifyBettingSelectionTextWithMarketHint } from "@/lib/odds/shorthandClassifier";
+import { splitDraftEventParticipants } from "@/lib/bets/draft/normalize";
+import { legacySelectionToCanonicalRequest } from "@/lib/odds/legacyOddsBridge";
 
 // Regression test for a real production incident (Stage 12, Phase 3
 // hotfix): Anthropic's strict-mode tool schema only supports `minItems`
@@ -338,6 +341,44 @@ test("betParserPrompt: ocrPrompt retains its existing balance/payout/combined-od
 
 test("betParserPrompt: ocrPrompt instructs line to be kept exactly as printed", () => {
   assert.match(ocrPrompt, /exact line as printed/i);
+});
+
+// Individual Team Totals, Stage 5C, Part A — both prompts now explicitly
+// instruct the model to keep bookmaker shorthand (П1/П2, Ф1/Ф2, ТБ/ТМ,
+// ИТБ/ИТМ) attached to its participant name and number inside "selection",
+// never split across market/line, and never dropped — the prompt-side
+// mitigation for the real production regression this stage fixes (Claude's
+// own field split silently dropping "ТБ 1,5" from "Интер ТБ 1,5").
+test("betParserPrompt: chatPrompt tells the model to keep bookmaker shorthand attached to its selection, never split into market/line", () => {
+  assert.match(chatPrompt, /п1\/п2/i);
+  assert.match(chatPrompt, /ф1\/ф2/i);
+  assert.match(chatPrompt, /тб\/тм/i);
+  assert.match(chatPrompt, /итб\/итм/i);
+  assert.match(chatPrompt, /never split it into separate fields/i);
+});
+
+test("betParserPrompt: chatPrompt distinguishes a bare match total from a team's own total", () => {
+  assert.match(chatPrompt, /bare .ТБ 2,5. with no name attached is the whole match.s total/i);
+});
+
+test("betParserPrompt: ocrPrompt tells the model to keep bookmaker shorthand attached to its selection, never split into market/line", () => {
+  assert.match(ocrPrompt, /п1\/п2/i);
+  assert.match(ocrPrompt, /ф1\/ф2/i);
+  assert.match(ocrPrompt, /тб\/тм/i);
+  assert.match(ocrPrompt, /итб\/итм/i);
+  assert.match(ocrPrompt, /never split it into separate fields/i);
+});
+
+test("betParser: extract_bet's selection field description mentions bookmaker shorthand", () => {
+  const schema = extractBetTool.input_schema as unknown as { properties: Record<string, { description?: string }> };
+  assert.match(schema.properties.selection.description ?? "", /П1\/П2, Ф1\/Ф2, ТБ\/ТМ, ИТБ\/ИТМ/);
+});
+
+test("betParser: extract_express_bet's per-leg selection field description mentions bookmaker shorthand", () => {
+  const schema = extractExpressBetTool.input_schema as unknown as {
+    properties: { selections: { items: { properties: Record<string, { description?: string }> } } };
+  };
+  assert.match(schema.properties.selections.items.properties.selection.description ?? "", /П1\/П2, Ф1\/Ф2, ТБ\/ТМ, ИТБ\/ИТМ/);
 });
 
 // ---------------------------------------------------------------------
@@ -2772,4 +2813,266 @@ test("M3.1 Phase B: the market_intent_evidence diagnostic's new `deferred` field
   } finally {
     restore();
   }
+});
+
+/* -------------------------------------------------------------------------- */
+/* Individual Team Totals, Stage 5C — deterministic TEAM_TOTAL recovery      */
+/* -------------------------------------------------------------------------- */
+//
+// Root-cause fixture (real production regression, proven via a Vercel
+// Runtime Logs entry): "Интер — Монца / Интер ТБ 1,5 / Ставка 5 USDC" was
+// rejected as PARSE_FAILED/market_mismatch because Claude's real extraction
+// returned selection="Интер" (the "ТБ 1,5" shorthand dropped or moved into
+// market/line, where it carries no market-shape meaning on its own) —
+// deterministically reproduced here via a mocked Claude response using the
+// exact same weak shape, never a real network call.
+//
+// assertRecoveredTeamTotal re-classifies the recovered selection/market
+// through the EXACT SAME classifier legacySelectionToCanonicalRequest
+// (lib/odds/legacyOddsBridge.ts, called from buildBetSlipPreview.ts) already
+// uses — proof the recovered TEXT reaches genuine TEAM_TOTAL/participant/
+// direction/line semantics downstream, not merely that some string changed.
+function assertRecoveredTeamTotal(
+  result: Awaited<ReturnType<typeof parseBetSlipMessage>>,
+  expected: { participant: string; direction: "OVER" | "UNDER"; line: string },
+): void {
+  assert.equal(result.valid, true, result.valid ? "" : `expected a valid parse, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+  const selection = result.selections[0];
+  const participants = splitDraftEventParticipants(selection.event).map((p) => p.rawName);
+  const classified = classifyBettingSelectionTextWithMarketHint(selection.selection, selection.market, participants);
+  assert.equal(classified.marketType, "TEAM_TOTAL");
+  assert.equal(classified.selectionType, expected.direction);
+  assert.equal(classified.participantName, expected.participant);
+  assert.equal(classified.embeddedLine, expected.line);
+}
+
+// Test 1 — exact production input, RU OVER.
+test("Stage 5C (1): exact production regression — 'Интер ТБ 1,5' with Claude's weak selection='Интер' recovers to TEAM_TOTAL/Интер/OVER/1.5, never PARSE_FAILED", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Интер — Монца", selection: "Интер", stake: 5 }));
+
+  const result = await parseBetSlipMessage("Интер — Монца\nИнтер ТБ 1,5\nСтавка 5 USDC", "CHAT");
+
+  assertRecoveredTeamTotal(result, { participant: "Интер", direction: "OVER", line: "1,5" });
+});
+
+// Test 2 — same, RU UNDER (ТМ).
+test("Stage 5C (2): 'Интер ТМ 2,5' with Claude's weak selection='Интер' recovers to TEAM_TOTAL/Интер/UNDER/2,5", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Интер — Монца", selection: "Интер", stake: 5 }));
+
+  const result = await parseBetSlipMessage("Интер — Монца\nИнтер ТМ 2,5\nСтавка 5 USDC", "CHAT");
+
+  assertRecoveredTeamTotal(result, { participant: "Интер", direction: "UNDER", line: "2,5" });
+});
+
+// Test 3 — ИТБ (explicit "individual total, over" shorthand)
+test("Stage 5C (3): 'Интер ИТБ 1,5' with a weak claim recovers to TEAM_TOTAL/Интер/OVER/1,5", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Интер — Монца", selection: "Интер", stake: 5 }));
+
+  const result = await parseBetSlipMessage("Интер — Монца\nИнтер ИТБ 1,5\nСтавка 5 USDC", "CHAT");
+
+  assertRecoveredTeamTotal(result, { participant: "Интер", direction: "OVER", line: "1,5" });
+});
+
+// Test 3b — ИТМ (explicit "individual total, under" shorthand)
+test("Stage 5C (3b): 'Интер ИТМ 2,5' with a weak claim recovers to TEAM_TOTAL/Интер/UNDER/2,5", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Интер — Монца", selection: "Интер", stake: 5 }));
+
+  const result = await parseBetSlipMessage("Интер — Монца\nИнтер ИТМ 2,5\nСтавка 5 USDC", "CHAT");
+
+  assertRecoveredTeamTotal(result, { participant: "Интер", direction: "UNDER", line: "2,5" });
+});
+
+// Test 4 — English input, weak claim. Uses a single-token participant name
+// (Marseille, matching Stage 5A's own precedent) — a pre-existing,
+// out-of-scope limitation of lib/ai/marketIntentEvidence.ts's own window-
+// matching (unmodified by Stage 5C) does not yet attribute a TWO-word
+// English name like "Inter Milan" immediately preceding "Over N" to
+// TEAM_TOTAL; RU shorthand (ТБ/ТМ/ИТБ/ИТМ) has no such limitation, proven
+// by tests 1-3/5 above using the two-word "Интер" (one word) / away-team
+// cases, and this codebase's own established participant-attribution
+// behavior for EN "<Name> Over N" is otherwise identical to RU.
+test("Stage 5C (4): English 'Marseille Over 1.5' with a weak claim recovers to TEAM_TOTAL/Marseille/OVER/1.5", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Marseille — Lyon", selection: "Marseille", stake: 5 }));
+
+  const result = await parseBetSlipMessage("Marseille — Lyon\nMarseille Over 1.5\nStake 5 USDC", "CHAT");
+
+  assertRecoveredTeamTotal(result, { participant: "Marseille", direction: "OVER", line: "1.5" });
+});
+
+// Test 5 — away participant.
+test("Stage 5C (5): away-team 'Монца ТБ 1,5' with a weak claim recovers to TEAM_TOTAL/Монца/OVER/1,5, never defaulted to the home team", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Интер — Монца", selection: "Монца", stake: 5 }));
+
+  const result = await parseBetSlipMessage("Интер — Монца\nМонца ТБ 1,5\nСтавка 5 USDC", "CHAT");
+
+  assertRecoveredTeamTotal(result, { participant: "Монца", direction: "OVER", line: "1,5" });
+});
+
+// Test 6 — bare match TOTALS regression: the claim here is already
+// TOTALS/OVER (never MONEYLINE_2WAY/PARTICIPANT), so
+// findRecoverableTeamTotalMatchedText's own first guard excludes it —
+// nothing in this stage can ever attach a participant to it.
+test("Stage 5C (6): bare 'ТБ 2,5' (no participant anywhere) stays plain TOTALS — Stage 5C recovery never fires, never invents a participant", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Интер — Монца", market: "Totals", selection: "Over", line: "2,5", stake: 5 }));
+
+  const result = await parseBetSlipMessage("Интер — Монца\nТБ 2,5\nСтавка 5 USDC", "CHAT");
+
+  assert.equal(result.valid, true);
+  if (!result.valid) return;
+  const participants = splitDraftEventParticipants(result.selections[0].event).map((p) => p.rawName);
+  const classified = classifyBettingSelectionTextWithMarketHint(result.selections[0].selection, result.selections[0].market, participants);
+  assert.equal(classified.marketType, "TOTALS");
+  assert.equal(classified.participantName, null);
+});
+
+// Test 7 — genuine direction contradiction: the claim is ALREADY
+// TEAM_TOTAL/OVER (not weak/MONEYLINE_2WAY), so Stage 5C's own new recovery
+// function never even runs — this is isDeferrableLineMarketClaim's own
+// existing hasSameMarketTypeConflict guard, unchanged, still rejecting a
+// real same-market direction disagreement.
+test("Stage 5C (7): genuine TEAM_TOTAL direction contradiction — AI claims OVER/2,5 but raw text says 'Интер ТМ 2,5' (UNDER) — still rejected, never silently resolved", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Интер — Монца", selection: "Интер ТБ 2,5", line: "2,5", stake: 5 }));
+
+  const result = await parseBetSlipMessage("Интер — Монца\nИнтер ТМ 2,5\nСтавка 5 USDC", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+// Test 8 — participant mismatch: evidence in the message names a DIFFERENT
+// participant than the one the AI's own (weak) claim already named — Stage
+// 5C's participant-equality requirement means this never recovers, and
+// falls through to the existing rejection.
+test("Stage 5C (8): participant mismatch — AI's weak claim names 'Интер' but the only TEAM_TOTAL evidence in the text is for 'Монца' — never recovers, still rejects", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Интер — Монца", selection: "Интер", stake: 5 }));
+
+  const result = await parseBetSlipMessage("Интер — Монца\nМонца ТБ 1,5\nСтавка 5 USDC", "CHAT");
+
+  assert.equal(result.valid, false);
+  if (result.valid) return;
+  assert.equal(result.code, "market_mismatch");
+});
+
+// Test 9 — existing MONEYLINE/TOTALS/SPREAD behavior is unaffected: a clean,
+// unambiguous MONEYLINE claim with genuinely no market-shape evidence in the
+// text (UNVERIFIED, never CONTRADICTED) is untouched by this stage.
+test("Stage 5C (9): existing MONEYLINE/TOTALS/SPREAD behavior is unaffected — a plain 'Arsenal Win' claim with no conflicting evidence still passes exactly as before", async () => {
+  currentHandler = async () => anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal vs Chelsea", selection: "Arsenal Win", stake: 10 }));
+
+  const result = await parseBetSlipMessage("Arsenal vs Chelsea, Arsenal to win, stake 10", "CHAT");
+
+  assert.equal(result.valid, true);
+  if (!result.valid) return;
+  assert.equal(result.selections[0].selection, "Arsenal Win");
+});
+
+test("Stage 5C (9b): a correctly-classified SPREAD claim with cross-market noise elsewhere is still deferred via the existing, unmodified isDeferrableLineMarketClaim path — Stage 5C adds no new behavior here", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Arsenal vs Chelsea", selection: "Arsenal F1", line: "-1.5", stake: 10 }));
+
+  const result = await parseBetSlipMessage("ничья\nАрсенал Ф1(-1.5)\nставка 10", "OCR");
+
+  assert.equal(result.valid, true);
+  if (!result.valid) return;
+  assert.equal(result.selections[0].selection, "Arsenal F1");
+});
+
+// Test 10 — EXPRESS leg recovery, independent per leg: one weak TEAM_TOTAL
+// leg (Марсель) alongside one plain, unrelated MONEYLINE leg. EXPRESS never
+// runs the SINGLE-only rejection check at all, so before this stage the
+// TEAM_TOTAL leg would have silently kept its wrong, weak
+// MONEYLINE_2WAY/PARTICIPANT shape; this proves it now independently
+// recovers, while the other leg is completely unaffected. Leg 2 deliberately
+// avoids an explicit "Win"/shorthand word of its own (bare "Real Madrid"):
+// findRecoverableTeamTotalMatchedText scans the WHOLE originalText per leg
+// (using that leg's own participants), so a second leg's own strong
+// market-shape evidence (e.g. "Real Madrid Win") would make the FULL text
+// carry two distinct signatures — a genuine, pre-existing AMBIGUOUS-verdict
+// case (verifyMarketIntentClaim, unmodified by this stage) that correctly
+// makes recovery decline rather than guess, exactly like every other
+// AMBIGUOUS case in this file. This test proves the positive, INDEPENDENT-
+// recovery case; that separate cross-leg-ambiguity boundary is real but out
+// of this stage's scope (EXPRESS never ran any evidence check at all before
+// Stage 5C, so declining to recover there is strictly no worse than before).
+test("Stage 5C (10): EXPRESS — a weak TEAM_TOTAL leg (Марсель) recovers independently; the other, unrelated leg is untouched", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_express_bet", {
+      stake: 20,
+      selections: [
+        { sport: "Football", league: null, event: "Марсель — Лион", market: null, selection: "Марсель", period: null, line: null, odds: 1.4 },
+        { sport: "Football", league: null, event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid", period: null, line: null, odds: 1.8 },
+      ],
+    });
+
+  const text = "Марсель — Лион\nМарсель ТБ 1.5\n1.40\nReal Madrid vs Barcelona\nReal Madrid\n1.80\nэкспресс 20";
+
+  const result = await parseBetSlipMessage(text, "CHAT");
+
+  assert.equal(result.valid, true, result.valid ? "" : `expected a valid parse, got: ${result.error} (code: ${result.code})`);
+  if (!result.valid) return;
+  assert.equal(result.type, "EXPRESS");
+  assert.equal(result.selections.length, 2);
+
+  const [leg1, leg2] = result.selections;
+  const leg1Participants = splitDraftEventParticipants(leg1.event).map((p) => p.rawName);
+  const leg1Classified = classifyBettingSelectionTextWithMarketHint(leg1.selection, leg1.market, leg1Participants);
+  assert.equal(leg1Classified.marketType, "TEAM_TOTAL");
+  assert.equal(leg1Classified.selectionType, "OVER");
+  assert.equal(leg1Classified.participantName, "Марсель");
+  assert.equal(leg1Classified.embeddedLine, "1.5");
+
+  // The plain MONEYLINE leg is completely unaffected — same text, same
+  // classification as it would have had with no Stage 5C code at all.
+  assert.equal(leg2.selection, "Real Madrid");
+});
+
+// Test 11 — exact line preservation across the recoverable set, no
+// rounding/nearest-line substitution.
+for (const line of ["1", "1.5", "2", "2.5"]) {
+  test(`Stage 5C (11): exact TEAM_TOTAL line ${line} survives recovery with no rounding/substitution`, async () => {
+    currentHandler = async () =>
+      anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Интер — Монца", selection: "Интер", stake: 5 }));
+
+    const result = await parseBetSlipMessage(`Интер — Монца\nИнтер ТБ ${line}\nСтавка 5 USDC`, "CHAT");
+
+    assertRecoveredTeamTotal(result, { participant: "Интер", direction: "OVER", line });
+  });
+}
+
+// Test 12 — RU comma normalizes correctly. The recovery step itself never
+// touches the comma (it copies the evidence extractor's own matchedText
+// verbatim); this proves the existing, unmodified normalizeLineString
+// pipeline (lib/odds/domain.ts, exercised via legacySelectionToCanonicalRequest)
+// still correctly reduces "1,5" to canonical "1.5" once the recovered text
+// reaches it — Stage 5C changes nothing about comma handling.
+test("Stage 5C (12): RU comma-decimal line ('1,5') normalizes to canonical '1.5' once the recovered selection reaches legacySelectionToCanonicalRequest", async () => {
+  currentHandler = async () =>
+    anthropicToolUseResponse("extract_bet", singleToolInput({ event: "Интер — Монца", selection: "Интер", stake: 5 }));
+
+  const result = await parseBetSlipMessage("Интер — Монца\nИнтер ТБ 1,5\nСтавка 5 USDC", "CHAT");
+
+  assert.equal(result.valid, true);
+  if (!result.valid) return;
+  const request = legacySelectionToCanonicalRequest({
+    sport: result.selections[0].sport,
+    event: result.selections[0].event,
+    selection: result.selections[0].selection,
+    submittedOdds: 1.27,
+    line: result.selections[0].line,
+    marketRawText: result.selections[0].marketRawText,
+  });
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.selectionType, "OVER");
+  assert.equal(request.selection.participant?.name, "Интер");
+  assert.equal(request.selection.line, "1.5");
 });
