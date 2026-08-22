@@ -21,6 +21,12 @@ export interface BetPreviewSelection {
   // when verification never resolved one — never fabricated client-side.
   marketType: string | null;
   participant: string | null;
+  // Individual Team Totals, Stage 5B — the canonical OVER/UNDER direction
+  // (mirrors BetSlipPreviewSelection.selectionType), sourced identically to
+  // marketType/participant/line. Needed alongside them so BetPreviewCard.tsx
+  // can render a TEAM_TOTAL selection from canonical fields (see
+  // lib/bets/normalizeSelectionToEnglish.ts's own TEAM_TOTAL branch).
+  selectionType: string | null;
   // Already present on every real API response (mirrors
   // BetSlipPreviewSelection.line) — declared here, alongside marketType/
   // participant above, so BetPreviewCard.tsx can read it type-safely.
@@ -153,6 +159,7 @@ function isBetPreviewSelection(value: unknown): value is BetPreviewSelection {
     typeof s.selection === "string" &&
     (s.marketType === null || typeof s.marketType === "string") &&
     (s.participant === null || typeof s.participant === "string") &&
+    (s.selectionType === null || typeof s.selectionType === "string") &&
     (s.line === null || typeof s.line === "string") &&
     (s.submittedOdds === null || typeof s.submittedOdds === "number") &&
     (s.currentOdds === null || typeof s.currentOdds === "number") &&

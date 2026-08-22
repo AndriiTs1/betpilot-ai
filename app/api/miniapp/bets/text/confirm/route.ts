@@ -118,7 +118,21 @@ function serializeSingleBet(bet: Bet) {
     event: bet.event,
     outcome:
       bet.outcome !== null
-        ? normalizeSelectionToEnglish({ selection: bet.outcome, sport: bet.sport, event: bet.event })
+        ? normalizeSelectionToEnglish({
+            selection: bet.outcome,
+            sport: bet.sport,
+            event: bet.event,
+            // Individual Team Totals, Stage 5B — the same canonical fields
+            // already persisted at confirm time (Stage 5A) and already read
+            // for settlement, now also read here so the final ticket can
+            // render a TEAM_TOTAL selection from them instead of losing its
+            // line (see lib/bets/normalizeSelectionToEnglish.ts's own
+            // TEAM_TOTAL branch).
+            marketType: bet.canonicalMarketType,
+            selectionType: bet.canonicalSelectionType,
+            participant: bet.canonicalParticipant,
+            line: bet.line !== null ? bet.line.toString() : null,
+          })
         : bet.outcome,
     stake: bet.stake.toNumber(),
     odds: bet.odds !== null ? bet.odds.toNumber() : null,
@@ -144,6 +158,12 @@ function serializeExpressSelection(selection: BetSelection) {
       sport: selection.sport,
       event: selection.event,
       market: selection.market,
+      // Individual Team Totals, Stage 5B — same reasoning as
+      // serializeSingleBet's identical addition above.
+      marketType: selection.canonicalMarketType,
+      selectionType: selection.canonicalSelectionType,
+      participant: selection.canonicalParticipant,
+      line: selection.line !== null ? selection.line.toString() : null,
     }),
     market: selection.market,
     odds: selection.odds !== null ? selection.odds.toString() : null,

@@ -12,8 +12,10 @@ import {
   type ExpressPreviewTokenInput,
   type ExpressPreviewTokenSelection,
 } from "@/lib/betPreview/previewToken";
-import type { OddsVerificationInput } from "@/lib/odds/oddsVerifier";
+import type { OddsVerificationInput, TeamTotalVerificationInput } from "@/lib/odds/oddsVerifier";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
+import { TheOddsApiProvider } from "@/lib/odds/theOddsApiProvider";
+import { OddsVerificationService } from "@/lib/odds/oddsVerificationService";
 import { createRequestRateLimiter, type RequestRateLimiter } from "@/lib/rateLimit/requestRateLimiter";
 import { buildBetSlipPreview } from "@/lib/bets/buildBetSlipPreview";
 import type { ParsedBetSlip } from "@/lib/bets/betSlip";
@@ -87,6 +89,18 @@ interface FakeBetRow {
   totalOdds: Prisma.Decimal | null;
   stake: Prisma.Decimal;
   status: string;
+  // Individual Team Totals, Stage 5B — this fake previously dropped these
+  // columns entirely (insertBet built its own explicit-field object
+  // literal, never spreading `data`), so a SINGLE bet round-tripped through
+  // it always lost them even though createBetFromPreview.ts always writes
+  // them (Stage 5A). Added so a route-level TEAM_TOTAL test can prove the
+  // real confirm-response outcome text end-to-end, not just at the
+  // buildBetSlipPreview/verifyPreviewFreshness layer Stage 5A already
+  // covers.
+  canonicalMarketType: string | null;
+  canonicalSelectionType: string | null;
+  canonicalParticipant: string | null;
+  line: Prisma.Decimal | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -139,6 +153,10 @@ function createFakeDb(options: { players?: Record<string, string> } = {}) {
     stake: Prisma.Decimal;
     totalOdds: Prisma.Decimal | null;
     status: string;
+    canonicalMarketType?: string | null;
+    canonicalSelectionType?: string | null;
+    canonicalParticipant?: string | null;
+    line?: Prisma.Decimal | null;
     selections?: { create: Array<Omit<FakeSelectionRow, "id" | "betId" | "createdAt" | "updatedAt">> };
   }) {
     createCallCount += 1;
@@ -158,6 +176,10 @@ function createFakeDb(options: { players?: Record<string, string> } = {}) {
       totalOdds: data.totalOdds,
       stake: data.stake,
       status: data.status,
+      canonicalMarketType: data.canonicalMarketType ?? null,
+      canonicalSelectionType: data.canonicalSelectionType ?? null,
+      canonicalParticipant: data.canonicalParticipant ?? null,
+      line: data.line ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -262,6 +284,61 @@ function fakeVerifyOddsFnByEvent(byEvent: Record<string, OddsCheckResult | "reje
   };
 }
 
+// Individual Team Totals, Stage 5B — a real TheOddsApiProvider wired with an
+// h2h fake that always throws (proving the h2h/moneyline verifier is never
+// reached for a TEAM_TOTAL selection) and a team-total fake that returns a
+// verified match. Wired via oddsVerificationService, never verifyOddsFn
+// (which would leave verifyTeamTotalsOddsFn on its real, network-calling
+// default — see lib/bets/buildBetSlipPreview.ts's resolveOddsVerificationService).
+function verifiedTeamTotalOddsService(odds: number) {
+  const teamTotalFn = async (_input: TeamTotalVerificationInput): Promise<OddsCheckResult> => ({
+    matched: true,
+    withinTolerance: true,
+    sourceOdds: odds,
+    submittedOdds: odds,
+    discrepancyPercent: 0,
+    bookmaker: "Pinnacle",
+    note: null,
+  });
+  const h2hFn = async (_input: OddsVerificationInput): Promise<OddsCheckResult> => {
+    throw new Error("the h2h/moneyline verifier must never be called for a TEAM_TOTAL selection");
+  };
+  const provider = new TheOddsApiProvider(h2hFn, undefined, undefined, teamTotalFn);
+  return new OddsVerificationService(provider);
+}
+
+// Individual Team Totals, Stage 5B — EXPRESS's own version of
+// verifiedTeamTotalOddsService above: the h2h verifier handles ordinary
+// MONEYLINE legs by event name (never a network call), while the
+// team-total verifier handles TEAM_TOTAL legs unconditionally — proving
+// each leg of a mixed slip routes to its own correct verifier.
+function mixedTeamTotalExpressOddsService(h2hByEvent: Record<string, number>, teamTotalOdds: number) {
+  const h2hFn = async (input: OddsVerificationInput): Promise<OddsCheckResult> => {
+    const odds = h2hByEvent[input.event];
+    if (odds === undefined) throw new Error(`No fake h2h odds configured for event "${input.event}"`);
+    return {
+      matched: true,
+      withinTolerance: true,
+      sourceOdds: odds,
+      submittedOdds: odds,
+      discrepancyPercent: 0,
+      bookmaker: "Pinnacle",
+      note: null,
+    };
+  };
+  const teamTotalFn = async (_input: TeamTotalVerificationInput): Promise<OddsCheckResult> => ({
+    matched: true,
+    withinTolerance: true,
+    sourceOdds: teamTotalOdds,
+    submittedOdds: teamTotalOdds,
+    discrepancyPercent: 0,
+    bookmaker: "Pinnacle",
+    note: null,
+  });
+  const provider = new TheOddsApiProvider(h2hFn, undefined, undefined, teamTotalFn);
+  return new OddsVerificationService(provider);
+}
+
 function oddsChangedResult(sourceOdds: number, submittedOdds: number): OddsCheckResult {
   return {
     matched: true,
@@ -361,6 +438,64 @@ test("confirm route: valid SINGLE token is confirmed, response shape unchanged",
   assert.ok("selections" in body.bet === false); // SINGLE response never gained a selections field
 });
 
+// Individual Team Totals, Stage 5B — the real production reproduction: RU
+// shorthand text ("Интер ТБ 1,5"), a confirm-time event string already
+// rewritten to the provider's own team names (Stage 5A's own fixture), and
+// a token carrying the canonical marketType/selectionType/participant/line
+// established by Stage 5A. Proves the final ticket's own outcome text
+// (what BetTicket.tsx will render) carries the participant AND the exact
+// line all the way through the real confirm route — not just at the
+// buildBetSlipPreview/verifyPreviewFreshness layer Stage 5A already tested.
+test("confirm route: SINGLE TEAM_TOTAL OVER — final outcome text carries participant + exact line, never lost, never routed to the h2h verifier", async () => {
+  const db = createFakeDb();
+  const token = signPreviewToken(
+    singleTokenInput({
+      event: "Inter Milan — Monza",
+      outcome: "Интер ТБ 1,5",
+      odds: 1.27,
+      acceptedOdds: 1.27,
+      totalOdds: 1.27,
+      oddsCheck: { matched: true, withinTolerance: true, sourceOdds: 1.27, bookmaker: "Pinnacle" },
+      canonicalMarketType: "TEAM_TOTAL",
+      canonicalSelectionType: "OVER",
+      canonicalParticipant: "Интер",
+      canonicalLine: "1.5",
+    }),
+    PREVIEW_SECRET,
+  );
+
+  const res = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { oddsVerificationService: verifiedTeamTotalOddsService(1.27) }));
+  assert.equal(res.status, 200);
+
+  const body = (await json(res)) as { bet: Record<string, unknown> };
+  assert.equal(body.bet.outcome, "Интер · Team total over 1.5");
+});
+
+test("confirm route: SINGLE TEAM_TOTAL UNDER — direction and exact line both survive", async () => {
+  const db = createFakeDb();
+  const token = signPreviewToken(
+    singleTokenInput({
+      event: "Inter Milan — Monza",
+      outcome: "Интер ТМ 2,5",
+      odds: 1.55,
+      acceptedOdds: 1.55,
+      totalOdds: 1.55,
+      oddsCheck: { matched: true, withinTolerance: true, sourceOdds: 1.55, bookmaker: "Pinnacle" },
+      canonicalMarketType: "TEAM_TOTAL",
+      canonicalSelectionType: "UNDER",
+      canonicalParticipant: "Интер",
+      canonicalLine: "2.5",
+    }),
+    PREVIEW_SECRET,
+  );
+
+  const res = await handleBetConfirm(confirmRequest(token), fakeOptions(db, { oddsVerificationService: verifiedTeamTotalOddsService(1.55) }));
+  assert.equal(res.status, 200);
+
+  const body = (await json(res)) as { bet: Record<string, unknown> };
+  assert.equal(body.bet.outcome, "Интер · Team total under 2.5");
+});
+
 test("confirm route: repeated SINGLE confirm is idempotent, no duplicate", async () => {
   const db = createFakeDb();
   const token = signPreviewToken(singleTokenInput(), PREVIEW_SECRET);
@@ -434,6 +569,57 @@ test("confirm route: valid EXPRESS token is confirmed, type=EXPRESS, selections 
   // order preserved
   assert.equal(body.bet.selections[0].event, "Real Madrid vs Barcelona");
   assert.equal(body.bet.selections[1].event, "Inter Milan vs Juventus");
+});
+
+// Individual Team Totals, Stage 5B — EXPRESS with one TEAM_TOTAL leg
+// (Марсель) alongside one plain MONEYLINE leg. Proves both that the
+// TEAM_TOTAL leg's own outcome text carries participant + exact line, and
+// that the ordinary leg is completely unaffected — each leg routes to its
+// own verifier (mixedTeamTotalExpressOddsService throws if either fake is
+// called for the wrong leg).
+test("confirm route: EXPRESS with a TEAM_TOTAL leg — that leg's outcome carries participant + exact line, the other leg is unaffected", async () => {
+  const db = createFakeDb();
+  const token = signExpressPreviewToken(
+    expressTokenInput({
+      selections: [
+        {
+          sport: "Football",
+          event: "Olympique de Marseille — Lyon",
+          outcome: "Марсель ТБ 1.5",
+          market: null,
+          submittedOdds: "1.40",
+          currentOdds: "1.40",
+          oddsStatus: "VERIFIED",
+          canonicalMarketType: "TEAM_TOTAL",
+          canonicalSelectionType: "OVER",
+          canonicalParticipant: "Марсель",
+          canonicalLine: "1.5",
+        },
+        {
+          sport: "Football",
+          event: "Real Madrid vs Barcelona",
+          outcome: "Real Madrid Win",
+          market: "Match Winner",
+          submittedOdds: "1.80",
+          currentOdds: "1.80",
+          oddsStatus: "VERIFIED",
+        },
+      ],
+    }),
+    PREVIEW_SECRET,
+  );
+
+  const res = await handleBetConfirm(
+    confirmRequest(token),
+    fakeOptions(db, {
+      oddsVerificationService: mixedTeamTotalExpressOddsService({ "Real Madrid vs Barcelona": 1.8 }, 1.4),
+    }),
+  );
+  assert.equal(res.status, 200);
+
+  const body = (await json(res)) as { bet: { selections: Array<Record<string, unknown>> } };
+  assert.equal(body.bet.selections[0].outcome, "Марсель · Team total over 1.5");
+  assert.equal(body.bet.selections[1].outcome, "Real Madrid Win");
 });
 
 test("confirm route: EXPRESS selection Decimal fields are strings, and null currentOdds stays null", async () => {

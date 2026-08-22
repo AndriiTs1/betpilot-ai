@@ -21,20 +21,27 @@ test("RU: DRAW becomes 'Ничья', market kept (not redundant without a named 
   assert.equal(result.market, "Победитель матча");
 });
 
-test("RU: OVER 2.5 becomes 'Больше 2.5'", () => {
+// Stage 5B — corrected to match this file's own, later-added "RU totals
+// preserve the numeric line" tests below (and Stage 5B's own explicit rule:
+// an ordinary MATCH TOTAL must render as "Тотал больше/меньше N", never gain
+// a participant). These 3 tests previously asserted a bare "Больше N"/
+// "Меньше N" with no "Тотал" prefix — a stale expectation the code had
+// already moved past (ruSelectionText's own "over"/"under" cases produce the
+// "Тотал ..." prefix), left unnoticed until Stage 5B's fixture audit.
+test("RU: OVER 2.5 becomes 'Тотал больше 2.5'", () => {
   const result = formatSelectionDisplay("Over 2.5 Goals", null, "ru");
-  assert.equal(result.selection, "Больше 2.5");
+  assert.equal(result.selection, "Тотал больше 2.5");
   assert.equal(result.market, null);
 });
 
-test("RU: UNDER 2.5 becomes 'Меньше 2.5'", () => {
+test("RU: UNDER 2.5 becomes 'Тотал меньше 2.5'", () => {
   const result = formatSelectionDisplay("Under 2.5 Goals", null, "ru");
-  assert.equal(result.selection, "Меньше 2.5");
+  assert.equal(result.selection, "Тотал меньше 2.5");
 });
 
 test("RU: OVER/UNDER also work without the ' Goals' suffix (non-football)", () => {
-  assert.equal(formatSelectionDisplay("Over 21.5", null, "ru").selection, "Больше 21.5");
-  assert.equal(formatSelectionDisplay("Under 21.5", null, "ru").selection, "Меньше 21.5");
+  assert.equal(formatSelectionDisplay("Over 21.5", null, "ru").selection, "Тотал больше 21.5");
+  assert.equal(formatSelectionDisplay("Under 21.5", null, "ru").selection, "Тотал меньше 21.5");
 });
 
 test("RU: generic HOME_WIN/AWAY_WIN (no participant name known) localize without a redundant market", () => {
@@ -89,7 +96,7 @@ test("EXPRESS: mixed legs (named win / draw / totals) each localize independentl
 
   assert.deepEqual(legs[0], { selection: "Марсель · Победа", market: null });
   assert.deepEqual(legs[1], { selection: "Ничья", market: "Победитель матча" });
-  assert.deepEqual(legs[2], { selection: "Больше 2.5", market: "Тотал голов" });
+  assert.deepEqual(legs[2], { selection: "Тотал больше 2.5", market: "Тотал голов" });
 });
 
 // Requirement 7 — fallback safety: an unrecognized (future/unknown)
@@ -159,4 +166,68 @@ test("EN totals remain byte-for-byte unchanged", () => {
     formatSelectionDisplay("Over 2.5 Goals", "Total Goals", "en"),
     { selection: "Over 2.5 Goals", market: "Total Goals" },
   );
+});
+
+/* -------------------------------------------------------------------------- */
+/* Individual Team Totals, Stage 5B — RU inverse of                          */
+/* normalizeSelectionToEnglish.ts's new TEAM_TOTAL branch                    */
+/* -------------------------------------------------------------------------- */
+
+test("RU TEAM_TOTAL OVER: 'Интер · Team total over 1.5' becomes 'Интер · Тотал больше 1.5', market suppressed as redundant", () => {
+  const result = formatSelectionDisplay("Интер · Team total over 1.5", null, "ru");
+  assert.equal(result.selection, "Интер · Тотал больше 1.5");
+  assert.equal(result.market, null);
+});
+
+test("RU TEAM_TOTAL UNDER: 'Интер · Team total under 2.5' becomes 'Интер · Тотал меньше 2.5'", () => {
+  const result = formatSelectionDisplay("Интер · Team total under 2.5", null, "ru");
+  assert.equal(result.selection, "Интер · Тотал меньше 2.5");
+});
+
+test("RU TEAM_TOTAL: a market label is suppressed even when present (redundant with the combined label)", () => {
+  const result = formatSelectionDisplay("Интер · Team total over 1.5", "Individual Total", "ru");
+  assert.equal(result.selection, "Интер · Тотал больше 1.5");
+  assert.equal(result.market, null);
+});
+
+test("EN TEAM_TOTAL OVER: passes through unchanged (EN is the identity function)", () => {
+  const result = formatSelectionDisplay("Inter Milan · Team total over 1.5", null, "en");
+  assert.deepEqual(result, { selection: "Inter Milan · Team total over 1.5", market: null });
+});
+
+test("EN TEAM_TOTAL UNDER: passes through unchanged", () => {
+  const result = formatSelectionDisplay("Inter Milan · Team total under 2.5", null, "en");
+  assert.deepEqual(result, { selection: "Inter Milan · Team total under 2.5", market: null });
+});
+
+test("RU TEAM_TOTAL: away participant is preserved, not translated or dropped", () => {
+  assert.equal(formatSelectionDisplay("Монца · Team total over 1.5", null, "ru").selection, "Монца · Тотал больше 1.5");
+});
+
+test("RU TEAM_TOTAL: whole-number line survives with no rounding", () => {
+  assert.equal(formatSelectionDisplay("Интер · Team total over 2", null, "ru").selection, "Интер · Тотал больше 2");
+});
+
+test("RU TEAM_TOTAL: decimal line survives with no rounding/substitution", () => {
+  assert.equal(formatSelectionDisplay("Интер · Team total under 1.5", null, "ru").selection, "Интер · Тотал меньше 1.5");
+});
+
+test("RU TEAM_TOTAL: participant names are never translated or mutated, in either script", () => {
+  assert.equal(formatSelectionDisplay("Marseille · Team total over 1.5", null, "ru").selection, "Marseille · Тотал больше 1.5");
+});
+
+test("RU ordinary MATCH TOTAL regression: must NOT gain a participant — stays exactly 'Тотал больше/меньше N'", () => {
+  assert.equal(formatSelectionDisplay("Over 2.5 Goals", null, "ru").selection, "Тотал больше 2.5");
+  assert.equal(formatSelectionDisplay("Under 2.5 Goals", null, "ru").selection, "Тотал меньше 2.5");
+});
+
+test("RU MONEYLINE regression: named win and generic HOME/AWAY win are unaffected by the TEAM_TOTAL pattern", () => {
+  assert.equal(formatSelectionDisplay("Марсель Win", "Match Winner", "ru").selection, "Марсель · Победа");
+  assert.equal(formatSelectionDisplay("Home Win", "Match Winner", "ru").selection, "Победа хозяев");
+});
+
+test("RU SPREAD regression: an unrecognized SPREAD-style string still falls through unchanged (formatSelectionDisplay has no SPREAD pattern of its own)", () => {
+  const result = formatSelectionDisplay("Barcelona -1.5", "Spread", "ru");
+  assert.equal(result.selection, "Barcelona -1.5");
+  assert.equal(result.market, "Spread");
 });

@@ -261,6 +261,115 @@ test("Fallback safety: an unrecognized selection/market composes safely through 
   assert.equal(formatSelectionDisplay(normalized, "Some Future Market", "en").selection, "Some Future Phrasing");
 });
 
+/* -------------------------------------------------------------------------- */
+/* Individual Team Totals, Stage 5B — PreviewCard SINGLE/EXPRESS composition */
+/* -------------------------------------------------------------------------- */
+
+test("RU SINGLE preview composition: TEAM_TOTAL OVER renders 'Интер · Тотал больше 1.5', line preserved, market suppressed", () => {
+  const normalized = normalizeSelectionToEnglish({
+    selection: "Интер ТБ 1,5",
+    marketType: "TEAM_TOTAL",
+    selectionType: "OVER",
+    participant: "Интер",
+    line: "1.5",
+  });
+  const display = formatSelectionDisplay(normalized, null, "ru");
+  assert.equal(display.selection, "Интер · Тотал больше 1.5");
+  assert.equal(display.market, null);
+});
+
+test("RU SINGLE preview composition: TEAM_TOTAL UNDER renders 'Интер · Тотал меньше 2.5'", () => {
+  const normalized = normalizeSelectionToEnglish({
+    selection: "Интер ТМ 2,5",
+    marketType: "TEAM_TOTAL",
+    selectionType: "UNDER",
+    participant: "Интер",
+    line: "2.5",
+  });
+  const display = formatSelectionDisplay(normalized, null, "ru");
+  assert.equal(display.selection, "Интер · Тотал меньше 2.5");
+});
+
+test("EN SINGLE preview composition: TEAM_TOTAL OVER renders 'Inter Milan · Team total over 1.5'", () => {
+  const normalized = normalizeSelectionToEnglish({
+    selection: "Inter Milan Over 1.5",
+    marketType: "TEAM_TOTAL",
+    selectionType: "OVER",
+    participant: "Inter Milan",
+    line: "1.5",
+  });
+  const display = formatSelectionDisplay(normalized, null, "en");
+  assert.equal(display.selection, "Inter Milan · Team total over 1.5");
+});
+
+test("EN SINGLE preview composition: TEAM_TOTAL UNDER renders 'Inter Milan · Team total under 2.5'", () => {
+  const normalized = normalizeSelectionToEnglish({
+    selection: "Inter Milan Under 2.5",
+    marketType: "TEAM_TOTAL",
+    selectionType: "UNDER",
+    participant: "Inter Milan",
+    line: "2.5",
+  });
+  const display = formatSelectionDisplay(normalized, null, "en");
+  assert.equal(display.selection, "Inter Milan · Team total under 2.5");
+});
+
+test("RU EXPRESS preview composition: a TEAM_TOTAL leg alongside a plain MONEYLINE leg — each localizes independently", () => {
+  const legs = [
+    formatSelectionDisplay(
+      normalizeSelectionToEnglish({
+        selection: "Марсель ТБ 1.5",
+        marketType: "TEAM_TOTAL",
+        selectionType: "OVER",
+        participant: "Марсель",
+        line: "1.5",
+      }),
+      null,
+      "ru",
+    ),
+    formatSelectionDisplay(normalizeSelectionToEnglish({ selection: "Real Madrid Win" }), "Match Winner", "ru"),
+  ];
+
+  assert.deepEqual(legs[0], { selection: "Марсель · Тотал больше 1.5", market: null });
+  assert.deepEqual(legs[1], { selection: "Real Madrid · Победа", market: null });
+});
+
+test("RU SINGLE preview composition: away-participant TEAM_TOTAL is preserved", () => {
+  const normalized = normalizeSelectionToEnglish({
+    selection: "Монца ТБ 1.5",
+    marketType: "TEAM_TOTAL",
+    selectionType: "OVER",
+    participant: "Монца",
+    line: "1.5",
+  });
+  assert.equal(formatSelectionDisplay(normalized, null, "ru").selection, "Монца · Тотал больше 1.5");
+});
+
+test("RU SINGLE preview composition: whole-number TEAM_TOTAL line (2) and decimal line (1.5) both survive with no rounding", () => {
+  const whole = normalizeSelectionToEnglish({
+    selection: "Интер ТБ 2",
+    marketType: "TEAM_TOTAL",
+    selectionType: "OVER",
+    participant: "Интер",
+    line: "2",
+  });
+  assert.equal(formatSelectionDisplay(whole, null, "ru").selection, "Интер · Тотал больше 2");
+
+  const decimal = normalizeSelectionToEnglish({
+    selection: "Интер ТМ 1.5",
+    marketType: "TEAM_TOTAL",
+    selectionType: "UNDER",
+    participant: "Интер",
+    line: "1.5",
+  });
+  assert.equal(formatSelectionDisplay(decimal, null, "ru").selection, "Интер · Тотал меньше 1.5");
+});
+
+test("RU ordinary TOTALS regression: PreviewCard composition never gains a participant for a plain match total", () => {
+  const normalized = normalizeSelectionToEnglish({ selection: "Over 2.5", marketType: "TOTALS", participant: null, line: "2.5" });
+  assert.equal(formatSelectionDisplay(normalized, "Totals", "ru").selection, "Тотал больше 2.5");
+});
+
 // ---------------------------------------------------------------------
 // Source-wiring proof — both JSX branches actually call
 // formatSelectionDisplay at the right point, not just in theory.

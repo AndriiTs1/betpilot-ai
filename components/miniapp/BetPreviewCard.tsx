@@ -168,6 +168,7 @@ export function PreviewCard({
                 marketType: selection.marketType,
                 participant: selection.participant,
                 line: selection.line,
+                selectionType: selection.selectionType,
               }),
               selection.market,
               locale,
@@ -208,6 +209,7 @@ export function PreviewCard({
       marketType: selection.marketType,
       participant: selection.participant,
       line: selection.line,
+      selectionType: selection.selectionType,
     });
     // Same {selection, market} presentation pass BetTicket.tsx's final
     // ticket already applies — this is that one shared formatter, called

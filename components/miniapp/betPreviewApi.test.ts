@@ -286,7 +286,7 @@ test("fetchExpressLegExclusionPreview: a valid success body round-trips through 
     preview: { type: "SINGLE", stake: 50, totalOdds: 2.1, potentialWin: 105, selections: [
       {
         sport: "Football", event: "Real Madrid vs Barcelona", market: null, selection: "Real Madrid Win",
-        marketType: null, participant: null, line: null, submittedOdds: 2.1, currentOdds: 2.1,
+        marketType: null, participant: null, selectionType: null, line: null, submittedOdds: 2.1, currentOdds: 2.1,
         oddsStatus: "VERIFIED", bookmaker: "Pinnacle", discrepancyPercent: 0,
         homeTeamName: null, awayTeamName: null, competitionName: null, eventStartTime: null,
       },

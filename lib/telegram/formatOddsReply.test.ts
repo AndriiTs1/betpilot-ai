@@ -12,6 +12,7 @@ function selection(overrides: Partial<BetSlipPreviewSelection> = {}): BetSlipPre
     line: null,
     marketType: null,
     participant: null,
+    selectionType: null,
     submittedOdds: 2.05,
     currentOdds: 2.05,
     oddsStatus: "VERIFIED",

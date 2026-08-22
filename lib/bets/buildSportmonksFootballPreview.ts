@@ -224,6 +224,11 @@ export async function buildSportmonksFootballPreview(
     // SPREAD branch (gated on marketType === "SPREAD").
     marketType: null,
     participant: null,
+    // Individual Team Totals, Stage 5B — same reasoning as marketType/
+    // participant above: this vertical only ever handles MONEYLINE
+    // match-result selections, so there is no canonical direction to
+    // display either.
+    selectionType: null,
     submittedOdds: effectiveSubmittedOdds,
     currentOdds,
     oddsStatus: "VERIFIED",

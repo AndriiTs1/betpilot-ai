@@ -396,3 +396,152 @@ test("existing call sites (no marketType/participant/line fields at all) are com
   assert.equal(normalizeSelectionToEnglish({ selection: "П1" }), "Home Win");
   assert.equal(normalizeSelectionToEnglish({ selection: "ТБ 2.5" }), "Over 2.5 Goals");
 });
+
+/* -------------------------------------------------------------------------- */
+/* Individual Team Totals, Stage 5B — canonical TEAM_TOTAL display            */
+/* -------------------------------------------------------------------------- */
+
+// Root-cause fixture (real production bug): the raw AI-extracted text
+// ("Интер ТБ 1,5") never matches OVER_PATTERN/UNDER_PATTERN below (a leading
+// participant name defeats the anchor), so before this branch existed the
+// line was silently lost — the selection fell all the way through to the
+// "preserve original unchanged" fallback.
+
+test("TEAM_TOTAL OVER: participant/line render from canonical fields, never from raw text", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({
+      selection: "Интер ТБ 1,5",
+      marketType: "TEAM_TOTAL",
+      selectionType: "OVER",
+      participant: "Интер",
+      line: "1.5",
+    }),
+    "Интер · Team total over 1.5",
+  );
+});
+
+test("TEAM_TOTAL UNDER: participant/line render from canonical fields", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({
+      selection: "Интер ТМ 2,5",
+      marketType: "TEAM_TOTAL",
+      selectionType: "UNDER",
+      participant: "Интер",
+      line: "2.5",
+    }),
+    "Интер · Team total under 2.5",
+  );
+});
+
+test("TEAM_TOTAL: away participant is preserved, not defaulted to the home team", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({
+      selection: "Монца ТБ 1.5",
+      marketType: "TEAM_TOTAL",
+      selectionType: "OVER",
+      participant: "Монца",
+      line: "1.5",
+    }),
+    "Монца · Team total over 1.5",
+  );
+});
+
+test("TEAM_TOTAL: an English-spelling participant renders identically (not RU-specific, no transliteration involved)", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({
+      selection: "Inter Milan Over 1.5",
+      marketType: "TEAM_TOTAL",
+      selectionType: "OVER",
+      participant: "Inter Milan",
+      line: "1.5",
+    }),
+    "Inter Milan · Team total over 1.5",
+  );
+});
+
+for (const value of ["1", "1.5", "2", "2.5"]) {
+  test(`TEAM_TOTAL: exact line ${value} survives with no rounding/nearest-line substitution`, () => {
+    assert.equal(
+      normalizeSelectionToEnglish({
+        selection: "Интер ТБ",
+        marketType: "TEAM_TOTAL",
+        selectionType: "OVER",
+        participant: "Интер",
+        line: value,
+      }),
+      `Интер · Team total over ${value}`,
+    );
+  });
+}
+
+test("TEAM_TOTAL branch does not fire when selectionType is missing — falls through to the safe raw-text fallback rather than fabricating a label", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Интер ТБ 1,5", marketType: "TEAM_TOTAL", participant: "Интер", line: "1.5" }),
+    "Интер ТБ 1,5",
+  );
+});
+
+test("TEAM_TOTAL branch does not fire when participant is missing — falls through to the safe raw-text fallback", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Интер ТБ 1,5", marketType: "TEAM_TOTAL", selectionType: "OVER", line: "1.5" }),
+    "Интер ТБ 1,5",
+  );
+});
+
+test("TEAM_TOTAL branch does not fire when line is missing — falls through to the safe raw-text fallback", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({ selection: "Интер ТБ", marketType: "TEAM_TOTAL", selectionType: "OVER", participant: "Интер" }),
+    "Интер ТБ",
+  );
+});
+
+test("TEAM_TOTAL branch does not fire for a malformed (non-decimal) line — falls through rather than rendering a garbled label", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({
+      selection: "Интер ТБ 1,5",
+      marketType: "TEAM_TOTAL",
+      selectionType: "OVER",
+      participant: "Интер",
+      line: "not-a-number",
+    }),
+    "Интер ТБ 1,5",
+  );
+});
+
+test("TEAM_TOTAL branch never fires for TOTALS (ordinary match total) — the existing Over/Under raw-text path is unaffected and never gains a participant", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({
+      selection: "Over 2.5",
+      marketType: "TOTALS",
+      selectionType: "OVER",
+      participant: null,
+      line: "2.5",
+    }),
+    "Over 2.5 Goals",
+  );
+});
+
+test("TEAM_TOTAL branch never fires for SPREAD — SPREAD's own branch still takes priority for marketType SPREAD, even with a selectionType present", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({
+      selection: "Arsenal F1",
+      marketType: "SPREAD",
+      selectionType: "PARTICIPANT",
+      participant: "Arsenal",
+      line: "-1.5",
+    }),
+    "Arsenal -1.5",
+  );
+});
+
+test("TEAM_TOTAL branch never fires for MONEYLINE — 'Interr Win' stays unchanged even if selectionType/participant happen to be passed alongside it", () => {
+  assert.equal(
+    normalizeSelectionToEnglish({
+      selection: "Arsenal Win",
+      marketType: "MONEYLINE_2WAY",
+      selectionType: "PARTICIPANT",
+      participant: "Arsenal",
+    }),
+    "Arsenal Win",
+  );
+});

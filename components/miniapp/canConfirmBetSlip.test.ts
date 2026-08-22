@@ -20,6 +20,7 @@ function singleSelection(overrides: Partial<BetPreviewSelection> = {}): BetPrevi
     selection: "Real Madrid Win",
     marketType: null,
     participant: null,
+    selectionType: null,
     line: null,
     submittedOdds: 2.1,
     currentOdds: 2.1,

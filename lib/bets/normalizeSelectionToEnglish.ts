@@ -64,6 +64,13 @@ export interface NormalizeSelectionInput {
   marketType?: string | null;
   participant?: string | null;
   line?: string | null;
+  // Individual Team Totals, Stage 5B — the canonical OVER/UNDER direction
+  // (lib/odds/domain.ts's SelectionType), needed alongside marketType/
+  // participant/line above to render a TEAM_TOTAL selection (see the
+  // TEAM_TOTAL branch below). SPREAD has no use for this — a spread's
+  // direction is already fully expressed by its signed line — so this field
+  // is new, not a widening of the existing SPREAD branch.
+  selectionType?: string | null;
 }
 
 function clean(text: string): string {
@@ -194,6 +201,37 @@ export function normalizeSelectionToEnglish(input: NormalizeSelectionInput): str
       return participantLabel;
     }
     return `${participantLabel} ${formattedLine}`;
+  }
+
+  // Individual Team Totals, Stage 5B — canonical TEAM_TOTAL display,
+  // mirroring the SPREAD branch above: render from canonical
+  // marketType/selectionType/participant/line instead of pattern-matching
+  // `selection`'s raw text. Root cause this branch fixes: unlike SPREAD,
+  // TEAM_TOTAL's raw AI-extracted text is not a fixed phrasing this file can
+  // reliably pattern-match (e.g. "Интер ТБ 1,5" never matches OVER_PATTERN/
+  // UNDER_PATTERN below, which require the text to START with "тб"/"тотал
+  // больше"/"over"/etc — a leading participant name always defeats that
+  // anchor), and even when an AI extraction splits the line into a separate
+  // structured field (leaving `selection` as bare "Тотал Больше", no digit
+  // at all), the pattern still can't match — so this selection fell all the
+  // way through to the final "preserve original unchanged" fallback,
+  // permanently losing the line. Only marketType === "TEAM_TOTAL" with a
+  // real OVER/UNDER selectionType, a non-empty participant, and a
+  // well-formed canonical line string triggers this branch; anything else
+  // (including a TEAM_TOTAL with any field missing/malformed) falls through
+  // to the raw-text matching below unchanged, exactly like SPREAD's own
+  // fallback discipline.
+  if (
+    input.marketType === "TEAM_TOTAL" &&
+    (input.selectionType === "OVER" || input.selectionType === "UNDER") &&
+    typeof input.participant === "string" &&
+    input.participant.trim().length > 0 &&
+    typeof input.line === "string" &&
+    isDecimalString(input.line)
+  ) {
+    const participantLabel = clean(input.participant);
+    const direction = input.selectionType === "OVER" ? "over" : "under";
+    return `${participantLabel} · Team total ${direction} ${input.line}`;
   }
 
   const text = clean(original);

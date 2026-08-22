@@ -50,6 +50,17 @@ const BTTS_NO = "both teams to score — no";
 
 const OVER_PATTERN = /^over\s+(\d+(?:\.\d+)?)(?:\s+goals)?$/i;
 const UNDER_PATTERN = /^under\s+(\d+(?:\.\d+)?)(?:\s+goals)?$/i;
+// Individual Team Totals, Stage 5B — the RU inverse of
+// normalizeSelectionToEnglish.ts's own new TEAM_TOTAL canonical-field
+// branch ("<Participant> · Team total over|under <line>"), a fixed,
+// deterministic shape that branch alone produces — this is not re-deriving
+// TEAM_TOTAL semantics from arbitrary human/AI text, it's inverting one
+// closed, known English shape, the same role this file already plays for
+// "Over N[ Goals]"/"<Name> Win"/etc. Participant is captured
+// non-greedily so a name that itself happened to contain " · " (none do in
+// practice) still stops at the first real separator.
+const TEAM_TOTAL_OVER_PATTERN = /^(.+?)\s·\sTeam total over\s+(\d+(?:\.\d+)?)$/;
+const TEAM_TOTAL_UNDER_PATTERN = /^(.+?)\s·\sTeam total under\s+(\d+(?:\.\d+)?)$/;
 // Same shape as normalizeSelectionToEnglish.ts's own ALREADY_ENGLISH_WIN —
 // checked last, only after every exact known phrasing above has already
 // failed to match, so "Home Win"/"Away Win" (no real participant name) are
@@ -68,6 +79,8 @@ type SelectionKind =
   | { kind: "bttsNo" }
   | { kind: "over"; line: string }
   | { kind: "under"; line: string }
+  | { kind: "teamTotalOver"; participant: string; line: string }
+  | { kind: "teamTotalUnder"; participant: string; line: string }
   | { kind: "unknown" };
 
 function classifySelection(selection: string): SelectionKind {
@@ -82,6 +95,17 @@ function classifySelection(selection: string): SelectionKind {
   if (key === HOME_OR_AWAY) return { kind: "homeOrAway" };
   if (key === BTTS_YES) return { kind: "bttsYes" };
   if (key === BTTS_NO) return { kind: "bttsNo" };
+
+  // Individual Team Totals, Stage 5B — checked before the generic
+  // OVER_PATTERN/UNDER_PATTERN below: a TEAM_TOTAL's participant prefix
+  // would never match those anchored patterns anyway (they require the
+  // string to START with "over"/"under"), but checking the more specific
+  // shape first keeps the precedence explicit and readable.
+  const teamTotalOverMatch = trimmed.match(TEAM_TOTAL_OVER_PATTERN);
+  if (teamTotalOverMatch) return { kind: "teamTotalOver", participant: teamTotalOverMatch[1], line: teamTotalOverMatch[2] };
+
+  const teamTotalUnderMatch = trimmed.match(TEAM_TOTAL_UNDER_PATTERN);
+  if (teamTotalUnderMatch) return { kind: "teamTotalUnder", participant: teamTotalUnderMatch[1], line: teamTotalUnderMatch[2] };
 
   const overMatch = trimmed.match(OVER_PATTERN);
   if (overMatch) return { kind: "over", line: overMatch[1] };
@@ -103,6 +127,20 @@ function classifySelection(selection: string): SelectionKind {
 // was built from ("Марсель · Победа" vs "Ничья · Победитель матча").
 function isWinOutcome(kind: SelectionKind["kind"]): boolean {
   return kind === "namedWin" || kind === "homeWin" || kind === "awayWin";
+}
+
+// Individual Team Totals, Stage 5B — a TEAM_TOTAL selection's own combined
+// "<Participant> · Тотал больше|меньше <line>" label already fully states
+// participant + direction + line; any separate market label (e.g. a
+// player-stated "Individual Total") would be pure redundancy right next to
+// it, same reasoning as isWinOutcome's Match Winner suppression above.
+// Unlike that suppression, this is unconditional (not keyed to a specific
+// matching market string) — there is no fixed "the market label meant
+// exactly this" text to compare against here, and every real market label
+// this selection could plausibly carry is redundant with it regardless of
+// wording.
+function isTeamTotalOutcome(kind: SelectionKind["kind"]): boolean {
+  return kind === "teamTotalOver" || kind === "teamTotalUnder";
 }
 
 function ruSelectionText(classified: SelectionKind, original: string): string {
@@ -133,6 +171,13 @@ function ruSelectionText(classified: SelectionKind, original: string): string {
       return `Тотал больше ${classified.line}`;
     case "under":
       return `Тотал меньше ${classified.line}`;
+    case "teamTotalOver":
+      // The participant name is carried through untranslated, same
+      // discipline as namedWin above — only the market wording is
+      // localized.
+      return `${classified.participant} · Тотал больше ${classified.line}`;
+    case "teamTotalUnder":
+      return `${classified.participant} · Тотал меньше ${classified.line}`;
     case "unknown":
       // Fallback safety — an unrecognized selection (a SPREAD's
       // "<Name> <signed line>", or any future/unknown phrasing) is never
@@ -192,6 +237,12 @@ export function formatSelectionDisplay(
 
   if (isWinOutcome(classified.kind) && isMatchWinnerMarket(normalizedMarket)) {
     // Redundant: the selection text already states who wins the match.
+    return { selection: ruSelection, market: null };
+  }
+
+  // Individual Team Totals, Stage 5B — see isTeamTotalOutcome's own comment:
+  // always redundant, not keyed to a specific market string.
+  if (isTeamTotalOutcome(classified.kind)) {
     return { selection: ruSelection, market: null };
   }
 

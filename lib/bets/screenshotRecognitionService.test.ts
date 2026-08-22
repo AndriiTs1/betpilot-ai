@@ -163,6 +163,7 @@ function samplePreview(oddsStatus: "VERIFIED" | "ODDS_CHANGED" | "NOT_FOUND" | "
         line: null,
         marketType: null,
         participant: null,
+        selectionType: null,
         submittedOdds: 1.9,
         currentOdds: 1.9,
         oddsStatus,

@@ -8,7 +8,7 @@ import type { verifyOdds } from "@/lib/odds/oddsVerifier";
 import { TheOddsApiProvider } from "@/lib/odds/theOddsApiProvider";
 import { OddsVerificationService } from "@/lib/odds/oddsVerificationService";
 import type { VerifySelectionRequest } from "@/lib/odds/oddsProvider";
-import { isMarketType, isSelectionType, type CanonicalSelection, type MarketType } from "@/lib/odds/domain";
+import { isMarketType, isSelectionType, type CanonicalSelection, type MarketType, type SelectionType } from "@/lib/odds/domain";
 import {
   legacySelectionToCanonicalRequest,
   canonicalRequestFromKnownSelection,
@@ -118,6 +118,17 @@ export interface BetSlipPreviewSelection {
   // when verification never resolved one.
   marketType: MarketType | null;
   participant: string | null;
+  // Individual Team Totals, Stage 5B — the canonical OVER/UNDER direction,
+  // sourced identically to marketType/participant/line above. Display-only:
+  // lets a formatter render a TEAM_TOTAL selection from its canonical
+  // participant+direction+line (e.g. "Интер · Тотал больше 1.5") instead of
+  // the raw AI text in `selection`, which is not a fixed phrasing this can
+  // reliably pattern-match (see lib/bets/normalizeSelectionToEnglish.ts's
+  // own TEAM_TOTAL branch for the full rationale). null for any market with
+  // no selectionType concept that matters for display (e.g. MONEYLINE/
+  // TOTALS/SPREAD, which don't need it to render) or when verification
+  // never resolved one.
+  selectionType: SelectionType | null;
   submittedOdds: number | null;
   currentOdds: number | null;
   oddsStatus: BetSelectionOddsStatus;
@@ -589,6 +600,7 @@ export async function buildBetSlipPreview(
       line: requests[index]?.selection.line ?? null,
       marketType: requests[index]?.selection.marketType ?? null,
       participant: requests[index]?.selection.participant?.name ?? null,
+      selectionType: requests[index]?.selection.selectionType ?? null,
       submittedOdds: effectiveSubmittedOdds,
       currentOdds: oddsCheck?.sourceOdds ?? null,
       oddsStatus: mapOddsCheckToSelectionStatus(oddsCheck),
