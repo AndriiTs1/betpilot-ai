@@ -118,6 +118,19 @@ export function reconstructParsedBetSlip(payload: AnyPreviewTokenPayload): Parse
           selection: payload.outcome,
           submittedOdds: payload.acceptedOdds,
           line: payload.canonicalLine ?? null,
+          // Individual Team Totals, Stage 5A — sourced straight from the
+          // signed token's own canonicalMarketType/canonicalSelectionType/
+          // canonicalParticipant (never fabricated here), so
+          // buildBetSlipPreview.ts can build the re-verification request
+          // directly from these instead of re-classifying `payload.event`/
+          // `payload.outcome` a second time — see BetSlipSelectionInput's own
+          // comment (lib/bets/betSlip.ts) for why re-classification is not
+          // safe here (payload.event may already be the provider's own
+          // team-name substitution, which defeats the shorthand classifier's
+          // exact-match participant-prefix stripping).
+          canonicalMarketType: payload.canonicalMarketType ?? null,
+          canonicalSelectionType: payload.canonicalSelectionType ?? null,
+          canonicalParticipant: payload.canonicalParticipant ?? null,
         },
       ],
     };
@@ -138,6 +151,11 @@ export function reconstructParsedBetSlip(payload: AnyPreviewTokenPayload): Parse
       selection: selection.outcome,
       submittedOdds: selection.currentOdds !== null ? Number(selection.currentOdds) : null,
       line: selection.canonicalLine ?? null,
+      // Individual Team Totals, Stage 5A — same rationale as the SINGLE
+      // branch above, per EXPRESS leg.
+      canonicalMarketType: selection.canonicalMarketType ?? null,
+      canonicalSelectionType: selection.canonicalSelectionType ?? null,
+      canonicalParticipant: selection.canonicalParticipant ?? null,
     })),
   };
 }

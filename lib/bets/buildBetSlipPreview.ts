@@ -8,9 +8,10 @@ import type { verifyOdds } from "@/lib/odds/oddsVerifier";
 import { TheOddsApiProvider } from "@/lib/odds/theOddsApiProvider";
 import { OddsVerificationService } from "@/lib/odds/oddsVerificationService";
 import type { VerifySelectionRequest } from "@/lib/odds/oddsProvider";
-import type { CanonicalSelection, MarketType } from "@/lib/odds/domain";
+import { isMarketType, isSelectionType, type CanonicalSelection, type MarketType } from "@/lib/odds/domain";
 import {
   legacySelectionToCanonicalRequest,
+  canonicalRequestFromKnownSelection,
   verificationResultToLegacyOddsCheck,
   type ReconstructedOddsCheck,
 } from "@/lib/odds/legacyOddsBridge";
@@ -373,51 +374,85 @@ export async function buildBetSlipPreview(
 
   slip.selections.forEach((selection, index) => {
     verifiableIndices.push(index);
+
+    // Individual Team Totals, Stage 5A — when the caller already supplied
+    // validated canonical market semantics (set ONLY by confirm-time
+    // freshness re-verification — see BetSlipSelectionInput's own
+    // canonicalMarketType/canonicalSelectionType/canonicalParticipant
+    // comment), build the request DIRECTLY from them, skipping free-text
+    // (re-)classification entirely. isMarketType/isSelectionType are the
+    // same structural guards mapSingleBetToCanonicalSelection.ts/
+    // mapExpressSelectionToCanonicalSelection.ts already trust this exact
+    // data with at persistence time — never a weaker check here. Absent
+    // (undefined) or invalid for every ORIGINAL AI-parsed preview (nothing
+    // canonical exists yet to prefer), so this branch is completely inert
+    // there — falls through to the existing, unmodified
+    // legacySelectionToCanonicalRequest path below, byte-for-byte unchanged.
+    const knownMarketType =
+      typeof selection.canonicalMarketType === "string" && isMarketType(selection.canonicalMarketType)
+        ? selection.canonicalMarketType
+        : null;
+    const knownSelectionType =
+      typeof selection.canonicalSelectionType === "string" && isSelectionType(selection.canonicalSelectionType)
+        ? selection.canonicalSelectionType
+        : null;
+
     requests.push(
-      legacySelectionToCanonicalRequest({
-        sport: selection.sport,
-        // Step 16A — an explicit, player-stated league (e.g. "Serie A"),
-        // when present, now reaches provider verification instead of being
-        // silently dropped — see lib/odds/footballLeagues.ts for where it's
-        // actually resolved/validated.
-        league: selection.league ?? null,
-        event: selection.event,
-        // SCREENSHOT ODDS QA-2 — this is the ACTUAL provider-facing search
-        // text (legacySelectionToCanonicalRequest classifies it and, for a
-        // bare participant fallback, sends it straight to the odds
-        // provider's own team-name matching) — a completely different
-        // consumer than the human-readable `selection.selection` shown
-        // elsewhere in this file's own preview/token output, which stays
-        // untouched. A screenshot's raw display text can carry the same
-        // shorthand-plus-participant pollution SCREENSHOT QA-CORE S1 already
-        // fixed for reconciliation (e.g. "Bayern Win (П1)") — proven, via
-        // this exact production event, to ALSO defeat provider matching:
-        // legacySelectionToCanonicalRequest's own knownParticipantNames
-        // prefix-stripping only fires on an EXACT prefix match, which
-        // "Bayern Win (П1)" fails the same way it fails reconciliation.
-        // Deliberately the NARROWER normalizeSelectionTextForCanonicalization
-        // (not the full normalizeOcrParticipantClaim S1 uses for
-        // reconciliation) — see that function's own header for the real
-        // regression reusing the full one caused here (stripping a trailing
-        // "Win" suffix before classification, which weakens
-        // classifyBettingSelectionTextWithMarketHint's own market-hint-
-        // override-resistance). Safe to apply unconditionally (not
-        // mode-gated, unlike S1's own call site in betParser.ts): idempotent
-        // on already-clean text, so a typed-chat selection — essentially
-        // never polluted with 1X2 shorthand — passes through unchanged.
-        selection: normalizeSelectionTextForCanonicalization(selection.selection),
-        submittedOdds: selection.submittedOdds,
-        // Betting Markets V1, Phase 2 — threaded through to
-        // CanonicalSelection.line so it survives into the signed preview
-        // token (canonicalLine) and, eventually, persistence. Not read by
-        // any matching/verification logic yet.
-        line: selection.line ?? null,
-        // H3 Production Fix — threaded through so legacySelectionToCanonicalRequest
-        // can recover market intent a bare `selection` alone can't express
-        // (e.g. "Фора"/"Handicap"/"Spread") — see that function's own
-        // comment for the exact, narrow rule this only ever applies under.
-        marketRawText: selection.marketRawText ?? null,
-      }),
+      knownMarketType && knownSelectionType
+        ? canonicalRequestFromKnownSelection({
+            sport: selection.sport,
+            league: selection.league ?? null,
+            event: selection.event,
+            marketType: knownMarketType,
+            selectionType: knownSelectionType,
+            participant: selection.canonicalParticipant ?? null,
+            line: selection.line ?? null,
+            submittedOdds: selection.submittedOdds,
+          })
+        : legacySelectionToCanonicalRequest({
+            sport: selection.sport,
+            // Step 16A — an explicit, player-stated league (e.g. "Serie A"),
+            // when present, now reaches provider verification instead of being
+            // silently dropped — see lib/odds/footballLeagues.ts for where it's
+            // actually resolved/validated.
+            league: selection.league ?? null,
+            event: selection.event,
+            // SCREENSHOT ODDS QA-2 — this is the ACTUAL provider-facing search
+            // text (legacySelectionToCanonicalRequest classifies it and, for a
+            // bare participant fallback, sends it straight to the odds
+            // provider's own team-name matching) — a completely different
+            // consumer than the human-readable `selection.selection` shown
+            // elsewhere in this file's own preview/token output, which stays
+            // untouched. A screenshot's raw display text can carry the same
+            // shorthand-plus-participant pollution SCREENSHOT QA-CORE S1 already
+            // fixed for reconciliation (e.g. "Bayern Win (П1)") — proven, via
+            // this exact production event, to ALSO defeat provider matching:
+            // legacySelectionToCanonicalRequest's own knownParticipantNames
+            // prefix-stripping only fires on an EXACT prefix match, which
+            // "Bayern Win (П1)" fails the same way it fails reconciliation.
+            // Deliberately the NARROWER normalizeSelectionTextForCanonicalization
+            // (not the full normalizeOcrParticipantClaim S1 uses for
+            // reconciliation) — see that function's own header for the real
+            // regression reusing the full one caused here (stripping a trailing
+            // "Win" suffix before classification, which weakens
+            // classifyBettingSelectionTextWithMarketHint's own market-hint-
+            // override-resistance). Safe to apply unconditionally (not
+            // mode-gated, unlike S1's own call site in betParser.ts): idempotent
+            // on already-clean text, so a typed-chat selection — essentially
+            // never polluted with 1X2 shorthand — passes through unchanged.
+            selection: normalizeSelectionTextForCanonicalization(selection.selection),
+            submittedOdds: selection.submittedOdds,
+            // Betting Markets V1, Phase 2 — threaded through to
+            // CanonicalSelection.line so it survives into the signed preview
+            // token (canonicalLine) and, eventually, persistence. Not read by
+            // any matching/verification logic yet.
+            line: selection.line ?? null,
+            // H3 Production Fix — threaded through so legacySelectionToCanonicalRequest
+            // can recover market intent a bare `selection` alone can't express
+            // (e.g. "Фора"/"Handicap"/"Spread") — see that function's own
+            // comment for the exact, narrow rule this only ever applies under.
+            marketRawText: selection.marketRawText ?? null,
+          }),
     );
   });
 

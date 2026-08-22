@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { verifyPreviewFreshness, decideFreshnessOutcome } from "./verifyPreviewFreshness";
+import { verifyPreviewFreshness, decideFreshnessOutcome, reconstructParsedBetSlip } from "./verifyPreviewFreshness";
 import type { PreviewTokenPayload, ExpressPreviewTokenPayload } from "@/lib/betPreview/previewToken";
-import type { OddsVerificationInput } from "@/lib/odds/oddsVerifier";
+import type { OddsVerificationInput, TotalsVerificationInput, SpreadVerificationInput, TeamTotalVerificationInput } from "@/lib/odds/oddsVerifier";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
 import type { BetSlipPreview } from "./buildBetSlipPreview";
+import { TheOddsApiProvider } from "@/lib/odds/theOddsApiProvider";
+import { OddsVerificationService } from "@/lib/odds/oddsVerificationService";
 
 // Same fixture/fake conventions as lib/bets/buildBetSlipPreview.test.ts —
 // this file exercises the exact same production odds-verification pipeline
@@ -534,4 +536,352 @@ test("verifyPreviewFreshness: the reconstructed slip forwards sport/event/select
   assert.equal(capturedInput?.event, "Alcaraz vs Sinner");
   assert.equal(capturedInput?.selection, "Alcaraz");
   assert.equal(capturedInput?.odds, 1.75, "must forward acceptedOdds (1.75), never the stale odds/reference field (2.16)");
+});
+
+/* -------------------------------------------------------------------------- */
+/* D. Individual Team Totals, Stage 5A — confirm-time reconstruction         */
+/* -------------------------------------------------------------------------- */
+//
+// Root-cause fixture (real production bug): the player's PREVIEW-time
+// selection text named the team as they typed it ("Интер"), but by the time
+// Confirm re-verifies freshness, the token's `event` field has already been
+// rewritten to the odds provider's own team names (formatFullEventName's
+// substitution — "Интер vs Монца" -> "Inter Milan — Monza"). Re-classifying
+// the ORIGINAL free text against that already-substituted event string is
+// exactly what silently turned a verified TEAM_TOTAL selection into a
+// fabricated MONEYLINE_2WAY one before this stage's fix.
+//
+// Every test below wires a REAL TheOddsApiProvider (via OddsVerificationService)
+// with independently-capturing fakes for each of its four DI seams, so a
+// selection reaching the wrong verifier function fails loudly — this is the
+// "trace the reconstructed request all the way into TheOddsApiProvider and
+// prove the correct verifier is selected" proof, not just an assertion on
+// reconstructParsedBetSlip's return shape.
+
+function capturingVerifyOddsFn(result: OddsCheckResult) {
+  const calls: OddsVerificationInput[] = [];
+  const fn = async (input: OddsVerificationInput): Promise<OddsCheckResult> => {
+    calls.push(input);
+    return result;
+  };
+  return { fn, calls };
+}
+
+function capturingVerifyTotalsOddsFn(result: OddsCheckResult) {
+  const calls: TotalsVerificationInput[] = [];
+  const fn = async (input: TotalsVerificationInput): Promise<OddsCheckResult> => {
+    calls.push(input);
+    return result;
+  };
+  return { fn, calls };
+}
+
+function capturingVerifySpreadOddsFn(result: OddsCheckResult) {
+  const calls: SpreadVerificationInput[] = [];
+  const fn = async (input: SpreadVerificationInput): Promise<OddsCheckResult> => {
+    calls.push(input);
+    return result;
+  };
+  return { fn, calls };
+}
+
+function capturingVerifyTeamTotalsOddsFn(result: OddsCheckResult) {
+  const calls: TeamTotalVerificationInput[] = [];
+  const fn = async (input: TeamTotalVerificationInput): Promise<OddsCheckResult> => {
+    calls.push(input);
+    return result;
+  };
+  return { fn, calls };
+}
+
+// Test A — RU TEAM_TOTAL OVER, full Preview -> signed token -> Confirm
+// freshness path. The token's own `outcome`/`event` fields are exactly the
+// real production values (comma-decimal RU shorthand text, provider-
+// substituted event) — proving the fix works through decideFreshnessOutcome
+// too, not merely through reconstructParsedBetSlip in isolation.
+test("verifyPreviewFreshness (Stage 5A): RU TEAM_TOTAL OVER ('Интер ТБ 1,5') reconstructs to TEAM_TOTAL/Интер/OVER/1.5 and routes to the team-total verifier, never MONEYLINE — full token path", async () => {
+  const payload = singlePayload({
+    sport: "Football",
+    event: "Inter Milan — Monza",
+    outcome: "Интер ТБ 1,5",
+    odds: 1.27,
+    acceptedOdds: 1.27,
+    canonicalMarketType: "TEAM_TOTAL",
+    canonicalSelectionType: "OVER",
+    canonicalParticipant: "Интер",
+    canonicalLine: "1.5",
+  });
+
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(verified(1.27, 1.27));
+  const { fn: teamTotalFn, calls: teamTotalCalls } = capturingVerifyTeamTotalsOddsFn(verified(1.27, 1.27));
+  const provider = new TheOddsApiProvider(h2hFn, undefined, undefined, teamTotalFn);
+  const service = new OddsVerificationService(provider);
+
+  const decision = await verifyPreviewFreshness(payload, TEST_SECRET, { oddsVerificationService: service });
+
+  assert.deepEqual(decision, { kind: "ACCEPT" });
+  assert.equal(h2hCalls.length, 0, "must never reach the h2h/moneyline verifier for a known TEAM_TOTAL selection");
+  assert.equal(teamTotalCalls.length, 1, "must reach the team-total verifier exactly once");
+  assert.equal(teamTotalCalls[0].participant, "Интер");
+  assert.equal(teamTotalCalls[0].direction, "OVER");
+  assert.equal(teamTotalCalls[0].line, "1.5");
+  assert.equal(teamTotalCalls[0].event, "Inter Milan — Monza");
+});
+
+// Test B — same fixture, UNDER direction and a different exact line.
+test("verifyPreviewFreshness (Stage 5A): RU TEAM_TOTAL UNDER ('Интер ТМ 2,5') reconstructs to TEAM_TOTAL/Интер/UNDER/2.5", async () => {
+  const payload = singlePayload({
+    sport: "Football",
+    event: "Inter Milan — Monza",
+    outcome: "Интер ТМ 2,5",
+    odds: 1.55,
+    acceptedOdds: 1.55,
+    canonicalMarketType: "TEAM_TOTAL",
+    canonicalSelectionType: "UNDER",
+    canonicalParticipant: "Интер",
+    canonicalLine: "2.5",
+  });
+
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(verified(1.55, 1.55));
+  const { fn: teamTotalFn, calls: teamTotalCalls } = capturingVerifyTeamTotalsOddsFn(verified(1.55, 1.55));
+  const provider = new TheOddsApiProvider(h2hFn, undefined, undefined, teamTotalFn);
+  const service = new OddsVerificationService(provider);
+
+  const decision = await verifyPreviewFreshness(payload, TEST_SECRET, { oddsVerificationService: service });
+
+  assert.deepEqual(decision, { kind: "ACCEPT" });
+  assert.equal(h2hCalls.length, 0);
+  assert.equal(teamTotalCalls.length, 1);
+  assert.equal(teamTotalCalls[0].direction, "UNDER");
+  assert.equal(teamTotalCalls[0].line, "2.5");
+});
+
+// Test C — away-participant TEAM_TOTAL: the confirm-time reconstruction must
+// not silently default to whichever team happens to appear first in the
+// (also provider-substituted) event string.
+test("verifyPreviewFreshness (Stage 5A): away-team TEAM_TOTAL ('Монца ТМ 0.5') preserves the away participant, not the home team", async () => {
+  const payload = singlePayload({
+    sport: "Football",
+    event: "Inter Milan — Monza",
+    outcome: "Монца ТМ 0.5",
+    odds: 2.1,
+    acceptedOdds: 2.1,
+    canonicalMarketType: "TEAM_TOTAL",
+    canonicalSelectionType: "UNDER",
+    canonicalParticipant: "Монца",
+    canonicalLine: "0.5",
+  });
+
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(verified(2.1, 2.1));
+  const { fn: teamTotalFn, calls: teamTotalCalls } = capturingVerifyTeamTotalsOddsFn(verified(2.1, 2.1));
+  const provider = new TheOddsApiProvider(h2hFn, undefined, undefined, teamTotalFn);
+  const service = new OddsVerificationService(provider);
+
+  const decision = await verifyPreviewFreshness(payload, TEST_SECRET, { oddsVerificationService: service });
+
+  assert.deepEqual(decision, { kind: "ACCEPT" });
+  assert.equal(h2hCalls.length, 0);
+  assert.equal(teamTotalCalls.length, 1);
+  assert.equal(teamTotalCalls[0].participant, "Монца");
+  assert.equal(teamTotalCalls[0].direction, "UNDER");
+});
+
+// Test D — English-spelling participant variant (Марсель/Marseille): proves
+// the fix is not RU-specific and does not depend on any transliteration.
+test("verifyPreviewFreshness (Stage 5A): English participant spelling ('Marseille Over 1.5') reconstructs correctly across a provider-substituted event too", async () => {
+  const payload = singlePayload({
+    sport: "Football",
+    event: "Olympique de Marseille — Lyon",
+    outcome: "Marseille Over 1.5",
+    odds: 1.4,
+    acceptedOdds: 1.4,
+    canonicalMarketType: "TEAM_TOTAL",
+    canonicalSelectionType: "OVER",
+    canonicalParticipant: "Marseille",
+    canonicalLine: "1.5",
+  });
+
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(verified(1.4, 1.4));
+  const { fn: teamTotalFn, calls: teamTotalCalls } = capturingVerifyTeamTotalsOddsFn(verified(1.4, 1.4));
+  const provider = new TheOddsApiProvider(h2hFn, undefined, undefined, teamTotalFn);
+  const service = new OddsVerificationService(provider);
+
+  const decision = await verifyPreviewFreshness(payload, TEST_SECRET, { oddsVerificationService: service });
+
+  assert.deepEqual(decision, { kind: "ACCEPT" });
+  assert.equal(h2hCalls.length, 0);
+  assert.equal(teamTotalCalls.length, 1);
+  assert.equal(teamTotalCalls[0].participant, "Marseille");
+  assert.equal(teamTotalCalls[0].line, "1.5");
+});
+
+// Test E — EXPRESS with at least one TEAM_TOTAL leg, alongside a plain
+// MONEYLINE leg that must keep behaving exactly as before (no canonical
+// fields, still classified from free text).
+test("verifyPreviewFreshness (Stage 5A): EXPRESS with a TEAM_TOTAL leg (Марсель) plus a plain MONEYLINE leg — each leg routes to its own correct verifier", async () => {
+  const payload = expressPayload({
+    selections: [
+      {
+        sport: "Football",
+        event: "Olympique de Marseille — Lyon",
+        outcome: "Марсель ТБ 1.5",
+        market: null,
+        submittedOdds: "1.4",
+        currentOdds: "1.4",
+        oddsStatus: "VERIFIED",
+        canonicalMarketType: "TEAM_TOTAL",
+        canonicalSelectionType: "OVER",
+        canonicalParticipant: "Марсель",
+        canonicalLine: "1.5",
+      },
+      {
+        sport: "Football",
+        event: "Real Madrid vs Barcelona",
+        outcome: "Real Madrid",
+        market: null,
+        submittedOdds: "1.8",
+        currentOdds: "1.8",
+        oddsStatus: "VERIFIED",
+      },
+    ],
+  });
+
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(verified(1.8, 1.8));
+  const { fn: teamTotalFn, calls: teamTotalCalls } = capturingVerifyTeamTotalsOddsFn(verified(1.4, 1.4));
+  const provider = new TheOddsApiProvider(h2hFn, undefined, undefined, teamTotalFn);
+  const service = new OddsVerificationService(provider);
+
+  const decision = await verifyPreviewFreshness(payload, TEST_SECRET, { oddsVerificationService: service });
+
+  assert.deepEqual(decision, { kind: "ACCEPT" });
+  assert.equal(teamTotalCalls.length, 1, "the TEAM_TOTAL leg must reach the team-total verifier exactly once");
+  assert.equal(teamTotalCalls[0].participant, "Марсель");
+  assert.equal(teamTotalCalls[0].direction, "OVER");
+  assert.equal(teamTotalCalls[0].line, "1.5");
+  assert.equal(h2hCalls.length, 1, "the plain MONEYLINE leg must still reach the h2h verifier exactly once");
+  assert.equal(h2hCalls[0].event, "Real Madrid vs Barcelona");
+});
+
+// Test F — regression: TOTALS and SPREAD selections that ALSO carry
+// canonical token fields (every token issued after this stage carries them
+// for every market type, per this stage's own token-field inspection) still
+// route to their own correct verifiers, never TEAM_TOTAL or MONEYLINE.
+test("verifyPreviewFreshness (Stage 5A) regression: TOTALS with canonical fields present still routes to the totals verifier, not team-total or h2h", async () => {
+  const payload = singlePayload({
+    sport: "Football",
+    event: "Arsenal — Chelsea",
+    outcome: "Total Over 2.5",
+    odds: 1.9,
+    acceptedOdds: 1.9,
+    canonicalMarketType: "TOTALS",
+    canonicalSelectionType: "OVER",
+    canonicalParticipant: null,
+    canonicalLine: "2.5",
+  });
+
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(verified(1.9, 1.9));
+  const { fn: totalsFn, calls: totalsCalls } = capturingVerifyTotalsOddsFn(verified(1.9, 1.9));
+  const { fn: teamTotalFn, calls: teamTotalCalls } = capturingVerifyTeamTotalsOddsFn(verified(1.9, 1.9));
+  const provider = new TheOddsApiProvider(h2hFn, totalsFn, undefined, teamTotalFn);
+  const service = new OddsVerificationService(provider);
+
+  const decision = await verifyPreviewFreshness(payload, TEST_SECRET, { oddsVerificationService: service });
+
+  assert.deepEqual(decision, { kind: "ACCEPT" });
+  assert.equal(totalsCalls.length, 1);
+  assert.equal(totalsCalls[0].line, "2.5");
+  assert.equal(h2hCalls.length, 0);
+  assert.equal(teamTotalCalls.length, 0);
+});
+
+test("verifyPreviewFreshness (Stage 5A) regression: SPREAD with canonical fields present still routes to the spread verifier, not team-total or h2h", async () => {
+  const payload = singlePayload({
+    sport: "Football",
+    event: "Arsenal — Chelsea",
+    outcome: "Arsenal -1.5",
+    odds: 1.85,
+    acceptedOdds: 1.85,
+    canonicalMarketType: "SPREAD",
+    canonicalSelectionType: "PARTICIPANT",
+    canonicalParticipant: "Arsenal",
+    canonicalLine: "-1.5",
+  });
+
+  const { fn: h2hFn, calls: h2hCalls } = capturingVerifyOddsFn(verified(1.85, 1.85));
+  const { fn: spreadFn, calls: spreadCalls } = capturingVerifySpreadOddsFn(verified(1.85, 1.85));
+  const { fn: teamTotalFn, calls: teamTotalCalls } = capturingVerifyTeamTotalsOddsFn(verified(1.85, 1.85));
+  const provider = new TheOddsApiProvider(h2hFn, undefined, spreadFn, teamTotalFn);
+  const service = new OddsVerificationService(provider);
+
+  const decision = await verifyPreviewFreshness(payload, TEST_SECRET, { oddsVerificationService: service });
+
+  assert.deepEqual(decision, { kind: "ACCEPT" });
+  assert.equal(spreadCalls.length, 1);
+  assert.equal(spreadCalls[0].participant, "Arsenal");
+  assert.equal(spreadCalls[0].line, "-1.5");
+  assert.equal(h2hCalls.length, 0);
+  assert.equal(teamTotalCalls.length, 0);
+});
+
+// Regression: a token issued BEFORE this stage (no canonical fields at all,
+// every field undefined) must fall through to the existing, unmodified
+// legacy classification path — proving this fix is purely additive and
+// changes nothing for old tokens / non-TEAM_TOTAL callers that never set
+// these fields.
+test("verifyPreviewFreshness (Stage 5A) regression: a pre-existing token with no canonical fields at all falls through to the unchanged legacy classification path", async () => {
+  const payload = singlePayload({
+    sport: "Football",
+    event: "Real Madrid vs Barcelona",
+    outcome: "Real Madrid",
+    odds: 2.05,
+    acceptedOdds: 2.05,
+  });
+  assert.equal(payload.canonicalMarketType, undefined);
+
+  const decision = await verifyPreviewFreshness(payload, TEST_SECRET, {
+    verifyOddsFn: fakeVerifyOddsFn({ "Real Madrid vs Barcelona": verified(2.05, 2.05) }),
+  });
+
+  assert.deepEqual(decision, { kind: "ACCEPT" });
+});
+
+// Direct unit proof (not just the integration path above) that
+// reconstructParsedBetSlip itself threads the canonical fields through, for
+// both SINGLE and EXPRESS — this is the exact function the diagnostic
+// traced the original bug to.
+test("reconstructParsedBetSlip: SINGLE payload's canonical fields are threaded onto the reconstructed selection unchanged", () => {
+  const payload = singlePayload({
+    canonicalMarketType: "TEAM_TOTAL",
+    canonicalSelectionType: "OVER",
+    canonicalParticipant: "Интер",
+    canonicalLine: "1.5",
+  });
+
+  const slip = reconstructParsedBetSlip(payload);
+
+  assert.equal(slip.selections[0].canonicalMarketType, "TEAM_TOTAL");
+  assert.equal(slip.selections[0].canonicalSelectionType, "OVER");
+  assert.equal(slip.selections[0].canonicalParticipant, "Интер");
+});
+
+test("reconstructParsedBetSlip: EXPRESS payload's per-leg canonical fields are threaded onto each reconstructed selection unchanged", () => {
+  const payload = expressPayload({
+    selections: [
+      {
+        ...expressPayload().selections[0],
+        canonicalMarketType: "TEAM_TOTAL",
+        canonicalSelectionType: "UNDER",
+        canonicalParticipant: "Монца",
+        canonicalLine: "0.5",
+      },
+      expressPayload().selections[1],
+    ],
+  });
+
+  const slip = reconstructParsedBetSlip(payload);
+
+  assert.equal(slip.selections[0].canonicalMarketType, "TEAM_TOTAL");
+  assert.equal(slip.selections[0].canonicalSelectionType, "UNDER");
+  assert.equal(slip.selections[0].canonicalParticipant, "Монца");
+  assert.equal(slip.selections[1].canonicalMarketType, null);
 });

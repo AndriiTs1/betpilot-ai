@@ -24,7 +24,7 @@
 // classifying a market correctly and a provider being able to verify it
 // are two different questions; docs/ODDS_SUPPORT_MATRIX.md Section 5).
 
-import { normalizeLineString, type CanonicalEvent, type CanonicalLeague, type Sport } from "./domain";
+import { normalizeLineString, type CanonicalEvent, type CanonicalLeague, type MarketType, type SelectionType, type Sport } from "./domain";
 import type { VerifySelectionRequest } from "./oddsProvider";
 import type { VerificationResult } from "./verification";
 import type { OddsCheckResult } from "@/types/oddsSnapshot";
@@ -316,6 +316,77 @@ export function legacySelectionToCanonicalRequest(selection: LegacyVerifiableSel
       // embedded — reaches that same check as "line: undefined", which
       // validateCanonicalSelection's existing "TOTALS requires line" rule
       // already rejects; no new validation code needed here).
+      line: rawLine !== null ? (normalizeLineString(rawLine) ?? rawLine) : undefined,
+    },
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Individual Team Totals, Stage 5A — known-canonical request construction,  */
+/* skipping free-text (re-)classification entirely.                          */
+/* -------------------------------------------------------------------------- */
+
+// The confirm-time counterpart to LegacyVerifiableSelection above: instead of
+// a raw `selection` string (and optional `marketRawText` hint) that still
+// needs classifying, the caller already KNOWS the exact marketType/
+// selectionType/participant this selection resolved to — because it already
+// went through classification once, successfully, at preview time, and that
+// result was signed onto the preview token (canonicalMarketType/
+// canonicalSelectionType/canonicalParticipant — lib/betPreview/
+// previewToken.ts). The caller (lib/bets/buildBetSlipPreview.ts, via
+// BetSlipSelectionInput's own canonicalMarketType/canonicalSelectionType/
+// canonicalParticipant fields) is responsible for validating these against
+// lib/odds/domain.ts's own isMarketType/isSelectionType before constructing
+// this shape — this function trusts its input completely, the same way
+// mapSingleBetToCanonicalSelection.ts/mapExpressSelectionToCanonicalSelection.ts
+// already do for the identical already-canonical data at persistence time.
+export interface KnownCanonicalVerifiableSelection {
+  readonly sport: string;
+  readonly league?: string | null;
+  readonly event: string;
+  readonly marketType: MarketType;
+  readonly selectionType: SelectionType;
+  readonly participant?: string | null;
+  readonly line?: string | null;
+  readonly submittedOdds: number | null;
+}
+
+// Mirrors legacySelectionToCanonicalRequest's own event/league resolution
+// exactly (same legacySportToCanonical/legacyFootballLeagueFromSportString/
+// legacyEventToCanonical calls, same normalizeLineString line
+// canonicalization) — the ONLY thing this function does NOT do is call
+// classifyBettingSelectionTextWithMarketHint or isUsableEventText's <UNKNOWN>
+// recovery: marketType/selectionType/participant are already known, never
+// re-derived from text, and event text reaching this function has already
+// been successfully resolved once before (at the original preview that
+// produced the token this data came from), so the "<UNKNOWN>" placeholder
+// recovery has nothing left to do here.
+export function canonicalRequestFromKnownSelection(selection: KnownCanonicalVerifiableSelection): VerifySelectionRequest {
+  const sport = legacySportToCanonical(selection.sport);
+  const league = selection.league
+    ? { name: selection.league.trim() }
+    : legacyFootballLeagueFromSportString(selection.sport);
+  const event = legacyEventToCanonical(sport, selection.event, league);
+
+  const rawLine = selection.line ?? null;
+
+  return {
+    context: "PREVIEW",
+    selection: {
+      sport,
+      league,
+      event,
+      marketType: selection.marketType,
+      period: "FULL_GAME",
+      selectionType: selection.selectionType,
+      participant:
+        selection.participant !== null && selection.participant !== undefined && selection.participant.trim().length > 0
+          ? { name: selection.participant }
+          : undefined,
+      submittedOdds: selection.submittedOdds !== null ? String(selection.submittedOdds) : undefined,
+      // Same canonicalization/pass-through-on-malformed discipline as
+      // legacySelectionToCanonicalRequest's own line field — never a second,
+      // different rule.
       line: rawLine !== null ? (normalizeLineString(rawLine) ?? rawLine) : undefined,
     },
   };

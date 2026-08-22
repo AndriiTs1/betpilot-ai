@@ -4,6 +4,7 @@ import {
   legacySportToCanonical,
   legacyFootballLeagueFromSportString,
   legacySelectionToCanonicalRequest,
+  canonicalRequestFromKnownSelection,
   verificationResultToLegacyOddsCheck,
 } from "./legacyOddsBridge";
 import { createVerifiedResult, createOddsChangedResult, createFailedResult, createNotCheckedResult } from "./verification";
@@ -704,6 +705,194 @@ test("request mapping: DRAW ('X'/'Draw'/'Ничья') is completely unaffected b
     assert.equal(request.selection.marketType, "MONEYLINE_3WAY");
     assert.equal(request.selection.selectionType, "DRAW");
   }
+});
+
+/* -------------------------------------------------------------------------- */
+/* Individual Team Totals, Stage 5A — canonicalRequestFromKnownSelection      */
+/* -------------------------------------------------------------------------- */
+
+// Root-cause fixture: the exact production shape this stage exists to fix —
+// preview-time selection text named the player-stated team ("Интер"), but by
+// confirm time the event string has already been rewritten to the provider's
+// own team names (formatFullEventName's substitution: "Inter Milan — Monza").
+// canonicalRequestFromKnownSelection never re-classifies any of this text —
+// it only resolves sport/league/event exactly like legacySelectionToCanonicalRequest
+// does, and copies marketType/selectionType/participant/line straight through.
+
+test("canonicalRequestFromKnownSelection: RU TEAM_TOTAL OVER survives a provider-substituted event string — never re-derives MONEYLINE", () => {
+  const request = canonicalRequestFromKnownSelection({
+    sport: "Football",
+    event: "Inter Milan — Monza",
+    marketType: "TEAM_TOTAL",
+    selectionType: "OVER",
+    participant: "Интер",
+    line: "1.5",
+    submittedOdds: 1.27,
+  });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.selectionType, "OVER");
+  assert.equal(request.selection.participant?.name, "Интер");
+  assert.equal(request.selection.line, "1.5");
+  assert.equal(request.selection.event.participants[0]?.name, "Inter Milan");
+  assert.equal(request.selection.event.participants[1]?.name, "Monza");
+});
+
+test("canonicalRequestFromKnownSelection: RU TEAM_TOTAL UNDER — direction and exact line both preserved", () => {
+  const request = canonicalRequestFromKnownSelection({
+    sport: "Football",
+    event: "Inter Milan — Monza",
+    marketType: "TEAM_TOTAL",
+    selectionType: "UNDER",
+    participant: "Интер",
+    line: "2.5",
+    submittedOdds: 1.55,
+  });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.selectionType, "UNDER");
+  assert.equal(request.selection.line, "2.5");
+});
+
+test("canonicalRequestFromKnownSelection: away-participant TEAM_TOTAL is preserved (not defaulted to the home team)", () => {
+  const request = canonicalRequestFromKnownSelection({
+    sport: "Football",
+    event: "Inter Milan — Monza",
+    marketType: "TEAM_TOTAL",
+    selectionType: "OVER",
+    participant: "Monza",
+    line: "0.5",
+    submittedOdds: 3.1,
+  });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.participant?.name, "Monza");
+  assert.equal(request.selection.line, "0.5");
+});
+
+test("canonicalRequestFromKnownSelection: an English-spelling participant variant (no Cyrillic involved) is preserved identically", () => {
+  const request = canonicalRequestFromKnownSelection({
+    sport: "Football",
+    event: "Olympique de Marseille — Lyon",
+    marketType: "TEAM_TOTAL",
+    selectionType: "OVER",
+    participant: "Marseille",
+    line: "1.5",
+    submittedOdds: 1.4,
+  });
+
+  assert.equal(request.selection.marketType, "TEAM_TOTAL");
+  assert.equal(request.selection.participant?.name, "Marseille");
+  assert.equal(request.selection.line, "1.5");
+});
+
+for (const value of ["1", "1.5", "2", "2.5"]) {
+  test(`canonicalRequestFromKnownSelection: exact TEAM_TOTAL line ${value} survives with no rounding/nearest-line substitution`, () => {
+    const request = canonicalRequestFromKnownSelection({
+      sport: "Football",
+      event: "Inter Milan — Monza",
+      marketType: "TEAM_TOTAL",
+      selectionType: "OVER",
+      participant: "Интер",
+      line: value,
+      submittedOdds: 1.5,
+    });
+
+    assert.equal(request.selection.line, value);
+  });
+}
+
+test("canonicalRequestFromKnownSelection: TOTALS regression — marketType/selectionType/line pass through unchanged, no participant fabricated", () => {
+  const request = canonicalRequestFromKnownSelection({
+    sport: "Football",
+    event: "Arsenal — Chelsea",
+    marketType: "TOTALS",
+    selectionType: "OVER",
+    participant: null,
+    line: "2.5",
+    submittedOdds: 1.9,
+  });
+
+  assert.equal(request.selection.marketType, "TOTALS");
+  assert.equal(request.selection.selectionType, "OVER");
+  assert.equal(request.selection.participant, undefined);
+  assert.equal(request.selection.line, "2.5");
+});
+
+test("canonicalRequestFromKnownSelection: SPREAD regression — marketType/participant/signed line pass through unchanged", () => {
+  const request = canonicalRequestFromKnownSelection({
+    sport: "Football",
+    event: "Arsenal — Chelsea",
+    marketType: "SPREAD",
+    selectionType: "PARTICIPANT",
+    participant: "Arsenal",
+    line: "-1.5",
+    submittedOdds: 1.85,
+  });
+
+  assert.equal(request.selection.marketType, "SPREAD");
+  assert.equal(request.selection.participant?.name, "Arsenal");
+  assert.equal(request.selection.line, "-1.5");
+});
+
+test("canonicalRequestFromKnownSelection: MONEYLINE_2WAY PARTICIPANT regression — no line concept, none fabricated", () => {
+  const request = canonicalRequestFromKnownSelection({
+    sport: "Tennis",
+    event: "Alcaraz — Sinner",
+    marketType: "MONEYLINE_2WAY",
+    selectionType: "PARTICIPANT",
+    participant: "Alcaraz",
+    line: null,
+    submittedOdds: 1.7,
+  });
+
+  assert.equal(request.selection.marketType, "MONEYLINE_2WAY");
+  assert.equal(request.selection.participant?.name, "Alcaraz");
+  assert.equal(request.selection.line, undefined);
+});
+
+test("canonicalRequestFromKnownSelection: MONEYLINE_3WAY DRAW regression — no participant fabricated", () => {
+  const request = canonicalRequestFromKnownSelection({
+    sport: "Football",
+    event: "Arsenal — Chelsea",
+    marketType: "MONEYLINE_3WAY",
+    selectionType: "DRAW",
+    participant: null,
+    line: null,
+    submittedOdds: 3.4,
+  });
+
+  assert.equal(request.selection.marketType, "MONEYLINE_3WAY");
+  assert.equal(request.selection.selectionType, "DRAW");
+  assert.equal(request.selection.participant, undefined);
+});
+
+test("canonicalRequestFromKnownSelection: submittedOdds:null is omitted (undefined), never serialized as the literal string 'null'", () => {
+  const request = canonicalRequestFromKnownSelection({
+    sport: "Football",
+    event: "Inter Milan — Monza",
+    marketType: "TEAM_TOTAL",
+    selectionType: "OVER",
+    participant: "Интер",
+    line: "1.5",
+    submittedOdds: null,
+  });
+
+  assert.equal(request.selection.submittedOdds, undefined);
+});
+
+test("canonicalRequestFromKnownSelection: a '+1.5'-style line is canonicalized the same way as legacySelectionToCanonicalRequest's own line handling", () => {
+  const request = canonicalRequestFromKnownSelection({
+    sport: "Football",
+    event: "Inter Milan — Monza",
+    marketType: "TEAM_TOTAL",
+    selectionType: "OVER",
+    participant: "Интер",
+    line: "+1.5",
+    submittedOdds: 1.27,
+  });
+
+  assert.equal(request.selection.line, "1.5");
 });
 
 test("request mapping: 'Arsenal Over 1.5' with NO matching event participant (generic 'A vs B') still falls back to PARTICIPANT — team-total reattribution only ever fires for a name the event actually knows", () => {

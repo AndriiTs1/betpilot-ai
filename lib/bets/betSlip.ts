@@ -76,6 +76,29 @@ export interface BetSlipSelectionInput {
   // unreliable (the provider's home/away order doesn't have to match the
   // order text lists them in).
   pendingMarketReconciliation?: PendingMarketReconciliation | null;
+  // Individual Team Totals, Stage 5A — already-established canonical market
+  // semantics, set ONLY by confirm-time freshness re-verification
+  // (lib/bets/verifyPreviewFreshness.ts's reconstructParsedBetSlip, sourced
+  // from the signed preview token's own canonicalMarketType/
+  // canonicalSelectionType/canonicalParticipant — never fabricated). When
+  // present and structurally valid, lib/bets/buildBetSlipPreview.ts builds
+  // the re-verification request DIRECTLY from these fields instead of
+  // re-deriving marketType/selectionType/participant from `selection`'s free
+  // text a second time via lib/odds/shorthandClassifier.ts. This is what
+  // this stage's own root-cause fix depends on: re-classifying free text is
+  // NOT guaranteed idempotent between preview and confirm — the event string
+  // a shorthand-glued selection (e.g. TEAM_TOTAL's "<Team> ТБ N") depends on
+  // for participant-prefix matching may have since been rewritten to the
+  // provider's own team names (see this stage's own diagnostic trace:
+  // "Интер" no longer prefix-matches "Inter Milan"), silently reclassifying
+  // a correctly-verified TEAM_TOTAL selection as a fabricated
+  // MONEYLINE_2WAY/PARTICIPANT one. Absent (undefined) for every OTHER
+  // caller (the original AI-parsed player text at PREVIEW time, which has no
+  // canonical data yet to prefer) — completely inert there, zero behavior
+  // change for every existing caller/fixture that never sets these.
+  readonly canonicalMarketType?: string | null;
+  readonly canonicalSelectionType?: string | null;
+  readonly canonicalParticipant?: string | null;
 }
 
 // SCREENSHOT QA-1.6 — see BetSlipSelectionInput.pendingMarketReconciliation
